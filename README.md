@@ -10,31 +10,29 @@ The skill performs **70+ automated checks** across all required and optional fil
 
 ## Supported Documents
 
-| Document | Required | Description |
-|----------|----------|-------------|
+| Document | Required at filing? | Description |
+|----------|---------------------|-------------|
 | Specification | Yes | The patent application text including claims |
 | Drawings | Yes | Figures and illustrations |
 | Application Data Sheet (ADS) | Yes | Bibliographic information |
-| Declaration | Yes | Inventor oath/declaration |
+| Declaration | **Eligible for missing-parts** | Inventor oath/declaration. Required for the application to be examined, but the filing can be submitted without it under 37 CFR §1.53(f) — the USPTO will issue a Notice to File Missing Parts, and the declaration must then be filed within 2 months along with the §1.16(f) surcharge. The QC tool detects this case and asks whether the omission is intentional rather than failing the filing outright. |
 | Assignment | No | Transfer of rights to assignee |
 | Power of Attorney | No | Authorization for practitioners |
 
 ## Installation
 
-### Prerequisites
+**You don't need to install anything by hand.** Just install the skill (drop it in `~/.claude/skills/patent-filing-qc/` or symlink it from a project) and run it. The first time you ask Claude to QC a filing, Claude will detect any missing dependencies, install them automatically (asking your permission once per package), and proceed. The reference below is provided for users who prefer to set things up themselves.
 
-```bash
-pip install PyPDF2 fpdf2 --break-system-packages
-```
+### What gets installed (and why)
 
-### Optional: OCR Support
+| Package | When needed | Install command |
+|---------|-------------|-----------------|
+| **PyPDF2** | Always — required to read any PDF and to extract XFA form data | `pip install PyPDF2` |
+| **pandoc + basictex** *(preferred PDF backend)* | When you want PDF output of the report | `brew install pandoc basictex` (macOS) |
+| **weasyprint + markdown** *(fallback PDF backend)* | When you want PDF output but don't want a LaTeX install | `pip install weasyprint markdown` |
+| **pytesseract + pdf2image** *(optional OCR)* | Only for scanned/image-based filing documents that aren't text-searchable. **Not needed for the USPTO XFA-based ADS** — that's handled by the built-in XFA reader. | `pip install pytesseract pdf2image` + `brew install tesseract poppler` |
 
-For image-based PDFs (scanned documents):
-
-```bash
-pip install pytesseract pdf2image --break-system-packages
-brew install tesseract poppler
-```
+If you skip the PDF backend, the script will still emit the Markdown report — only the `.pdf` won't be generated.
 
 ### Recommended: Reduce Permission Prompts in Claude Code
 
@@ -46,9 +44,11 @@ By default Claude Code asks for permission on every Bash call, every PDF read, a
     "allow": [
       "Bash(python3 *qc_patent_filing.py*)",
       "Bash(pip install PyPDF2*)",
-      "Bash(pip install fpdf2*)",
+      "Bash(pip install weasyprint*)",
+      "Bash(pip install markdown*)",
       "Bash(pip install pytesseract*)",
       "Bash(pip install pdf2image*)",
+      "Bash(pandoc *)",
       "Bash(pdftotext *)",
       "Bash(pdfinfo *)",
       "Read(*.pdf)",

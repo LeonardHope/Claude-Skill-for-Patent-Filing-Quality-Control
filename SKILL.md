@@ -26,7 +26,7 @@ Confirm the folder path containing all filing documents. The folder should typic
 - Specification PDF (required)
 - Drawings PDF (required)
 - Application Data Sheet / ADS (required)
-- Declaration (required)
+- Declaration (eligible for missing-parts under 37 CFR §1.53(f) — see Step 8)
 - Assignment (optional but common)
 - Power of Attorney (optional)
 - `inventors.txt`, `inventors.json`, or `*.eml` (optional — authoritative inventor list)
@@ -37,13 +37,19 @@ The documents may have various naming conventions. The QC script will automatica
 
 ### Step 2: Install Dependencies
 
-Before running QC for the first time, ensure required dependencies are installed:
+The user does not need to install anything by hand. If the script fails or warns about a missing dependency, you should install it for them automatically (asking permission once when prompted) and re-run.
 
-```bash
-pip install PyPDF2 fpdf2 --break-system-packages
-```
+Required:
+- **PyPDF2** — `pip install PyPDF2 --break-system-packages`. If you see `ModuleNotFoundError: No module named 'PyPDF2'`, install it before re-running.
 
-The `fpdf2` library is used for PDF report generation (pure Python, no system dependencies required).
+For PDF report output (the script always emits Markdown unconditionally; the `.pdf` requires one of these backends):
+- **pandoc + basictex** (preferred): `brew install pandoc basictex`
+- **weasyprint** (fallback): `pip install weasyprint markdown --break-system-packages`
+
+If the script prints `⚠️ PDF generation failed. Install pandoc or weasyprint for PDF output.`, install one of those backends (default to weasyprint since it's the smaller install) and re-run the script. Do **not** synthesize a PDF yourself — the script's PDF output is canonical, see Step 4.
+
+Optional (only for image-based / scanned PDFs that aren't text-searchable; **not** needed for the USPTO XFA-based ADS):
+- `pip install pytesseract pdf2image --break-system-packages` + `brew install tesseract poppler`
 
 ### Step 3: Run the QC Script
 
