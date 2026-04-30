@@ -36,6 +36,30 @@ pip install pytesseract pdf2image --break-system-packages
 brew install tesseract poppler
 ```
 
+### Recommended: Reduce Permission Prompts in Claude Code
+
+By default Claude Code asks for permission on every Bash call, every PDF read, and every report write — running this skill on a real filing can trigger 50–100+ permission popups. To eliminate that without using `--dangerously-skip-permissions`, add the following to your `~/.claude/settings.json` (or your project's `.claude/settings.json`):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 *qc_patent_filing.py*)",
+      "Bash(pip install PyPDF2*)",
+      "Bash(pip install fpdf2*)",
+      "Bash(pip install pytesseract*)",
+      "Bash(pip install pdf2image*)",
+      "Bash(pdftotext *)",
+      "Bash(pdfinfo *)",
+      "Read(*.pdf)",
+      "Write(*Patent_Filing_QC_Report*)"
+    ]
+  }
+}
+```
+
+These rules cover the script invocation, dependency installs, the PDF reads the script and skill perform, and the two report files written to the filing folder. After adding them, a typical run will produce only a handful of permission prompts (or none, if everything is allowlisted).
+
 ## Usage
 
 ### Basic Usage
@@ -50,6 +74,27 @@ python3 scripts/qc_patent_filing.py /path/to/filing/documents
 python3 scripts/qc_patent_filing.py /path/to/filing/documents --output-dir /path/to/reports
 ```
 
+### Optional: Authoritative Inventor List
+
+If you drop any of these files into the filing folder, the script will use them as the canonical source of inventor names and run an additional cross-check (Check 71) against ADS / declaration / assignment / drawings:
+
+| File | Format |
+|------|--------|
+| `inventors.json` | JSON array of `{"first", "middle", "last", "suffix"}` objects, or array of full-name strings |
+| `inventors.txt`  | One inventor per line — `First Middle Last [Suffix]` or `Last, First M., Suffix` |
+| `*.eml`          | Email file(s); names are extracted from the body on a best-effort basis |
+
+This is useful for catching the case where a paralegal confirmed an inventor name in an email and the ADS form was filled in with a typo or missing middle name / suffix. Diacritic differences (e.g., `José` vs `Jose`, `Müller` vs `Muller`) are matched as equivalent so they don't cause false-positive failures.
+
+Example `inventors.txt`:
+
+```
+Dharani Bharathi Thirupathi
+Veerajothi Ramasamy
+Sriram Santhanam
+Smith, John P., Jr.
+```
+
 ### Output
 
 The script generates two report files:
@@ -58,13 +103,13 @@ The script generates two report files:
 
 ## Quality Control Checks
 
-### 1. Cross-Document Consistency (8 checks)
+### 1. Cross-Document Consistency (8 checks + 1 conditional)
 
 Ensures information matches across all documents:
 
 | Check | Description |
 |-------|-------------|
-| Inventor Names | Names match exactly across ADS, declaration, assignment, and drawings |
+| Inventor Names | Names match exactly across ADS, declaration, assignment, and drawings. SKIPPED entries explicitly list which sources were excluded (missing, unreadable, or no names extractable). |
 | Application Title | Title is consistent across all documents |
 | Attorney Docket Number | Docket number matches across all documents |
 | Correspondence Address | Address aligns between ADS and other documents |
@@ -72,6 +117,7 @@ Ensures information matches across all documents:
 | Filing Date Logic | Dates are logically consistent (no future dates, proper sequence) |
 | Inventor Count | Number of inventors matches across documents |
 | Citizenship/Residency | Inventor citizenship information is consistent |
+| **Inventor Names vs. Authoritative Source** *(conditional)* | If `inventors.txt`, `inventors.json`, or `*.eml` is present, all documents are cross-checked against that list. Diacritic-tolerant matching. |
 
 ### 2. Document Completeness (4 checks)
 
@@ -83,6 +129,13 @@ Verifies all required components are present:
 | ADS Required Fields | All mandatory ADS fields are completed |
 | Declaration Signatures | All inventors have signed the declaration |
 | Assignment Signatures | All assignors have signed (if assignment included) |
+
+**Missing-Parts Filings (37 CFR §1.53(f)):** If the Declaration is the only thing missing, the tool flags it as a CRITICAL with `ACTION REQUIRED: confirm whether intentional`. Claude will ask you whether you're filing without the declaration on purpose. If yes, the issue is downgraded to a warning and you're reminded that:
+
+- A **§1.16(f) surcharge fee** is due at or after filing
+- The missing parts must be filed within **2 months** of the USPTO's Notice to File Missing Parts to avoid abandonment
+
+Missing Specification, Drawings, or ADS are *not* eligible for missing-parts treatment and remain CRITICAL.
 
 ### 3. Specification-Specific (15 checks)
 
@@ -118,7 +171,7 @@ Validates the drawings/figures:
 | Black and White Compliance | Drawings are black and white (or color petition noted) |
 | Legibility | Text and lines are clear and readable |
 
-### 5. ADS-Specific (5 checks)
+### 5. ADS-Specific (5 + 2 conditional checks)
 
 Validates the Application Data Sheet:
 
@@ -129,6 +182,10 @@ Validates the Application Data Sheet:
 | Entity Status | Small/micro/large entity status is specified |
 | Correspondence Address | Complete correspondence address provided |
 | Attorney/Agent Registration | Valid registration numbers for practitioners |
+| **Inventor Citizenship Populated** *(XFA only)* | All inventors have a citizenship dropdown populated. If blank for assignee-filers under 37 CFR 1.46, the warning notes that some practitioners intentionally leave this blank and capture citizenship in the Declaration — verify intent. |
+| **Attorney vs. Correspondence Customer Number** *(XFA only)* | The two customer-number fields in the ADS (correspondence and attorney/agent) usually match. Warns on mismatch. |
+
+When the ADS is read via XFA, the report also includes an **"ADS Data Summary (Extracted from XFA)"** table near the end showing all extracted fields (title, docket #, entity status, both customer numbers, assignee + address, drawing sheet count, representative figure, domestic continuity, foreign priority, non-publication request, AIA transition statement, signer, registration number, signature date, form pages) plus an inventor table with name / residency / city / country / citizenship.
 
 ### 6. Declaration-Specific (4 checks)
 
@@ -254,6 +311,16 @@ The tool recognizes common patent drafting conventions (e.g., sentences beginnin
 
 ### Form Field Reading
 When reading fillable forms (like ADS), form field boundaries can affect text extraction. The tool cross-references multiple documents to avoid false positives.
+
+### XFA-Based ADS Forms (USPTO PTO/AIA/14)
+The USPTO web-fillable ADS is an XFA (Adobe LiveCycle) form. PyPDF2 and most PDF tools see only a "Please wait..." placeholder page when opening these forms — the actual filled-in data is stored in an embedded XML stream. **This script reads that XML stream directly**, so:
+
+- ✅ No Adobe Acrobat Pro flattening is required
+- ✅ No "Print to PDF" workaround needed
+- ✅ Inventor first / middle / last names and the explicit suffix field (Jr., III, etc.) are read as separate structured values — far more reliable than regex extraction from OCR'd text, especially for foreign names with diacritics
+- ✅ Works on any platform (no Adobe software needed at all)
+
+When the script detects an XFA-based ADS, the console will show `✅ XFA extraction successful` and the cross-document checks will use the structured XFA data preferentially.
 
 ### What This Tool Cannot Do
 - Replace human judgment on legal/technical issues

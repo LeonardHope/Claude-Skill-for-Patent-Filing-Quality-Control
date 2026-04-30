@@ -9,6 +9,8 @@ Generates both Markdown and PDF reports.
 import os
 import re
 import sys
+import unicodedata
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
@@ -78,6 +80,10 @@ class PatentFilingQC:
         self.assignment_text = ""
         self.poa_text = ""
         self.drawings_text = ""
+        self.ads_data: Optional[Dict] = None
+        self.ads_is_xfa = False
+        self.authoritative_inventors: List[Dict] = []
+        self.authoritative_source: Optional[str] = None
         
     def extract_pdf_text(self, pdf_path: Path, doc_type: str = "Document") -> str:
         """Extract text from a PDF file, with OCR fallback for image-based PDFs"""
@@ -134,6 +140,370 @@ class PatentFilingQC:
         print(f"       2. Use Adobe Acrobat's 'Recognize Text' (OCR) feature")
         print(f"       3. Re-export from the source application as a text-based PDF")
         print()
+
+    def _is_xfa_form(self, pdf_path: Path) -> bool:
+        """Check whether a PDF contains an XFA form (e.g., USPTO web-fillable ADS)."""
+        try:
+            with open(pdf_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                # IndirectObjects auto-resolve under [] but not .get(), so use [].
+                root = reader.trailer['/Root']
+                if hasattr(root, 'get_object'):
+                    root = root.get_object()
+                if '/AcroForm' not in root:
+                    return False
+                acroform = root['/AcroForm']
+                if hasattr(acroform, 'get_object'):
+                    acroform = acroform.get_object()
+                return '/XFA' in acroform
+        except Exception:
+            return False
+
+    def _extract_xfa_datasets_xml(self, pdf_path: Path) -> Optional[str]:
+        """Pull the 'datasets' XML stream out of an XFA form. Returns the XML string or None."""
+        try:
+            with open(pdf_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                acroform = reader.trailer['/Root']['/AcroForm']
+                if hasattr(acroform, 'get_object'):
+                    acroform = acroform.get_object()
+                xfa = acroform.get('/XFA')
+                if xfa is None:
+                    return None
+                if hasattr(xfa, 'get_object'):
+                    xfa = xfa.get_object()
+                # XFA can be a single stream or an array of [name, stream, name, stream, ...]
+                items = list(xfa)
+                for i in range(0, len(items), 2):
+                    name = items[i]
+                    if i + 1 >= len(items):
+                        break
+                    if str(name) == 'datasets':
+                        stream = items[i + 1]
+                        if hasattr(stream, 'get_object'):
+                            stream = stream.get_object()
+                        return stream.get_data().decode('utf-8', errors='replace')
+                return None
+        except Exception as e:
+            print(f"  ⚠️  XFA datasets extraction failed: {e}")
+            return None
+
+    def _parse_ads_xfa(self, xml_str: str) -> Optional[Dict]:
+        """Parse the USPTO ADS XFA datasets XML into a structured dict."""
+        try:
+            root = ET.fromstring(xml_str)
+        except ET.ParseError as e:
+            print(f"  ⚠️  XFA XML parse failed: {e}")
+            return None
+
+        # Strip namespace from tag names to make traversal less painful.
+        def localname(elem):
+            tag = elem.tag
+            return tag.split('}', 1)[1] if '}' in tag else tag
+
+        def find_first(elem, name):
+            for child in elem.iter():
+                if localname(child) == name:
+                    return child
+            return None
+
+        def text_of(elem, name):
+            child = find_first(elem, name) if elem is not None else None
+            if child is None or child.text is None:
+                return ""
+            return child.text.strip()
+
+        # Walk to <us-request>
+        us_request = find_first(root, 'us-request')
+        if us_request is None:
+            return None
+
+        data: Dict = {
+            'inventors': [],
+            'title': text_of(us_request, 'invention-title'),
+            'docket_number': text_of(us_request, 'attorney-docket-number'),
+            'customer_number': "",
+            'attorney_customer_number': "",
+            'form_pages': text_of(us_request, 'numofpages'),
+            'small_entity': None,
+            'application_type': "",
+            'submission_type': "",
+            'drawing_sheets': "",
+            'representative_figure': "",
+            'non_publication': None,
+            'aia_transition': None,
+            'assignee_org': "",
+            'assignee_address': {},
+            'signer': {},
+            'domestic_continuity_entries': [],
+            'foreign_priority_entries': [],
+        }
+
+        # Inventors live in repeated <sfApplicantInformation> blocks under ContentArea1
+        for app_info in us_request.iter():
+            if localname(app_info) != 'sfApplicantInformation':
+                continue
+            name_block = None
+            for child in app_info:
+                if localname(child) == 'sfApplicantName':
+                    name_block = child
+                    break
+            if name_block is None:
+                continue
+            inventor = {
+                'prefix': text_of(name_block, 'prefix'),
+                'first': text_of(name_block, 'firstName'),
+                'middle': text_of(name_block, 'middleName'),
+                'last': text_of(name_block, 'lastName'),
+                'suffix': text_of(name_block, 'suffix'),
+                'citizenship': "",
+                'residency': "",
+                'res_city': "",
+                'res_state': "",
+                'res_country': "",
+                'mail_address1': "",
+                'mail_address2': "",
+                'mail_city': "",
+                'mail_state': "",
+                'mail_postcode': "",
+                'mail_country': "",
+            }
+            # Citizenship dropdown (sfCitz/CitizedDropDown). Often blank when the
+            # applicant is filing as an assignee under 37 CFR 1.46.
+            citz_block = find_first(app_info, 'sfCitz')
+            if citz_block is not None:
+                inventor['citizenship'] = text_of(citz_block, 'CitizedDropDown')
+            # Residency
+            res_check = find_first(app_info, 'sfAppResChk')
+            if res_check is not None:
+                inventor['residency'] = text_of(res_check, 'ResidencyRadio')
+                us_res = find_first(res_check, 'sfUSres')
+                non_us_res = find_first(res_check, 'sfNonUSRes')
+                if inventor['residency'] == 'us-residency' and us_res is not None:
+                    inventor['res_city'] = text_of(us_res, 'rsCityTxt')
+                    inventor['res_state'] = text_of(us_res, 'rsStTxt')
+                    inventor['res_country'] = text_of(us_res, 'rsCtryTxt')
+                elif non_us_res is not None:
+                    inventor['res_city'] = text_of(non_us_res, 'nonresCity')
+                    inventor['res_country'] = text_of(non_us_res, 'nonresCtryList')
+            # Mailing address
+            mail = find_first(app_info, 'sfApplicantMail')
+            if mail is not None:
+                inventor['mail_address1'] = text_of(mail, 'address1')
+                inventor['mail_address2'] = text_of(mail, 'address2')
+                inventor['mail_city'] = text_of(mail, 'city')
+                inventor['mail_state'] = text_of(mail, 'state')
+                inventor['mail_postcode'] = text_of(mail, 'postcode')
+                inventor['mail_country'] = text_of(mail, 'mailCountry')
+
+            # Skip empty placeholder blocks
+            if inventor['first'] or inventor['last']:
+                data['inventors'].append(inventor)
+
+        # Correspondence customer number (sfCorrCustNo)
+        cust_no = find_first(us_request, 'sfCorrCustNo')
+        if cust_no is not None:
+            data['customer_number'] = text_of(cust_no, 'customerNumber')
+
+        # Attorney/agent customer number (sfAttorny → sfAttornyFlow → sfcustomerNumber).
+        # This is a separate field from the correspondence customer number, and
+        # typically should match it. Mismatch is a warning sign.
+        attorny_block = find_first(us_request, 'sfAttorny')
+        if attorny_block is not None:
+            atty_cust = find_first(attorny_block, 'sfcustomerNumber')
+            if atty_cust is not None:
+                data['attorney_customer_number'] = text_of(atty_cust, 'customerNumberTxt')
+
+        # Fall back to attorney customer number if no correspondence one was set
+        if not data['customer_number'] and data['attorney_customer_number']:
+            data['customer_number'] = data['attorney_customer_number']
+
+        # Domestic continuity entries — check for any populated parent application info
+        for cont in us_request.iter():
+            if localname(cont) != 'sfDomesticContinuity':
+                continue
+            for info in cont.iter():
+                if localname(info) != 'sfDomesContInfo':
+                    continue
+                app_num = text_of(info, 'domappNumber')
+                cont_type = text_of(info, 'domesContList')
+                prior_num = text_of(info, 'domPriorAppNum')
+                date_field = text_of(info, 'DateTimeField1')
+                if any([app_num, prior_num, cont_type, date_field]):
+                    data['domestic_continuity_entries'].append({
+                        'application_number': app_num,
+                        'continuation_type': cont_type,
+                        'prior_application_number': prior_num,
+                        'date': date_field,
+                    })
+
+        # Foreign priority entries
+        for fpr in us_request.iter():
+            if localname(fpr) != 'sfForeignPriorityInfo':
+                continue
+            app_num = text_of(fpr, 'frprAppNum')
+            country = text_of(fpr, 'frprctryList')
+            date_field = text_of(fpr, 'frprParentDate')
+            access_code = text_of(fpr, 'accessCode')
+            if any([app_num, country, date_field, access_code]):
+                data['foreign_priority_entries'].append({
+                    'application_number': app_num,
+                    'country': country,
+                    'priority_date': date_field,
+                    'access_code': access_code,
+                })
+
+        # Application info
+        app_pos = find_first(us_request, 'sfAppPos')
+        if app_pos is not None:
+            small = text_of(app_pos, 'chkSmallEntity')
+            data['small_entity'] = (small == '1') if small in ('0', '1') else None
+            data['application_type'] = text_of(app_pos, 'application_type')
+            data['submission_type'] = text_of(app_pos, 'us_submission_type')
+            data['drawing_sheets'] = text_of(app_pos, 'us-total_number_of_drawing-sheets')
+            data['representative_figure'] = text_of(app_pos, 'us-suggested_representative_figure')
+
+        # Publication / AIA flags
+        pub = find_first(us_request, 'sfPub')
+        if pub is not None:
+            non_pub = text_of(pub, 'nonPublication')
+            data['non_publication'] = (non_pub == '1') if non_pub in ('0', '1') else None
+        aia = find_first(us_request, 'AIATransition')
+        if aia is not None:
+            aia_check = text_of(aia, 'AIACheck')
+            data['aia_transition'] = (aia_check == '1') if aia_check in ('0', '1') else None
+
+        # Assignee
+        assignee_info = find_first(us_request, 'sfAssigneeInformation')
+        if assignee_info is not None:
+            data['assignee_org'] = text_of(assignee_info, 'orgName')
+            addr = find_first(assignee_info, 'sfAssigneeAddress')
+            if addr is not None:
+                data['assignee_address'] = {
+                    'address1': text_of(addr, 'address-1'),
+                    'address2': text_of(addr, 'address-2'),
+                    'city': text_of(addr, 'city'),
+                    'state': text_of(addr, 'state'),
+                    'postcode': text_of(addr, 'postcode'),
+                    'country': text_of(addr, 'txtCorrCtry'),
+                }
+
+        # Signer
+        signature = find_first(us_request, 'sfSignature')
+        if signature is not None:
+            sig = find_first(signature, 'sfSig')
+            if sig is not None:
+                data['signer'] = {
+                    'first_name': text_of(sig, 'first-name'),
+                    'last_name': text_of(sig, 'last-name'),
+                    'registration_number': text_of(sig, 'registration-number'),
+                    'signature': text_of(sig, 'signature'),
+                    'date': text_of(sig, 'date'),
+                }
+
+        return data
+
+    def _synthesize_ads_text_from_xfa(self, data: Dict) -> str:
+        """Build a plain-text representation of XFA-extracted ADS data so the
+        existing regex-based extractors and checks find what they expect."""
+        lines = []
+        if data.get('title'):
+            # Use the pipe separator that the real ADS form uses, so the existing
+            # regex extractor in extract_title() works as a fallback.
+            lines.append(f"Title of Invention | {data['title']}")
+        if data.get('docket_number'):
+            lines.append(f"Attorney Docket Number: {data['docket_number']}")
+        if data.get('customer_number'):
+            lines.append(f"Customer Number: {data['customer_number']}")
+        if data.get('application_type'):
+            lines.append(f"Application Type: {data['application_type']}")
+        if data.get('submission_type'):
+            lines.append(f"Submission Type: {data['submission_type']}")
+        if data.get('small_entity') is True:
+            lines.append("Entity Status: Small Entity")
+        elif data.get('small_entity') is False:
+            lines.append("Entity Status: Large/Regular (small entity not claimed)")
+        if data.get('non_publication') is True:
+            lines.append("Non-Publication Request: Yes")
+        if data.get('aia_transition') is True:
+            lines.append("AIA Transition Statement: Yes")
+        if data.get('drawing_sheets'):
+            lines.append(f"Total Drawing Sheets: {data['drawing_sheets']}")
+
+        # Inventors — emit in the "Suffix\nFirst Middle LAST" pattern the
+        # existing extract_inventors() regex looks for, so cross-doc checks work.
+        # Also include "Inventor N" labels and residency tokens that other
+        # ADS-specific checks expect.
+        lines.append("")
+        lines.append("Inventor Information:")
+        for idx, inv in enumerate(data.get('inventors', []), start=1):
+            given = ' '.join(p for p in [inv.get('first', ''), inv.get('middle', '')] if p)
+            last = (inv.get('last') or '').upper()
+            full_line = f"{given} {last}".strip()
+            if inv.get('suffix'):
+                full_line = f"{full_line} {inv['suffix']}".strip()
+            lines.append(f"Inventor {idx}")
+            lines.append("Suffix")
+            lines.append(full_line)
+            if inv.get('residency') == 'us-residency':
+                lines.append("US Residency")
+            elif inv.get('residency') == 'non-us-residency':
+                lines.append("non-US Residency")
+            if inv.get('mail_address1'):
+                lines.append(f"Address 1 {inv['mail_address1']}")
+            if inv.get('mail_address2'):
+                lines.append(f"Address 2 {inv['mail_address2']}")
+            city_state = ', '.join(p for p in [inv.get('mail_city', ''), inv.get('mail_state', '')] if p)
+            if city_state or inv.get('mail_postcode'):
+                lines.append(f"{city_state} Postal Code {inv.get('mail_postcode', '')} {inv.get('mail_country', '')}".strip())
+            lines.append("")
+
+        # Correspondence section keyword for Check 10 (ADS required fields)
+        if data.get('customer_number'):
+            lines.append("Correspondence Information")
+            lines.append(f"Customer Number: {data['customer_number']}")
+            lines.append("")
+
+        # Correspondence / assignee / signer info — useful for downstream checks
+        if data.get('assignee_org'):
+            lines.append(f"Assignee: {data['assignee_org']}")
+            addr = data.get('assignee_address') or {}
+            for key in ('address1', 'address2'):
+                if addr.get(key):
+                    lines.append(addr[key])
+            ac = ', '.join(p for p in [addr.get('city', ''), addr.get('state', '')] if p)
+            if ac:
+                lines.append(f"{ac} {addr.get('postcode', '')} {addr.get('country', '')}".strip())
+
+        signer = data.get('signer') or {}
+        if signer.get('signature'):
+            lines.append("")
+            lines.append(f"Signature: {signer.get('signature', '')}")
+            lines.append(f"Name: {signer.get('first_name', '')} {signer.get('last_name', '')}".strip())
+            if signer.get('registration_number'):
+                lines.append(f"Registration Number: {signer['registration_number']}")
+            if signer.get('date'):
+                lines.append(f"Date: {signer['date']}")
+
+        return "\n".join(lines)
+
+    def _extract_ads_text(self, ads_path: Path) -> str:
+        """ADS-aware text extraction: uses XFA datasets stream if the form is XFA,
+        falls back to standard PDF text extraction (and OCR) otherwise."""
+        if self._is_xfa_form(ads_path):
+            self.ads_is_xfa = True
+            print(f"  ℹ️  ADS appears to be an XFA (web-fillable) form — reading XFA datasets stream")
+            xml_str = self._extract_xfa_datasets_xml(ads_path)
+            if xml_str:
+                data = self._parse_ads_xfa(xml_str)
+                if data and (data.get('inventors') or data.get('title') or data.get('docket_number')):
+                    self.ads_data = data
+                    print(f"  ✅ XFA extraction successful: {len(data.get('inventors', []))} inventor(s), title='{data.get('title','')[:60]}'")
+                    return self._synthesize_ads_text_from_xfa(data)
+                print(f"  ⚠️  XFA datasets parsed but no usable fields found; falling back to OCR")
+            else:
+                print(f"  ⚠️  Could not extract XFA datasets stream; falling back to OCR")
+        return self.extract_pdf_text(ads_path, 'ADS')
     
     def find_document(self, patterns: List[str], doc_type: str) -> Optional[Path]:
         """Find a document matching any of the given patterns"""
@@ -169,7 +539,7 @@ class PatentFilingQC:
             'ADS'
         )
         if ads_path:
-            self.ads_text = self.extract_pdf_text(ads_path, 'ADS')
+            self.ads_text = self._extract_ads_text(ads_path)
 
         # Find declaration (including combined Dec-Assignment files)
         decl_path = self.find_document(
@@ -194,6 +564,9 @@ class PatentFilingQC:
         )
         if poa_path:
             self.poa_text = self.extract_pdf_text(poa_path, 'Power of Attorney')
+
+        # Optional: authoritative inventor list (inventors.json/txt or *.eml)
+        self._load_authoritative_inventors()
 
         # Check for required documents that couldn't be read
         self._check_required_documents_readable()
@@ -230,12 +603,20 @@ class PatentFilingQC:
 
         # Pattern 1: ADS OCR format - names after "Suffix" field
         # Matches: "Suffix\nFirstName LASTNAME" or "Suffix\nFirst Middle LASTNAME"
-        suffix_pattern = r'Suffix\s*\n?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,})\s*\n'
+        # Optional trailing suffix token (Jr., Sr., II, III, IV).
+        suffix_pattern = (
+            r'Suffix\s*\n?\s*'
+            r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,}'
+            r'(?:\s+(?:Jr\.?|Sr\.?|II|III|IV))?)\s*\n'
+        )
         matches = re.findall(suffix_pattern, text)
         for match in matches:
             name = ' '.join(match.split())
             words = name.split()
-            if 2 <= len(words) <= 4 and words[-1].isupper() and len(words[-1]) >= 2:
+            # words[-1] may be a suffix; identify the last all-caps token (the surname)
+            last_caps_idx = max((i for i, w in enumerate(words)
+                                 if w.isupper() and len(w) >= 2), default=-1)
+            if 2 <= len(words) <= 5 and last_caps_idx >= 0:
                 inventors.append(name)
 
         # Pattern 2: Declaration/Assignment format - names after "Assignor(s):"
@@ -337,6 +718,210 @@ class PatentFilingQC:
         """Normalize a name for comparison"""
         # Remove extra whitespace, convert to uppercase
         return re.sub(r'\s+', ' ', name.strip().upper())
+
+    def _strip_diacritics(self, s: str) -> str:
+        """Remove combining marks so 'José' compares equal to 'Jose'."""
+        if not s:
+            return s
+        nfkd = unicodedata.normalize('NFKD', s)
+        return ''.join(c for c in nfkd if not unicodedata.combining(c))
+
+    def _normalize_for_compare(self, name: str) -> str:
+        """Normalize a name for diacritic-tolerant cross-document comparison."""
+        if not name:
+            return ""
+        s = self._strip_diacritics(name)
+        s = re.sub(r'[\.,]', ' ', s)
+        s = re.sub(r'\s+', ' ', s.strip().upper())
+        return s
+
+    def _format_xfa_inventor(self, inv: Dict) -> str:
+        """Compose 'First Middle LAST Suffix' string from an XFA inventor record."""
+        parts = []
+        if inv.get('first'):
+            parts.append(inv['first'])
+        if inv.get('middle'):
+            parts.append(inv['middle'])
+        if inv.get('last'):
+            parts.append(inv['last'].upper())
+        if inv.get('suffix'):
+            parts.append(inv['suffix'])
+        return ' '.join(parts).strip()
+
+    def _check_inventors_against_authoritative(self, doc_inventor_sets: List[Tuple[str, set]]):
+        """Cross-check each document's inventor list against the authoritative source.
+        Flags exact mismatches as CRITICAL and diacritic-only mismatches as WARNING."""
+        auth_full = {self._normalize_for_compare(self._format_xfa_inventor(i))
+                     for i in self.authoritative_inventors}
+        auth_full_with_diacritics = {self._format_xfa_inventor(i) for i in self.authoritative_inventors}
+
+        details_lines = [
+            f"Authoritative source: {self.authoritative_source}",
+            f"Authoritative inventors: {sorted(auth_full_with_diacritics)}",
+            "",
+        ]
+        any_mismatch = False
+        any_warning = False
+
+        for doc_name, doc_set in doc_inventor_sets:
+            if not doc_set:
+                continue
+            missing_in_doc = auth_full - doc_set
+            extra_in_doc = doc_set - auth_full
+            if not missing_in_doc and not extra_in_doc:
+                # Exact match. But also check whether the doc had diacritics that the
+                # authoritative source dropped (or vice versa) — a soft signal worth noting.
+                details_lines.append(f"{doc_name}: ✅ matches authoritative source")
+            else:
+                any_mismatch = True
+                details_lines.append(f"{doc_name}: ❌ disagrees with authoritative source")
+                if missing_in_doc:
+                    details_lines.append(f"   Missing from {doc_name}: {sorted(missing_in_doc)}")
+                if extra_in_doc:
+                    details_lines.append(f"   Extra in {doc_name}: {sorted(extra_in_doc)}")
+
+        check_id = 71  # New check; numbering continues past the existing 70
+        if any_mismatch:
+            self.report.add_issue(
+                check_id, "Cross-Document Consistency",
+                "Inventor Names vs. Authoritative Source",
+                Severity.CRITICAL,
+                "One or more documents disagree with the authoritative inventor list",
+                "\n".join(details_lines)
+            )
+        else:
+            self.report.add_issue(
+                check_id, "Cross-Document Consistency",
+                "Inventor Names vs. Authoritative Source",
+                Severity.PASS,
+                "All documents agree with the authoritative inventor list",
+                "\n".join(details_lines)
+            )
+
+    def _load_authoritative_inventors(self):
+        """Load an authoritative inventor list from the folder if present.
+        Supported sources (first match wins):
+          - inventors.json (list of {first, middle, last, suffix} or list of strings)
+          - inventors.txt   (one inventor per line; 'First Middle Last [Suffix]' or
+                             'Last, First M., Suffix')
+          - any *.eml file  (best-effort extraction from the email body)
+        """
+        # JSON
+        json_path = self.folder_path / 'inventors.json'
+        if json_path.exists():
+            try:
+                import json
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    raw = json.load(f)
+                self.authoritative_inventors = [self._coerce_inventor_record(item) for item in raw]
+                self.authoritative_inventors = [i for i in self.authoritative_inventors if i.get('last') or i.get('first')]
+                self.authoritative_source = json_path.name
+                print(f"  ℹ️  Loaded {len(self.authoritative_inventors)} authoritative inventor(s) from {json_path.name}")
+                return
+            except Exception as e:
+                print(f"  ⚠️  Failed to read {json_path.name}: {e}")
+
+        # TXT
+        txt_path = self.folder_path / 'inventors.txt'
+        if txt_path.exists():
+            try:
+                with open(txt_path, 'r', encoding='utf-8') as f:
+                    lines = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith('#')]
+                self.authoritative_inventors = [self._parse_inventor_line(ln) for ln in lines]
+                self.authoritative_inventors = [i for i in self.authoritative_inventors if i.get('last') or i.get('first')]
+                self.authoritative_source = txt_path.name
+                print(f"  ℹ️  Loaded {len(self.authoritative_inventors)} authoritative inventor(s) from {txt_path.name}")
+                return
+            except Exception as e:
+                print(f"  ⚠️  Failed to read {txt_path.name}: {e}")
+
+        # EML (best-effort)
+        eml_paths = sorted(self.folder_path.glob('*.eml'))
+        if eml_paths:
+            try:
+                import email
+                from email import policy
+                names = []
+                for eml in eml_paths:
+                    with open(eml, 'rb') as f:
+                        msg = email.message_from_binary_file(f, policy=policy.default)
+                    body = ""
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            if part.get_content_type() == 'text/plain':
+                                try:
+                                    body += part.get_content() + "\n"
+                                except Exception:
+                                    pass
+                    else:
+                        try:
+                            body = msg.get_content()
+                        except Exception:
+                            body = ""
+                    found = self.extract_inventors(body)
+                    for n in found:
+                        names.append(self._parse_inventor_line(n))
+                # Deduplicate by normalized form
+                seen = set()
+                unique = []
+                for n in names:
+                    key = self._normalize_for_compare(self._format_xfa_inventor(n))
+                    if key and key not in seen:
+                        seen.add(key)
+                        unique.append(n)
+                if unique:
+                    self.authoritative_inventors = unique
+                    self.authoritative_source = ', '.join(p.name for p in eml_paths)
+                    print(f"  ℹ️  Extracted {len(unique)} candidate inventor name(s) from {len(eml_paths)} email file(s) — verify these are correct")
+            except Exception as e:
+                print(f"  ⚠️  Failed to read .eml file(s): {e}")
+
+    @staticmethod
+    def _coerce_inventor_record(item) -> Dict:
+        """Accept either a dict {first, middle, last, suffix} or a plain string."""
+        if isinstance(item, dict):
+            return {
+                'first': str(item.get('first', '') or '').strip(),
+                'middle': str(item.get('middle', '') or '').strip(),
+                'last': str(item.get('last', '') or '').strip(),
+                'suffix': str(item.get('suffix', '') or '').strip(),
+            }
+        return PatentFilingQC._parse_inventor_line(str(item))
+
+    @staticmethod
+    def _parse_inventor_line(line: str) -> Dict:
+        """Parse a free-form inventor name line into {first, middle, last, suffix}.
+        Handles:
+          'Dharani Bharathi Thirupathi'
+          'Smith, John P., Jr.'
+          'José Ramón García-López'
+        """
+        if not line:
+            return {'first': '', 'middle': '', 'last': '', 'suffix': ''}
+        line = line.strip()
+        suffix = ''
+        # Trailing suffix tokens (Jr., Sr., II, III, IV)
+        m = re.search(r',?\s+(Jr\.?|Sr\.?|II|III|IV)\s*$', line, re.IGNORECASE)
+        if m:
+            suffix = m.group(1).rstrip('.').title()
+            line = line[:m.start()].rstrip(', ').strip()
+
+        if ',' in line:
+            # 'Last, First Middle' format
+            last, rest = line.split(',', 1)
+            last = last.strip()
+            tokens = rest.strip().split()
+            first = tokens[0] if tokens else ''
+            middle = ' '.join(tokens[1:]) if len(tokens) > 1 else ''
+        else:
+            tokens = line.split()
+            if len(tokens) == 1:
+                first, middle, last = tokens[0], '', ''
+            elif len(tokens) == 2:
+                first, middle, last = tokens[0], '', tokens[1]
+            else:
+                first, middle, last = tokens[0], ' '.join(tokens[1:-1]), tokens[-1]
+        return {'first': first, 'middle': middle, 'last': last, 'suffix': suffix}
 
     def _extract_figure_numbers(self, text: str) -> List[int]:
         """
@@ -530,48 +1115,98 @@ class PatentFilingQC:
     
     def check_cross_document_consistency(self):
         """Checks 1-8: Cross-document consistency"""
-        
+
         # Check 1: Inventor names consistency
-        ads_inventors = self.extract_inventors(self.ads_text) if self.ads_text else []
+        # Prefer structured XFA-extracted ADS inventors when available (more accurate
+        # for middle names, suffixes, and foreign names than regex extraction).
+        if self.ads_data and self.ads_data.get('inventors'):
+            ads_inventors = [self._format_xfa_inventor(inv) for inv in self.ads_data['inventors']]
+        else:
+            ads_inventors = self.extract_inventors(self.ads_text) if self.ads_text else []
         decl_inventors = self.extract_inventors(self.declaration_text) if self.declaration_text else []
         assign_inventors = self.extract_inventors(self.assignment_text) if self.assignment_text else []
         drawings_inventors = self.extract_inventors(self.drawings_text) if self.drawings_text else []
-        
+
+        # Track which sources were available vs missing for reporting visibility
+        source_status = {
+            'ADS': bool(self.ads_text or self.ads_data),
+            'Declaration': bool(self.declaration_text),
+            'Assignment': bool(self.assignment_text),
+            'Drawings': bool(self.drawings_text),
+        }
+
         all_inventor_sets = [
-            ("ADS", set(self.normalize_name(i) for i in ads_inventors)),
-            ("Declaration", set(self.normalize_name(i) for i in decl_inventors)),
-            ("Assignment", set(self.normalize_name(i) for i in assign_inventors)),
-            ("Drawings", set(self.normalize_name(i) for i in drawings_inventors))
+            ("ADS", set(self._normalize_for_compare(i) for i in ads_inventors)),
+            ("Declaration", set(self._normalize_for_compare(i) for i in decl_inventors)),
+            ("Assignment", set(self._normalize_for_compare(i) for i in assign_inventors)),
+            ("Drawings", set(self._normalize_for_compare(i) for i in drawings_inventors))
         ]
-        
+
         # Filter out empty sets
         non_empty_sets = [(name, inv_set) for name, inv_set in all_inventor_sets if inv_set]
-        
+
+        skipped_sources = [name for name, inv_set in all_inventor_sets if not inv_set]
+        skipped_note = ""
+        if skipped_sources:
+            unread_or_missing = [s for s in skipped_sources if not source_status.get(s)]
+            present_but_unparsed = [s for s in skipped_sources if source_status.get(s)]
+            parts = []
+            if unread_or_missing:
+                parts.append(f"not present/unreadable: {', '.join(unread_or_missing)}")
+            if present_but_unparsed:
+                parts.append(f"present but no inventor names extracted: {', '.join(present_but_unparsed)}")
+            skipped_note = "Sources excluded from this check — " + "; ".join(parts)
+
         if len(non_empty_sets) >= 2:
             all_match = all(inv_set == non_empty_sets[0][1] for _, inv_set in non_empty_sets)
             if all_match:
+                msg = f"Inventor names match across documents ({', '.join(n for n, _ in non_empty_sets)})"
                 self.report.add_issue(
                     1, "Cross-Document Consistency", "Inventor Names Consistency",
-                    Severity.PASS, "Inventor names match across all documents"
+                    Severity.PASS, msg, skipped_note
                 )
             else:
                 mismatches = []
                 for name, inv_set in non_empty_sets:
-                    mismatches.append(f"{name}: {inv_set}")
+                    mismatches.append(f"{name}: {sorted(inv_set)}")
+                if skipped_note:
+                    mismatches.append("")
+                    mismatches.append(skipped_note)
                 self.report.add_issue(
                     1, "Cross-Document Consistency", "Inventor Names Consistency",
                     Severity.CRITICAL, "Inventor names do not match across documents",
                     "\n".join(mismatches)
                 )
         else:
+            # Make the SKIPPED reason explicit instead of a vague WARNING
+            available = ', '.join(n for n, _ in non_empty_sets) or 'none'
+            details = (
+                f"Cross-doc inventor name comparison requires at least 2 sources "
+                f"with extractable names. Found names in: {available}."
+            )
+            if skipped_note:
+                details += "\n" + skipped_note
             self.report.add_issue(
                 1, "Cross-Document Consistency", "Inventor Names Consistency",
-                Severity.WARNING, "Unable to extract inventor names from multiple documents for comparison"
+                Severity.WARNING,
+                "SKIPPED — not enough sources with extractable inventor names to compare",
+                details
             )
+
+        # Check 1b (extension): authoritative-source cross-check.
+        # If the user dropped an inventors.txt / inventors.json / .eml in the folder,
+        # treat that list as ground truth and flag any document that disagrees.
+        if self.authoritative_inventors:
+            self._check_inventors_against_authoritative(all_inventor_sets)
         
         # Check 2: Application title consistency
         spec_title = self.extract_title(self.spec_text)
-        ads_title = self.extract_title(self.ads_text)
+        # Prefer XFA-extracted title when available (regex extraction is brittle on
+        # the synthesized text and on real ADS form layouts).
+        if self.ads_data and self.ads_data.get('title'):
+            ads_title = self.ads_data['title']
+        else:
+            ads_title = self.extract_title(self.ads_text)
         
         if spec_title and ads_title:
             if spec_title.upper() == ads_title.upper():
@@ -593,8 +1228,16 @@ class PatentFilingQC:
         
         # Check 3: Attorney docket number consistency
         dockets = []
-        for name, text in [("Spec", self.spec_text), ("ADS", self.ads_text), 
-                           ("Declaration", self.declaration_text), ("Assignment", self.assignment_text)]:
+        # Prefer XFA-extracted docket for ADS when available
+        if self.ads_data and self.ads_data.get('docket_number'):
+            dockets.append(("ADS", self.ads_data['docket_number']))
+            other_sources = [("Spec", self.spec_text),
+                             ("Declaration", self.declaration_text),
+                             ("Assignment", self.assignment_text)]
+        else:
+            other_sources = [("Spec", self.spec_text), ("ADS", self.ads_text),
+                             ("Declaration", self.declaration_text), ("Assignment", self.assignment_text)]
+        for name, text in other_sources:
             if text:
                 docket = self.extract_docket_number(text)
                 if docket:
@@ -624,7 +1267,10 @@ class PatentFilingQC:
         ads_customer_num = None
         poa_customer_num = None
 
-        if self.ads_text:
+        # Prefer XFA-extracted customer number when available
+        if self.ads_data and self.ads_data.get('customer_number'):
+            ads_customer_num = self.ads_data['customer_number']
+        elif self.ads_text:
             cust_match = re.search(r'Customer\s*(?:Number|No\.?)[:\s]*(\d{5,6})', self.ads_text, re.IGNORECASE)
             if cust_match:
                 ads_customer_num = cust_match.group(1)
@@ -826,17 +1472,51 @@ class PatentFilingQC:
         # Check 9: All required documents present
         required = ['Specification', 'Drawings', 'ADS', 'Declaration']
         missing = [doc for doc in required if not self.report.files_found.get(doc)]
-        
+
+        # Documents that are commonly omitted at filing as part of an intentional
+        # "missing parts" filing under 37 CFR §1.53(f). The Declaration is the most
+        # frequent — filers can pay the §1.16(f) surcharge and submit the missing
+        # parts within 2 months of the Notice to File Missing Parts.
+        missing_parts_eligible = {'Declaration'}
+
         if not missing:
             self.report.add_issue(
                 9, "Document Completeness", "All Required Documents Present",
                 Severity.PASS, "All required documents found"
             )
         else:
-            self.report.add_issue(
-                9, "Document Completeness", "All Required Documents Present",
-                Severity.CRITICAL, f"Missing required documents: {', '.join(missing)}"
-            )
+            blocking = [d for d in missing if d not in missing_parts_eligible]
+            optional_missing = [d for d in missing if d in missing_parts_eligible]
+
+            if blocking:
+                # Spec / Drawings / ADS missing — these aren't eligible for missing-parts
+                self.report.add_issue(
+                    9, "Document Completeness", "All Required Documents Present",
+                    Severity.CRITICAL,
+                    f"Missing required documents: {', '.join(blocking)}",
+                    "These documents must be in the filing folder. They are not eligible "
+                    "for the missing-parts procedure under 37 CFR §1.53(f)."
+                )
+
+            if optional_missing:
+                # Declaration missing — emit a CRITICAL-with-question that Claude (per SKILL.md)
+                # will resolve with the user. If intentional, the filer should be reminded
+                # about the §1.16(f) surcharge and 2-month deadline.
+                docs_str = ', '.join(optional_missing)
+                self.report.add_issue(
+                    9, "Document Completeness", "All Required Documents Present",
+                    Severity.CRITICAL,
+                    f"{docs_str} not found — confirm whether this is intentional",
+                    (
+                        "ACTION REQUIRED: Ask the filer whether this is an intentional "
+                        "missing-parts filing under 37 CFR §1.53(f).\n"
+                        "  • If YES (intentional): downgrade this to a WARNING and remind the filer that:\n"
+                        "      – A §1.16(f) surcharge fee is due at or after filing\n"
+                        "      – The missing parts (e.g., declaration) must be filed within 2 months\n"
+                        "        of the USPTO's Notice to File Missing Parts to avoid abandonment\n"
+                        "  • If NO (oversight): the missing document(s) must be added before filing"
+                    )
+                )
         
         # Check 10: ADS required fields complete
         if self.ads_text:
@@ -1746,7 +2426,77 @@ class PatentFilingQC:
                 31, "ADS", "Attorney/Agent Information",
                 Severity.INFO, "Manual review recommended for attorney/agent registration number"
             )
-    
+
+        # The remaining ADS checks rely on structured XFA data that we may or may
+        # not have. If we don't have it, skip them (rather than emitting noisy
+        # WARNINGs that the user can't act on).
+        if not self.ads_data:
+            return
+
+        # Check 72: Citizenship populated for every inventor
+        # The ADS CitizedDropDown is often left blank when filing as an assignee
+        # under 37 CFR 1.46 (citizenship is then captured on the Declaration
+        # instead). Either case is OK, but the user should consciously confirm.
+        blank_citz = [self._format_xfa_inventor(inv) for inv in self.ads_data.get('inventors', [])
+                      if not (inv.get('citizenship') or '').strip()]
+        total_inv = len(self.ads_data.get('inventors', []))
+        if total_inv == 0:
+            pass  # nothing to check
+        elif not blank_citz:
+            self.report.add_issue(
+                72, "ADS", "Inventor Citizenship Populated",
+                Severity.PASS,
+                f"All {total_inv} inventor(s) have citizenship populated in the ADS"
+            )
+        else:
+            assignee_present = bool(self.ads_data.get('assignee_org'))
+            msg = f"{len(blank_citz)} of {total_inv} inventor(s) have a blank citizenship field in the ADS"
+            details_lines = ["Inventors with blank citizenship:"]
+            details_lines.extend(f"  • {n}" for n in blank_citz)
+            if assignee_present:
+                details_lines.append("")
+                details_lines.append(
+                    f"Assignee on file: {self.ads_data['assignee_org']}. When filing as an "
+                    "assignee under 37 CFR 1.46, some practitioners intentionally leave the "
+                    "ADS citizenship dropdowns blank and rely on the Declaration to capture "
+                    "citizenship. Verify this is intentional. If not, populate the dropdowns "
+                    "before filing."
+                )
+            else:
+                details_lines.append("")
+                details_lines.append(
+                    "No assignee filer detected. Citizenship is normally required on the "
+                    "ADS for individual-applicant filings — populate the dropdowns before filing."
+                )
+            self.report.add_issue(
+                72, "ADS", "Inventor Citizenship Populated",
+                Severity.WARNING, msg, "\n".join(details_lines)
+            )
+
+        # Check 73: Attorney customer number matches correspondence customer number
+        corr_cn = (self.ads_data.get('customer_number') or '').strip()
+        atty_cn = (self.ads_data.get('attorney_customer_number') or '').strip()
+        if corr_cn and atty_cn:
+            if corr_cn == atty_cn:
+                self.report.add_issue(
+                    73, "ADS", "Attorney vs Correspondence Customer Number",
+                    Severity.PASS,
+                    f"Attorney and correspondence customer numbers match: {corr_cn}"
+                )
+            else:
+                self.report.add_issue(
+                    73, "ADS", "Attorney vs Correspondence Customer Number",
+                    Severity.WARNING,
+                    f"Attorney customer number ({atty_cn}) differs from correspondence customer number ({corr_cn})",
+                    "These are often the same firm. Confirm the difference is intentional."
+                )
+        elif corr_cn or atty_cn:
+            self.report.add_issue(
+                73, "ADS", "Attorney vs Correspondence Customer Number",
+                Severity.INFO,
+                f"Only one customer number populated (correspondence={corr_cn or '—'}, attorney={atty_cn or '—'}); manual review recommended"
+            )
+
     def check_declaration(self):
         """Checks 32-35: Declaration-specific checks"""
         
@@ -3480,6 +4230,74 @@ class PatentFilingQC:
                         f.write(f"   {issue.message}\n")
                         f.write("\n")
                 f.write("\n")
+
+            # ADS Data Summary (when XFA datasets stream was successfully parsed)
+            if self.ads_data:
+                f.write("## ADS Data Summary (Extracted from XFA)\n\n")
+                d = self.ads_data
+                f.write("| Field | Value |\n|-------|-------|\n")
+                rows = [
+                    ("Invention Title", d.get('title', '') or '—'),
+                    ("Attorney Docket Number", d.get('docket_number', '') or '—'),
+                    ("Application Type", d.get('application_type', '') or '—'),
+                    ("Submission Type", d.get('submission_type', '') or '—'),
+                    ("Entity Status", "Small" if d.get('small_entity') is True
+                     else "Large/Regular" if d.get('small_entity') is False else '—'),
+                    ("Drawing Sheets", d.get('drawing_sheets', '') or '—'),
+                    ("Suggested Representative Figure", d.get('representative_figure', '') or '—'),
+                    ("Correspondence Customer Number", d.get('customer_number', '') or '—'),
+                    ("Attorney/Agent Customer Number", d.get('attorney_customer_number', '') or '—'),
+                    ("Assignee", d.get('assignee_org', '') or '—'),
+                ]
+                addr = d.get('assignee_address') or {}
+                addr_str = ', '.join(p for p in [
+                    addr.get('address1', ''), addr.get('address2', ''),
+                    addr.get('city', ''), addr.get('state', ''),
+                    addr.get('postcode', ''), addr.get('country', '')
+                ] if p)
+                if addr_str:
+                    rows.append(("Assignee Address", addr_str))
+                rows.extend([
+                    ("Domestic Continuity",
+                     "None" if not d.get('domestic_continuity_entries')
+                     else f"{len(d['domestic_continuity_entries'])} entry/entries"),
+                    ("Foreign Priority",
+                     "None" if not d.get('foreign_priority_entries')
+                     else f"{len(d['foreign_priority_entries'])} entry/entries"),
+                    ("Non-Publication Request",
+                     "Yes" if d.get('non_publication') is True
+                     else "No" if d.get('non_publication') is False else '—'),
+                    ("AIA Transition Statement",
+                     "Yes" if d.get('aia_transition') is True
+                     else "No" if d.get('aia_transition') is False else '—'),
+                    ("ADS Form Pages", d.get('form_pages', '') or '—'),
+                ])
+                signer = d.get('signer') or {}
+                if signer.get('signature'):
+                    rows.append(("ADS Signature", signer.get('signature', '')))
+                if signer.get('registration_number'):
+                    rows.append(("ADS Registration Number", signer.get('registration_number', '')))
+                if signer.get('date'):
+                    rows.append(("ADS Signature Date", signer.get('date', '')))
+
+                for label, value in rows:
+                    safe = str(value).replace('|', '\\|').replace('\n', ' ')
+                    f.write(f"| {label} | {safe} |\n")
+                f.write("\n")
+
+                inventors = d.get('inventors') or []
+                if inventors:
+                    f.write("### Inventors in ADS\n\n")
+                    f.write("| # | Name | Residency | City | Country | Citizenship |\n")
+                    f.write("|---|------|-----------|------|---------|-------------|\n")
+                    for idx, inv in enumerate(inventors, start=1):
+                        name = self._format_xfa_inventor(inv)
+                        residency = inv.get('residency') or '—'
+                        city = inv.get('res_city') or '—'
+                        country = inv.get('res_country') or '—'
+                        citz = inv.get('citizenship') or 'Blank'
+                        f.write(f"| {idx} | {name} | {residency} | {city} | {country} | {citz} |\n")
+                    f.write("\n")
 
             # Footer
             f.write("---\n\n")
