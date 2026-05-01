@@ -2,6 +2,10 @@
 
 A comprehensive quality control tool for U.S. patent application filing documents. This Claude Code skill systematically checks for internal document errors, cross-document inconsistencies, USPTO compliance issues, and common filing mistakes before submission to the USPTO.
 
+![Example QC report — executive summary, documents found, and the start of the critical-issues section for a fictitious LLM memory-efficiency patent application](docs/example-report.png)
+
+*Example output: a synthetic filing for an LLM memory-efficiency invention. The report flags a cross-document inventor-name mismatch (declaration omits middle names from the ADS), an incomplete assignment, and a citizenship-blank warning aware of 37 CFR 1.46 assignee filings. 44 checks pass.*
+
 ## Overview
 
 Patent applications involve multiple interconnected documents where a single inconsistency—a misspelled inventor name, a mismatched docket number, or an incorrect figure reference—can cause delays, rejections, or legal complications. This skill automates the tedious but critical task of cross-checking all filing documents.
