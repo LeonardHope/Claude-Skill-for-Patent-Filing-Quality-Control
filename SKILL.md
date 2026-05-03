@@ -31,7 +31,7 @@ Confirm the folder path containing all filing documents. The folder should typic
 - Power of Attorney (optional)
 - `inventors.txt`, `inventors.json`, or `*.eml` (optional — authoritative inventor list)
 
-The documents may have various naming conventions. The QC script will automatically detect them based on common patterns.
+**Filenames don't matter — the script identifies documents by their *content*, not their names.** A specification named `Application.pdf`, a declaration named `Formals.pdf`, or any other naming convention works as long as the content of the file is recognizable. XFA forms (any PTO/AIA/* form, not just the ADS) are classified by inspecting their embedded XML rather than assuming form type from the filename.
 
 **Note on the ADS:** The USPTO web-fillable ADS (PTO/AIA/14) is an XFA form. The script reads the form's embedded XFA datasets stream directly, so no Adobe Acrobat Pro flattening is required. If the ADS extraction succeeds, the console will show `✅ XFA extraction successful` — every ADS field needed for cross-document checks is then available structured.
 
