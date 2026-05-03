@@ -506,7 +506,8 @@ class PatentFilingQC:
         return self.extract_pdf_text(ads_path, 'ADS')
     
     def find_document(self, patterns: List[str], doc_type: str) -> Optional[Path]:
-        """Find a document matching any of the given patterns"""
+        """[Legacy filename-pattern finder; retained for callers but no longer
+        used by load_documents, which now classifies by file content.]"""
         for pattern in patterns:
             matches = list(self.folder_path.glob(pattern))
             if matches:
@@ -514,56 +515,213 @@ class PatentFilingQC:
                 return matches[0]
         self.report.files_found[doc_type] = None
         return None
+
+    def _quick_extract_text(self, pdf_path: Path, max_pages: int = 3) -> str:
+        """Cheap text extraction (no OCR) used for content-based classification."""
+        try:
+            with open(pdf_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                pages = reader.pages[:max_pages]
+                return "\n".join((p.extract_text() or "") for p in pages)
+        except Exception:
+            return ""
+
+    def _extract_all_xfa_xml(self, pdf_path: Path) -> str:
+        """Concatenate every XFA stream's text content. The 'template' stream
+        holds form UI labels and static text (e.g., 'I hereby declare' on a
+        declaration form), the 'datasets' stream holds filled values, etc.
+        Lets us classify XFA forms by their content rather than assuming
+        XFA == ADS."""
+        try:
+            with open(pdf_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                root = reader.trailer['/Root']
+                if hasattr(root, 'get_object'):
+                    root = root.get_object()
+                acroform = root['/AcroForm']
+                if hasattr(acroform, 'get_object'):
+                    acroform = acroform.get_object()
+                xfa = acroform['/XFA']
+                if hasattr(xfa, 'get_object'):
+                    xfa = xfa.get_object()
+                items = list(xfa)
+                chunks = []
+                for i in range(0, len(items), 2):
+                    if i + 1 >= len(items):
+                        break
+                    stream = items[i + 1]
+                    if hasattr(stream, 'get_object'):
+                        stream = stream.get_object()
+                    try:
+                        chunks.append(stream.get_data().decode('utf-8', errors='replace'))
+                    except Exception:
+                        pass
+                return "\n".join(chunks)
+        except Exception:
+            return ""
+
+    def _classify_pdf(self, pdf_path: Path) -> Tuple[str, float]:
+        """Identify what kind of filing document a PDF is by inspecting its
+        content (not its filename). Returns (doc_type, confidence_score).
+        doc_type is one of: 'ADS', 'Specification', 'Drawings', 'Declaration',
+        'Assignment', 'Power of Attorney', 'Unknown'.
+        """
+        # XFA forms: don't assume XFA == ADS. Multiple USPTO forms ship as XFA
+        # (PTO/AIA/01 + /02 Declarations, /14 ADS, /82 POA, etc.). Pull the
+        # XFA XML streams and classify on their content.
+        if self._is_xfa_form(pdf_path):
+            xfa_xml = self._extract_all_xfa_xml(pdf_path)
+            xl = xfa_xml.lower()
+            # Highly specific structural markers per form
+            xfa_scores = {
+                'ADS': (
+                    100 * ('us-request' in xl and 'sfapplicantinformation' in xl) +
+                    20 * ('attorney-docket-number' in xl) +
+                    20 * ('invention-title' in xl)
+                ),
+                'Declaration': (
+                    100 * ('pto/aia/01' in xl or 'pto/aia/02' in xl) +
+                    30 * ('i hereby declare' in xl) +
+                    30 * ('37 cfr 1.63' in xl or '§1.63' in xl) +
+                    20 * ('original inventor' in xl)
+                ),
+                'Power of Attorney': (
+                    100 * ('pto/aia/82' in xl) +
+                    40 * ('power of attorney' in xl) +
+                    20 * ('appoint' in xl and 'practitioner' in xl)
+                ),
+            }
+            best_xfa = max(xfa_scores, key=lambda k: xfa_scores[k])
+            if xfa_scores[best_xfa] >= 30:
+                return (best_xfa, float(xfa_scores[best_xfa]))
+            # Fall through to text-based classification using the XFA XML as the
+            # source text (the rendered PDF would just say "Please wait...").
+            text = xfa_xml
+        else:
+            text = self._quick_extract_text(pdf_path)
+            # If a non-XFA PDF returned almost no text, it's most likely the
+            # drawings (image-only PDF). Try the full text path before deciding.
+            if len(text.strip()) < 200:
+                text = self.extract_pdf_text(pdf_path, '<classifying>')
+
+        tl = text.lower()
+        head = tl[:1500]  # signatures that must appear near the top
+
+        scores: Dict[str, float] = {}
+
+        scores['ADS'] = (
+            6 * ('application data sheet' in tl) +
+            5 * (('37 cfr 1.76' in tl) or ('§1.76' in tl)) +
+            3 * ('correspondence information' in tl) +
+            3 * (bool(re.search(r'customer\s*number', tl)) and 'inventor' in tl) +
+            2 * ('non-publication' in tl)
+        )
+
+        scores['Specification'] = (
+            7 * bool(re.search(r'what\s+is\s+claimed', tl)) +
+            5 * ('brief description of the drawings' in tl) +
+            3 * (' abstract' in tl or '\nabstract' in tl) +
+            3 * bool(re.search(r'\bbackground\b', tl)) +
+            2 * bool(re.search(r'\bclaim\s+\d+', tl)) +
+            -6 * ('i hereby declare' in tl) +     # excludes declaration
+            -5 * bool(re.search(r'\bassignor\b', tl)) +  # excludes assignment
+            -5 * ('power of attorney' in tl)       # excludes POA
+        )
+
+        scores['Declaration'] = (
+            7 * ('i hereby declare' in tl) +
+            6 * (('37 cfr 1.63' in tl) or ('§1.63' in tl)) +
+            4 * ('pto/aia/01' in tl or 'pto/aia/02' in tl) +
+            3 * ('original inventor' in tl) +
+            2 * ('declaration' in head)
+        )
+
+        scores['Assignment'] = (
+            6 * bool(re.search(r'\bassignor\b', tl)) +
+            5 * bool(re.search(r'\bassignee\b', tl)) +
+            5 * bool(re.search(r'right,?\s+title,?\s+and\s+interest', tl)) +
+            3 * ('whereas' in tl and 'assign' in tl) +
+            2 * ('assignment' in head)
+        )
+
+        scores['Power of Attorney'] = (
+            7 * ('power of attorney' in tl) +
+            6 * bool(re.search(r'pto/aia/82', tl)) +
+            3 * ('appoint' in tl and 'attorney' in tl) +
+            2 * ('revoke' in tl and 'attorney' in tl)
+        )
+
+        # Drawings: defining trait is FIG. references with very little prose.
+        has_fig_refs = bool(re.search(r'fig\.\s*\d', tl))
+        prose_len = len(re.sub(r'\s+', ' ', text).strip())
+        if has_fig_refs and prose_len < 1500:
+            scores['Drawings'] = 8.0
+        elif has_fig_refs and prose_len < 4000:
+            scores['Drawings'] = 4.0
+        elif bool(re.search(r'sheet\s+\d+\s*(/|of)\s*\d+', tl)):
+            scores['Drawings'] = 3.0
+        else:
+            scores['Drawings'] = 0.0
+
+        best_type = max(scores, key=lambda k: scores[k])
+        best_score = scores[best_type]
+        if best_score < 3:
+            return ('Unknown', best_score)
+        return (best_type, float(best_score))
     
     def load_documents(self):
-        """Locate and load all filing documents"""
-        # Find specification PDF (case-insensitive patterns)
-        spec_path = self.find_document(
-            ['*[Ss]pec*.pdf', '*[Ss]pecification*.pdf', '*-Specification.pdf', 'spec.pdf'],
-            'Specification'
-        )
-        if spec_path:
-            self.spec_text = self.extract_pdf_text(spec_path, 'Specification')
+        """Locate and load all filing documents by classifying every PDF in the
+        folder by *content*, not filename. Files named 'Application.pdf',
+        'Formals.pdf', 'MS3-0230US-A.pdf', etc. are all handled as long as
+        their contents identify them.
+        """
+        # Initialize all six slots so the report's "Documents Found" list shows
+        # which kinds were not detected.
+        slots = ['Specification', 'Drawings', 'ADS',
+                 'Declaration', 'Assignment', 'Power of Attorney']
+        for s in slots:
+            self.report.files_found[s] = None
 
-        # Find drawings PDF
-        drawings_path = self.find_document(
-            ['*[Dd]rawing*.pdf', '*[Ff]igure*.pdf', '*[Ff]ig*.pdf', '*-Drawings.pdf', 'drawings.pdf'],
-            'Drawings'
-        )
-        if drawings_path:
-            self.drawings_text = self.extract_pdf_text(drawings_path, 'Drawings')
+        all_pdfs = sorted(self.folder_path.glob('*.pdf'))
 
-        # Find ADS
-        ads_path = self.find_document(
-            ['*[Aa][Dd][Ss]*.pdf', '*ADS*.pdf', '*-ADS.pdf', '*application*data*sheet*.pdf', 'ads.pdf'],
-            'ADS'
-        )
-        if ads_path:
-            self.ads_text = self._extract_ads_text(ads_path)
+        # Skip the QC report PDF if it's already in the folder from a prior run
+        all_pdfs = [p for p in all_pdfs if 'patent_filing_qc_report' not in p.name.lower()]
 
-        # Find declaration (including combined Dec-Assignment files)
-        decl_path = self.find_document(
-            ['*[Dd]ecl*.pdf', '*[Dd]eclaration*.pdf', '*[Oo]ath*.pdf', '*Dec*.pdf', 'declaration.pdf'],
-            'Declaration'
-        )
-        if decl_path:
-            self.declaration_text = self.extract_pdf_text(decl_path, 'Declaration')
+        # Classify every PDF
+        candidates_by_type: Dict[str, List[Tuple[Path, float]]] = {}
+        unrecognized: List[Path] = []
+        for pdf in all_pdfs:
+            doc_type, confidence = self._classify_pdf(pdf)
+            if doc_type == 'Unknown':
+                unrecognized.append(pdf)
+                print(f"  ❓ Unrecognized PDF (low confidence): {pdf.name}")
+                continue
+            candidates_by_type.setdefault(doc_type, []).append((pdf, confidence))
+            print(f"  📄 {pdf.name} → {doc_type} (confidence {confidence:.0f})")
 
-        # Find assignment (including combined Exec-Dec-Assignment files)
-        assignment_path = self.find_document(
-            ['*[Aa]ssign*.pdf', '*[Aa]ssignment*.pdf', '*Assignment*.pdf', 'assignment.pdf'],
-            'Assignment'
-        )
-        if assignment_path:
-            self.assignment_text = self.extract_pdf_text(assignment_path, 'Assignment')
+        # For each slot, pick the highest-confidence candidate. If multiple
+        # PDFs claim the same slot, warn but continue with the best match.
+        for doc_type, candidates in candidates_by_type.items():
+            candidates.sort(key=lambda x: -x[1])
+            best_pdf, best_conf = candidates[0]
+            self.report.files_found[doc_type] = best_pdf.name
+            if len(candidates) > 1:
+                others = ', '.join(p.name for p, _ in candidates[1:])
+                print(f"  ⚠️  Multiple PDFs classified as {doc_type}; using "
+                      f"{best_pdf.name} (also matched: {others})")
 
-        # Find POA
-        poa_path = self.find_document(
-            ['*[Pp][Oo][Aa]*.pdf', '*POA*.pdf', '*-POA.pdf', '*[Pp]ower*.pdf', '*[Aa]ttorney*.pdf', 'poa.pdf'],
-            'Power of Attorney'
-        )
-        if poa_path:
-            self.poa_text = self.extract_pdf_text(poa_path, 'Power of Attorney')
+            if doc_type == 'Specification':
+                self.spec_text = self.extract_pdf_text(best_pdf, 'Specification')
+            elif doc_type == 'Drawings':
+                self.drawings_text = self.extract_pdf_text(best_pdf, 'Drawings')
+            elif doc_type == 'ADS':
+                self.ads_text = self._extract_ads_text(best_pdf)
+            elif doc_type == 'Declaration':
+                self.declaration_text = self.extract_pdf_text(best_pdf, 'Declaration')
+            elif doc_type == 'Assignment':
+                self.assignment_text = self.extract_pdf_text(best_pdf, 'Assignment')
+            elif doc_type == 'Power of Attorney':
+                self.poa_text = self.extract_pdf_text(best_pdf, 'Power of Attorney')
 
         # Optional: authoritative inventor list (inventors.json/txt or *.eml)
         self._load_authoritative_inventors()
@@ -1988,21 +2146,52 @@ class PatentFilingQC:
                 "Unable to extract reference numerals - manual review recommended"
             )
         
-        # Check 17: Abstract present and length compliant
-        abstract_match = re.search(r'ABSTRACT(.{0,2000}?)(?:BACKGROUND|FIELD|BRIEF|DETAILED|CLAIMS|$)', 
-                                   self.spec_text, re.IGNORECASE | re.DOTALL)
+        # Check 17: Abstract present and length compliant (≤150 words, 37 CFR 1.72(b))
+        # The previous version overcounted by capturing PDF page-footer noise
+        # (page numbers, "Page X of Y", repeated headers, etc.) along with the
+        # abstract proper. Now: capture the abstract chunk, then strip common
+        # PDF-extraction noise before counting.
+        abstract_match = re.search(
+            r'\bABSTRACT\b\s*(?:OF\s+THE\s+(?:DISCLOSURE|INVENTION))?\s*[:\n]+'
+            r'(.{20,2500}?)'
+            r'(?='
+            r'\n\s*(?:BACKGROUND|FIELD|BRIEF|DETAILED|CLAIMS|WHAT\s+IS\s+CLAIMED|'
+            r'I\s+HEREBY\s+DECLARE|FIG\.|Sheet\s+\d+\s*(?:of|/)\s*\d+)'
+            r'|\Z)',
+            self.spec_text, re.IGNORECASE | re.DOTALL
+        )
         if abstract_match:
-            abstract_text = abstract_match.group(1)
-            word_count = len(abstract_text.split())
-            if word_count <= 150:
+            raw = abstract_match.group(1)
+            # Strip common page-footer / page-header artifacts that PDF text
+            # extraction frequently splices into nearby content
+            cleaned = raw
+            cleaned = re.sub(r'\bPage\s+\d+(?:\s+of\s+\d+)?\b', ' ', cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r'(?m)^\s*\d{1,3}\s*$', ' ', cleaned)            # bare page numbers
+            cleaned = re.sub(r'(?m)^\s*\d+\s*/\s*\d+\s*$', ' ', cleaned)      # "52 / 52" footers
+            cleaned = re.sub(r'\bPatent\s+Application\s+Publication\b', ' ', cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r'\b(?:US|U\.S\.)\s*\d{4}/\d+\s*A\d?\b', ' ', cleaned)  # pub-no headers
+            cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+            word_count = len(cleaned.split())
+            if word_count == 0:
                 self.report.add_issue(
                     17, "Specification", "Abstract Present and Length Compliant",
-                    Severity.PASS, f"Abstract found ({word_count} words)"
+                    Severity.WARNING, "Abstract heading found but body could not be extracted"
+                )
+            elif word_count <= 150:
+                self.report.add_issue(
+                    17, "Specification", "Abstract Present and Length Compliant",
+                    Severity.PASS, f"Abstract found ({word_count} words, limit is 150)"
                 )
             else:
+                # Borderline counts (151-160) are usually PDF extraction noise;
+                # show the user what was actually counted so they can verify.
+                preview = (cleaned[:240] + '…') if len(cleaned) > 240 else cleaned
                 self.report.add_issue(
                     17, "Specification", "Abstract Present and Length Compliant",
-                    Severity.WARNING, f"Abstract may be too long ({word_count} words, limit is 150)"
+                    Severity.WARNING,
+                    f"Abstract may be too long ({word_count} words, limit is 150)",
+                    f"Extracted text used for the count (verify against the source .docx, "
+                    f"as PDF text extraction can splice in page-header/footer artifacts):\n\n{preview}"
                 )
         else:
             self.report.add_issue(
