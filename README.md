@@ -23,6 +23,8 @@ The skill performs **70+ automated checks** across all required and optional fil
 | Assignment | No | Transfer of rights to assignee |
 | Power of Attorney | No | Authorization for practitioners |
 
+**Filenames don't matter.** The script identifies each PDF by inspecting its *content* (claim language, declaration boilerplate, XFA form streams, FIG. references, etc.), not by matching filenames against a fixed pattern list. A specification named `Application.pdf`, a declaration named `Formals.pdf`, an ADS named `MS3-0230US-A.pdf` — any naming convention works. XFA forms (PTO/AIA/01, /02, /14, /82, etc.) are distinguished from one another by inspecting their embedded XML.
+
 ## Installation
 
 **You don't need to install anything by hand.** Just install the skill (drop it in `~/.claude/skills/patent-filing-qc/` or symlink it from a project) and run it. The first time you ask Claude to QC a filing, Claude will detect any missing dependencies, install them automatically (asking your permission once per package), and proceed. The reference below is provided for users who prefer to set things up themselves.
