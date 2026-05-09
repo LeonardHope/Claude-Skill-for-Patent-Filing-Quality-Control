@@ -3,7 +3,8 @@
 Patent Filing Quality Control Script
 
 Performs comprehensive QC checks on patent application filing documents.
-Generates both Markdown and PDF reports.
+Generates a self-contained HTML report with embedded CSS — open in any
+browser; use File → Print → Save as PDF for a paper copy.
 """
 
 import os
@@ -15,8 +16,22 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
 from enum import Enum
-import PyPDF2
 import argparse
+
+# PyPDF2 is required, but we want a friendly error message instead of an
+# import-time crash so the CLI/skill can tell the user how to install it.
+try:
+    import PyPDF2
+except ImportError:
+    sys.stderr.write(
+        "\n[patent-filing-qc] Required dependency PyPDF2 is not installed.\n"
+        "  Install with: pip install PyPDF2 --break-system-packages\n"
+        "  (also recommended: pip install pdfplumber python-docx)\n"
+    )
+    sys.exit(2)
+
+# pdfplumber is also required for clean text extraction; we soft-check it
+# inside extract_pdf_text() so calls fall back to PyPDF2 without crashing.
 
 # OCR support (optional)
 try:
@@ -88,6 +103,18 @@ class PatentFilingQC:
         # contain images (e.g., scanned signed declaration/assignment pages).
         # Cross-doc checks should hedge findings against these documents.
         self.image_only_pages: Dict[str, int] = {}
+        # Classified document paths — use these instead of folder.glob('*Spec*')
+        # in any check that needs to re-open the underlying file. Keys are the
+        # canonical doc-type names ("Specification", "Drawings", "ADS",
+        # "Declaration", "Assignment", "Power of Attorney"). Values are Path
+        # objects, or None if the slot is empty.
+        self.documents: Dict[str, Optional[Path]] = {
+            'Specification': None, 'Drawings': None, 'ADS': None,
+            'Declaration': None, 'Assignment': None, 'Power of Attorney': None,
+        }
+        # Files that classified as "Unknown" — surfaced in the report so the
+        # user knows about them.
+        self.unrecognized_files: List[Path] = []
         
     def extract_pdf_text(self, pdf_path: Path, doc_type: str = "Document") -> str:
         """Extract text from a PDF file. Tries pdfplumber first (preserves
@@ -808,11 +835,10 @@ class PatentFilingQC:
 
         # Classify every file
         candidates_by_type: Dict[str, List[Tuple[Path, float]]] = {}
-        unrecognized: List[Path] = []
         for path in all_files:
             doc_type, confidence = self._classify_file(path)
             if doc_type == 'Unknown':
-                unrecognized.append(path)
+                self.unrecognized_files.append(path)
                 print(f"  ❓ Unrecognized file (low confidence): {path.name}")
                 continue
             candidates_by_type.setdefault(doc_type, []).append((path, confidence))
@@ -834,6 +860,7 @@ class PatentFilingQC:
                 candidates.sort(key=lambda x: -x[1])
             best_path, best_conf = candidates[0]
             self.report.files_found[doc_type] = best_path.name
+            self.documents[doc_type] = best_path
 
             if len(candidates) > 1:
                 others = ', '.join(p.name for p, _ in candidates[1:])
@@ -1140,6 +1167,12 @@ class PatentFilingQC:
         if inv.get('suffix'):
             parts.append(inv['suffix'])
         return ' '.join(parts).strip()
+
+    def _xfa_surname(self, inv: Dict) -> str:
+        """Return the inventor's actual surname from XFA structured data —
+        not '.split()[-1]' on the formatted name, which incorrectly returns
+        the suffix ('Jr.', 'III') when present."""
+        return (inv.get('last') or '').strip()
 
     def _check_inventors_against_authoritative(self, doc_inventor_sets: List[Tuple[str, set]]):
         """Cross-check each document's inventor list against the authoritative source.
@@ -1491,6 +1524,7 @@ class PatentFilingQC:
 
     def run_all_checks(self):
         """Execute all 70 QC checks"""
+        self._check_unrecognized_files()
         self.check_cross_document_consistency()
         self.check_document_completeness()
         self.check_specification()
@@ -1506,6 +1540,24 @@ class PatentFilingQC:
         self.check_priority()
         self.check_final_quality()
     
+    def _check_unrecognized_files(self):
+        """Check 75: surface any files in the folder that didn't classify
+        into one of the six known doc types. A pre-filing folder shouldn't
+        contain mystery PDFs/.docxs — the user should know about them."""
+        if self.unrecognized_files:
+            names = sorted(p.name for p in self.unrecognized_files)
+            self.report.add_issue(
+                75, "Document Completeness",
+                "Unrecognized Files in Folder",
+                Severity.WARNING,
+                f"{len(names)} file(s) in the folder did not classify as any "
+                f"of the recognized document types (Specification, Drawings, "
+                f"ADS, Declaration, Assignment, Power of Attorney). They may "
+                f"be unrelated, may have unreadable content, or may be a "
+                f"document type the tool doesn't yet support.",
+                "\n".join(f"  • {n}" for n in names)
+            )
+
     def check_cross_document_consistency(self):
         """Checks 1-8: Cross-document consistency"""
 
@@ -1516,11 +1568,21 @@ class PatentFilingQC:
         # of trying to regex-extract names from declarations/assignments,
         # which use varied formats that the previous extract_inventors()
         # patterns didn't reliably match.
-        ads_inventors = []
+        # Build (formatted_name, surname) pairs. Surname comes from the XFA
+        # 'last' field when available — using formatted_name.split()[-1]
+        # would incorrectly return suffix tokens like 'Jr.' or 'III' as the
+        # surname for those inventors.
+        ads_inventor_pairs: List[Tuple[str, str]] = []
         if self.ads_data and self.ads_data.get('inventors'):
-            ads_inventors = [self._format_xfa_inventor(inv) for inv in self.ads_data['inventors']]
+            for inv in self.ads_data['inventors']:
+                ads_inventor_pairs.append(
+                    (self._format_xfa_inventor(inv), self._xfa_surname(inv))
+                )
         elif self.ads_text:
-            ads_inventors = self.extract_inventors(self.ads_text)
+            for name in self.extract_inventors(self.ads_text):
+                surname = name.split()[-1] if name.split() else ""
+                ads_inventor_pairs.append((name, surname))
+        ads_inventors = [name for name, _ in ads_inventor_pairs]
 
         if not ads_inventors:
             self.report.add_issue(
@@ -1552,9 +1614,8 @@ class PatentFilingQC:
                 for doc_name, doc_text in present_docs:
                     norm_doc = self._normalize_for_compare(doc_text)
                     missing = []
-                    for inv_name in ads_inventors:
-                        last_name = inv_name.split()[-1] if inv_name.split() else ""
-                        last_norm = self._normalize_for_compare(last_name)
+                    for inv_name, surname in ads_inventor_pairs:
+                        last_norm = self._normalize_for_compare(surname)
                         full_norm = self._normalize_for_compare(inv_name)
                         if (last_norm and last_norm in norm_doc) or \
                            (full_norm and full_norm in norm_doc):
@@ -1946,14 +2007,38 @@ class PatentFilingQC:
             )
         
         # Check 8: Inventor citizenship/residency consistency
-        # Check that all inventors have residency information in ADS
-        if self.ads_text:
-            # Count inventors with US Residency marked
-            us_residency_count = len(re.findall(r'US\s*Residency', self.ads_text, re.IGNORECASE))
-            # Count total inventors
+        # Use XFA structured data when available (each inventor has a
+        # 'residency' field). The previous implementation counted the substring
+        # "US Residency" — which also matched "non-US Residency" — and also
+        # named the message "US Residency" specifically, both misleading.
+        if self.ads_data and self.ads_data.get('inventors'):
+            invs = self.ads_data['inventors']
+            populated = sum(1 for inv in invs if (inv.get('residency') or '').strip())
+            total = len(invs)
+            if total > 0 and populated == total:
+                self.report.add_issue(
+                    8, "Cross-Document Consistency", "Inventor Citizenship/Residency Consistency",
+                    Severity.PASS, f"All {total} inventors have residency information"
+                )
+            elif total > 0:
+                self.report.add_issue(
+                    8, "Cross-Document Consistency", "Inventor Citizenship/Residency Consistency",
+                    Severity.WARNING,
+                    f"Only {populated} of {total} inventors have residency populated in the ADS"
+                )
+            else:
+                self.report.add_issue(
+                    8, "Cross-Document Consistency", "Inventor Citizenship/Residency Consistency",
+                    Severity.INFO, "No inventors found in ADS XFA data"
+                )
+        elif self.ads_text:
+            # Fallback for non-XFA ADS: count residency-line variants but
+            # don't double-count "US Residency" inside "non-US Residency".
+            us_count = len(re.findall(r'(?<!non-)US\s*Residency', self.ads_text, re.IGNORECASE))
+            non_us_count = len(re.findall(r'non-US\s*Residency', self.ads_text, re.IGNORECASE))
+            with_residency = us_count + non_us_count
             inventor_count = len(re.findall(r'Inventor\s+\d+', self.ads_text, re.IGNORECASE))
-
-            if inventor_count > 0 and us_residency_count >= inventor_count:
+            if inventor_count > 0 and with_residency >= inventor_count:
                 self.report.add_issue(
                     8, "Cross-Document Consistency", "Inventor Citizenship/Residency Consistency",
                     Severity.PASS, f"All {inventor_count} inventors have residency information"
@@ -1961,7 +2046,8 @@ class PatentFilingQC:
             elif inventor_count > 0:
                 self.report.add_issue(
                     8, "Cross-Document Consistency", "Inventor Citizenship/Residency Consistency",
-                    Severity.WARNING, f"Found {us_residency_count} residency entries for {inventor_count} inventors"
+                    Severity.WARNING,
+                    f"Found {with_residency} residency entries for {inventor_count} inventors"
                 )
             else:
                 self.report.add_issue(
@@ -2055,42 +2141,37 @@ class PatentFilingQC:
             )
         
         # Check 11: Declaration signatures present
+        # Look for ACTUAL signature evidence — not form-template labels like
+        # "signature" or "executed" which appear on blank PTO/AIA/01 forms
+        # without any signing. Real evidence: "/s/ Name", "/Name/" markers,
+        # or scanned signature pages (image-only pages).
         if self.declaration_text:
-            # Look for various signature indicators
-            # PyPDF2 may not extract all text, so check multiple patterns
-            signature_indicators = [
-                '/s/',                              # /s/ electronic signature marker
-                'signature',                        # Generic signature reference
-                'inventor signature',
-                'witness signature',
-                'witnessed by',
-                'legal name of inventor',
-                'signed',
-                'executed',
-                r'\d{1,2}/\d{1,2}/\d{2,4}',         # Date pattern
-                r'\d{4}-\d{2}-\d{2}',               # ISO date
-                r'/[A-Z][^/\n]{2,40}/',             # /Name/ signature pattern
+            sig_patterns = [
+                r'/s/\s*[A-Z]',                  # "/s/ Name" electronic signature
+                r'/[A-Z][^/\n]{2,40}/',          # "/Name/" e-signature marker
             ]
-            dec_text_lower = self.declaration_text.lower()
-            sig_found = False
-            for indicator in signature_indicators:
-                if indicator.startswith('\\') or indicator.startswith('/['):
-                    if re.search(indicator, self.declaration_text):
-                        sig_found = True
-                        break
-                elif indicator in dec_text_lower:
-                    sig_found = True
-                    break
+            sig_found = any(re.search(p, self.declaration_text) for p in sig_patterns)
+            img_pages = self.image_only_pages.get('Declaration', 0)
 
             if sig_found:
                 self.report.add_issue(
                     11, "Document Completeness", "Declaration Signatures Present",
-                    Severity.PASS, "Declaration appears to have signature indicators"
+                    Severity.PASS, "Declaration has signature markers (/s/ or /Name/)"
+                )
+            elif img_pages:
+                self.report.add_issue(
+                    11, "Document Completeness", "Declaration Signatures Present",
+                    Severity.INFO,
+                    f"No text-based signatures detected, but the declaration has "
+                    f"{img_pages} image-only page(s) — signatures may be scanned. "
+                    f"Verify visually."
                 )
             else:
                 self.report.add_issue(
                     11, "Document Completeness", "Declaration Signatures Present",
-                    Severity.WARNING, "Declaration may be missing signatures"
+                    Severity.WARNING,
+                    "No signature markers (/s/ or /Name/) detected in declaration. "
+                    "Form labels alone don't confirm a signed declaration."
                 )
         else:
             self.report.add_issue(
@@ -2098,42 +2179,34 @@ class PatentFilingQC:
                 Severity.WARNING, "Declaration not found - cannot check signatures"
             )
 
-        # Check 12: Assignment signatures present
+        # Check 12: Assignment signatures present (same approach as Check 11)
         if self.assignment_text:
-            signature_indicators = [
-                '/s/',
-                'signature',
-                'inventor signature',
-                'witness signature',
-                'witnessed by',
-                'legal name of inventor',
-                'assignor',
-                'signed',
-                'executed',
-                r'\d{1,2}/\d{1,2}/\d{2,4}',
-                r'\d{4}-\d{2}-\d{2}',
-                r'/[A-Z][^/\n]{2,40}/',          # /Name/ signature pattern
+            sig_patterns = [
+                r'/s/\s*[A-Z]',
+                r'/[A-Z][^/\n]{2,40}/',
             ]
-            assign_text_lower = self.assignment_text.lower()
-            sig_found = False
-            for indicator in signature_indicators:
-                if indicator.startswith('\\') or indicator.startswith('/['):
-                    if re.search(indicator, self.assignment_text):
-                        sig_found = True
-                        break
-                elif indicator in assign_text_lower:
-                    sig_found = True
-                    break
+            sig_found = any(re.search(p, self.assignment_text) for p in sig_patterns)
+            img_pages = self.image_only_pages.get('Assignment', 0)
 
             if sig_found:
                 self.report.add_issue(
                     12, "Document Completeness", "Assignment Signatures Present",
-                    Severity.PASS, "Assignment appears to have signature indicators"
+                    Severity.PASS, "Assignment has signature markers (/s/ or /Name/)"
+                )
+            elif img_pages:
+                self.report.add_issue(
+                    12, "Document Completeness", "Assignment Signatures Present",
+                    Severity.INFO,
+                    f"No text-based signatures detected, but the assignment has "
+                    f"{img_pages} image-only page(s) — signatures may be scanned. "
+                    f"Verify visually."
                 )
             else:
                 self.report.add_issue(
                     12, "Document Completeness", "Assignment Signatures Present",
-                    Severity.WARNING, "Assignment may be missing signatures"
+                    Severity.WARNING,
+                    "No signature markers (/s/ or /Name/) detected in assignment. "
+                    "Form labels alone don't confirm a signed assignment."
                 )
         else:
             self.report.add_issue(
@@ -2145,7 +2218,10 @@ class PatentFilingQC:
         """Checks 13-27: Specification-specific checks"""
         
         if not self.spec_text:
-            for i in range(13, 28):
+            # Specification checks are 13-21 only. Drawings own 22-25, ADS owns
+            # 27 onward. The previous range(13, 28) inflated the report with
+            # five fictitious "Check 22..27 — Specification not found" entries.
+            for i in range(13, 22):
                 self.report.add_issue(
                     i, "Specification", f"Check {i}",
                     Severity.CRITICAL, "Specification not found"
@@ -2794,7 +2870,8 @@ class PatentFilingQC:
         
         # Check 25: No color drawings
         if OCR_AVAILABLE:
-            drawing_files = list(self.folder_path.glob('*Drawing*.pdf')) + list(self.folder_path.glob('*drawing*.pdf'))
+            drawing_path = self.documents.get('Drawings')
+            drawing_files = [drawing_path] if drawing_path else []
             if drawing_files:
                 try:
                     images = convert_from_path(drawing_files[0])
@@ -2851,7 +2928,9 @@ class PatentFilingQC:
         """Checks 27-31: ADS-specific checks"""
         
         if not self.ads_text:
-            for i in range(27, 32):
+            # ADS checks are 27, 28, 29, 31, 73 — Check 30 doesn't exist.
+            # The previous range(27, 32) emitted a fictitious Check 30.
+            for i in (27, 28, 29, 31):
                 self.report.add_issue(
                     i, "ADS", f"Check {i}",
                     Severity.CRITICAL, "ADS not found"
@@ -2982,18 +3061,16 @@ class PatentFilingQC:
         poa_inventor_pattern = r'First\s*Named\s*Inventor\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,})'
 
         # First try OCR since PyPDF2 often can't extract filled form fields
-        if OCR_AVAILABLE:
-            poa_files = list(self.folder_path.glob('*POA*.pdf')) + list(self.folder_path.glob('*Power*Attorney*.pdf'))
-            if poa_files:
-                try:
-                    images = convert_from_path(poa_files[0])
-                    ocr_text = ''.join(pytesseract.image_to_string(img) + '\n' for img in images)
-                    # No IGNORECASE - rely on actual case to distinguish names from labels
-                    poa_match = re.search(poa_inventor_pattern, ocr_text)
-                    if poa_match:
-                        poa_first_inventor = poa_match.group(1).strip()
-                except Exception:
-                    pass
+        if OCR_AVAILABLE and self.documents.get('Power of Attorney'):
+            try:
+                images = convert_from_path(self.documents['Power of Attorney'])
+                ocr_text = ''.join(pytesseract.image_to_string(img) + '\n' for img in images)
+                # No IGNORECASE - rely on actual case to distinguish names from labels
+                poa_match = re.search(poa_inventor_pattern, ocr_text)
+                if poa_match:
+                    poa_first_inventor = poa_match.group(1).strip()
+            except Exception:
+                pass
 
         # Fallback to PyPDF2 text if OCR didn't work
         if not poa_first_inventor and self.poa_text:
@@ -3105,22 +3182,26 @@ class PatentFilingQC:
         
         # Check 32: All inventors named in declaration
         # Use ADS XFA inventors as ground truth (reliable structured data),
-        # then verify each name appears in the declaration text by last-name
-        # match. This is much more robust than regex-extracting names from
-        # the declaration's varied formats.
-        ads_inventor_names = []
+        # then verify each name appears in the declaration text by surname
+        # match. Pull surname from XFA structured 'last' field (not
+        # split()[-1] which would return suffix tokens like 'Jr.').
+        ads_inventor_pairs: List[Tuple[str, str]] = []
         if self.ads_data and self.ads_data.get('inventors'):
-            ads_inventor_names = [self._format_xfa_inventor(inv)
-                                  for inv in self.ads_data['inventors']]
+            for inv in self.ads_data['inventors']:
+                ads_inventor_pairs.append(
+                    (self._format_xfa_inventor(inv), self._xfa_surname(inv))
+                )
         elif self.ads_text:
-            ads_inventor_names = self.extract_inventors(self.ads_text)
+            for name in self.extract_inventors(self.ads_text):
+                surname = name.split()[-1] if name.split() else ""
+                ads_inventor_pairs.append((name, surname))
+        ads_inventor_names = [n for n, _ in ads_inventor_pairs]
 
         if ads_inventor_names:
             decl_norm = self._normalize_for_compare(self.declaration_text)
             missing = []
-            for inv_name in ads_inventor_names:
-                last_name = inv_name.split()[-1] if inv_name.split() else ""
-                last_norm = self._normalize_for_compare(last_name)
+            for inv_name, surname in ads_inventor_pairs:
+                last_norm = self._normalize_for_compare(surname)
                 full_norm = self._normalize_for_compare(inv_name)
                 if (last_norm and last_norm in decl_norm) or \
                    (full_norm and full_norm in decl_norm):
@@ -3269,15 +3350,13 @@ class PatentFilingQC:
 
         # Try OCR if no dates found in PyPDF2 text (dates often on signature pages)
         date_matches = find_dates(decl_text_for_date)
-        if not date_matches and OCR_AVAILABLE:
-            decl_files = list(self.folder_path.glob('*Dec*.pdf')) + list(self.folder_path.glob('*declaration*.pdf'))
-            if decl_files:
-                try:
-                    images = convert_from_path(decl_files[0])
-                    ocr_text = '\n'.join(pytesseract.image_to_string(img) for img in images)
-                    date_matches = find_dates(ocr_text)
-                except Exception:
-                    pass
+        if not date_matches and OCR_AVAILABLE and self.documents.get('Declaration'):
+            try:
+                images = convert_from_path(self.documents['Declaration'])
+                ocr_text = '\n'.join(pytesseract.image_to_string(img) for img in images)
+                date_matches = find_dates(ocr_text)
+            except Exception:
+                pass
 
         # Filter out form template dates (years before 2020)
         filing_dates = []
@@ -3351,23 +3430,26 @@ class PatentFilingQC:
         
         # Check 36: Assignment identifies all assignors (compare with ADS inventors)
         # Use the ADS XFA inventor list as ground truth and verify each name
-        # appears verbatim somewhere in the assignment text. This avoids the
-        # fragility of trying to extract assignor names via regex from the
-        # many possible assignment text formats.
-        ads_inventor_names = []
+        # appears verbatim somewhere in the assignment text. Surname comes
+        # from XFA structured 'last' field (not split()[-1] which would
+        # return suffix tokens like 'Jr.').
+        ads_inventor_pairs: List[Tuple[str, str]] = []
         if self.ads_data and self.ads_data.get('inventors'):
-            ads_inventor_names = [self._format_xfa_inventor(inv)
-                                  for inv in self.ads_data['inventors']]
+            for inv in self.ads_data['inventors']:
+                ads_inventor_pairs.append(
+                    (self._format_xfa_inventor(inv), self._xfa_surname(inv))
+                )
         elif self.ads_text:
-            ads_inventor_names = self.extract_inventors(self.ads_text)
+            for n in self.extract_inventors(self.ads_text):
+                surname = n.split()[-1] if n.split() else ""
+                ads_inventor_pairs.append((n, surname))
+        ads_inventor_names = [n for n, _ in ads_inventor_pairs]
 
         if ads_inventor_names and self.assignment_text:
             asgn_norm = self._normalize_for_compare(self.assignment_text)
             missing = []
             found = []
-            for name in ads_inventor_names:
-                # Match by last name (most reliable cross-doc); fall back to full name
-                last_name = name.split()[-1] if name.split() else ""
+            for name, last_name in ads_inventor_pairs:
                 last_normalized = self._normalize_for_compare(last_name)
                 full_normalized = self._normalize_for_compare(name)
                 if (last_normalized and last_normalized in asgn_norm) or \
@@ -3515,30 +3597,26 @@ class PatentFilingQC:
                     break
 
         # Try OCR fallback if no date found
-        if not found_date and OCR_AVAILABLE:
-            assign_files = (list(self.folder_path.glob('*Assignment*.pdf')) +
-                          list(self.folder_path.glob('*Exec*Dec*Assignment*.pdf')) +
-                          list(self.folder_path.glob('*assign*.pdf')))
-            if assign_files:
-                try:
-                    images = convert_from_path(assign_files[0])
-                    ocr_text = '\n'.join(pytesseract.image_to_string(img) for img in images)
-                    for pattern in date_search_patterns:
-                        match = re.search(pattern, ocr_text, re.IGNORECASE)
-                        if match:
-                            date_str = match.group(1)
-                            for fmt in ['%Y-%m-%d', '%m/%d/%Y', '%m-%d-%Y', '%B %d, %Y', '%B %d %Y', '%m/%d/%y', '%m-%d-%y']:
-                                try:
-                                    candidate = datetime.datetime.strptime(date_str, fmt)
-                                    if candidate.year >= 2020:
-                                        found_date = candidate
-                                        break
-                                except ValueError:
-                                    continue
-                            if found_date:
-                                break
-                except Exception:
-                    pass
+        if not found_date and OCR_AVAILABLE and self.documents.get('Assignment'):
+            try:
+                images = convert_from_path(self.documents['Assignment'])
+                ocr_text = '\n'.join(pytesseract.image_to_string(img) for img in images)
+                for pattern in date_search_patterns:
+                    match = re.search(pattern, ocr_text, re.IGNORECASE)
+                    if match:
+                        date_str = match.group(1)
+                        for fmt in ['%Y-%m-%d', '%m/%d/%Y', '%m-%d-%Y', '%B %d, %Y', '%B %d %Y', '%m/%d/%y', '%m-%d-%y']:
+                            try:
+                                candidate = datetime.datetime.strptime(date_str, fmt)
+                                if candidate.year >= 2020:
+                                    found_date = candidate
+                                    break
+                            except ValueError:
+                                continue
+                        if found_date:
+                            break
+            except Exception:
+                pass
 
         if found_date:
             today = datetime.datetime.now()
@@ -3601,7 +3679,9 @@ class PatentFilingQC:
         """Checks 41-44: Power of Attorney-specific checks"""
         
         if not self.poa_text:
-            for i in range(41, 45):
+            # POA checks are 41, 42, 44 — Check 43 doesn't exist.
+            # The previous range(41, 45) emitted a fictitious Check 43.
+            for i in (41, 42, 44):
                 self.report.add_issue(
                     i, "Power of Attorney", f"Check {i}",
                     Severity.INFO, "Power of Attorney not found (may not be required)"
@@ -3613,14 +3693,12 @@ class PatentFilingQC:
         poa_check_text = self.poa_text
 
         # Try OCR if PyPDF2 text is mostly form labels (common with filled forms)
-        if OCR_AVAILABLE and len(poa_check_text.strip()) < 500:
-            poa_files = list(self.folder_path.glob('*POA*.pdf')) + list(self.folder_path.glob('*Power*Attorney*.pdf'))
-            if poa_files:
-                try:
-                    images = convert_from_path(poa_files[0])
-                    poa_check_text = '\n'.join(pytesseract.image_to_string(img) for img in images)
-                except Exception:
-                    pass
+        if OCR_AVAILABLE and len(poa_check_text.strip()) < 500 and self.documents.get('Power of Attorney'):
+            try:
+                images = convert_from_path(self.documents['Power of Attorney'])
+                poa_check_text = '\n'.join(pytesseract.image_to_string(img) for img in images)
+            except Exception:
+                pass
 
         # Check for customer number usage (common approach)
         customer_num_match = re.search(
@@ -3732,12 +3810,15 @@ class PatentFilingQC:
             )
         
         # Check 49: Page numbering present
-        # Check the specification PDF for page numbers on each page
-        spec_files = list(self.folder_path.glob('*Spec*.pdf')) + list(self.folder_path.glob('*spec*.pdf'))
+        # Check the specification PDF for page numbers on each page.
+        # Use the classified spec path; .docx specs don't have a page model
+        # we can inspect this way, so for those we punt to manual review.
+        spec_path = self.documents.get('Specification')
+        is_pdf_spec = bool(spec_path and spec_path.suffix.lower() == '.pdf')
         page_nums_found = False
-        if spec_files:
+        if is_pdf_spec:
             try:
-                with open(spec_files[0], 'rb') as f:
+                with open(spec_path, 'rb') as f:
                     reader = PyPDF2.PdfReader(f)
                     total_pages = len(reader.pages)
                     pages_with_numbers = 0
@@ -3770,10 +3851,24 @@ class PatentFilingQC:
                 pass
 
         if not page_nums_found:
+            if not is_pdf_spec:
+                # .docx spec — we can't inspect per-page text without a page
+                # render, and the previous "any sequential 1-100 numbers"
+                # fallback false-passed on paragraph numbers, claim numbers,
+                # and reference numerals. Punt to manual review rather than
+                # invent confidence we don't have.
+                self.report.add_issue(
+                    49, "USPTO Formatting", "Page Numbering Present",
+                    Severity.INFO,
+                    "Specification is a .docx — page numbering not verifiable "
+                    "by text extraction. Verify manually that the rendered/filed "
+                    "PDF has page numbers."
+                )
+                return
             # Fallback: check if extracted text has sequential page-like numbers
+            # (kept narrow to avoid false-passing on paragraph numbers etc.)
             page_refs = re.findall(r'(?:^|\s)(\d{1,3})(?:\s|$)', self.spec_text)
             sequential = [int(n) for n in page_refs if 1 <= int(n) <= 100]
-            # Check if we have a reasonable sequence (1, 2, 3... or at least many sequential numbers)
             if sequential and max(sequential) >= 10:
                 expected_pages = set(range(1, max(sequential) + 1))
                 found_pages = set(sequential)
@@ -4175,14 +4270,13 @@ class PatentFilingQC:
             )
         
         # Check 58: File size reasonable
-        for doc_type, filename in self.report.files_found.items():
-            if filename:
-                filepath = list(self.folder_path.glob(filename))[0]
-                size = filepath.stat().st_size
+        for doc_type, path in self.documents.items():
+            if path:
+                size = path.stat().st_size
                 if size == 0:
                     self.report.add_issue(
                         58, "File Quality", "File Size Reasonable",
-                        Severity.CRITICAL, f"{filename} has 0 bytes"
+                        Severity.CRITICAL, f"{path.name} has 0 bytes"
                     )
                     return
         
