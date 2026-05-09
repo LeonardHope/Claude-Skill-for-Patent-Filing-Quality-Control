@@ -4,13 +4,24 @@ A comprehensive quality control tool for U.S. patent application filing document
 
 ![Example QC report — executive summary, documents found, and the start of the critical-issues section for a fictitious LLM memory-efficiency patent application](docs/example-report.png)
 
-*Example output: a synthetic filing for an LLM memory-efficiency invention. The report flags a cross-document inventor-name mismatch (declaration omits middle names from the ADS), an incomplete assignment, and a citizenship-blank warning aware of 37 CFR 1.46 assignee filings. 44 checks pass.*
+*Example output (synthetic LLM memory-efficiency filing). The HTML report opens in any browser; the **Print to PDF** button in the upper right calls the browser's print dialog. Each Executive Summary card is a link that jumps to the corresponding section. 2 Critical, 7 Warnings, 5 Manual-Review items, 51 Passes.*
 
 ## Overview
 
 Patent applications involve multiple interconnected documents where a single inconsistency—a misspelled inventor name, a mismatched docket number, or an incorrect figure reference—can cause delays, rejections, or legal complications. This skill automates the tedious but critical task of cross-checking all filing documents.
 
-The skill performs **70+ automated checks** across all required and optional filing documents, generating detailed reports in both Markdown and PDF formats.
+The skill performs **70+ automated checks** across all required and optional filing documents, generating a single self-contained HTML report. To save as PDF, open the HTML in any browser and use File → Print → Save as PDF.
+
+### Reliability foundation
+
+Most regex-based "70-check" patent QC tools produce noise on real filings because PDF text extraction is messy and form-field reading is hard. This skill addresses each of those problems specifically:
+
+- **Direct XFA reading** — the USPTO web-fillable ADS (PTO/AIA/14) is an XFA form that most PDF tools see as a blank "Please wait..." page. The skill parses the embedded XFA datasets XML directly and pulls every field as structured data: inventors with separate first/middle/last/suffix, customer numbers, assignee, drawing-sheet count, signer, continuity entries, etc. No Adobe required.
+- **`pdfplumber` for body text** — used as the primary text extractor for spec/declaration/assignment/POA. Preserves paragraph structure and section headers that PyPDF2 strips, which is what the section-detection and claim-parsing checks rely on. It also recovers text from PDFs whose font encodings PyPDF2 cannot decode (a common reason older declarations show up as "unreadable").
+- **Content-based file classification** — files are identified by *content* (claim language, declaration boilerplate, XFA element names, FIG. references), not by filename. `Application.pdf`, `Formals.pdf`, `MS3-0230US-A.pdf` — any naming convention works.
+- **Continuation-aware** — when the ADS XFA shows a `CON`/`DIV`/`CIP` continuity entry, date-logical checks (declaration date, assignment date) accept the parent's older date as expected, and the docket-consistency check only requires Spec↔ADS to match (parent's dec/asgn carry forward different dockets).
+- **Image-only-page detection** — when a declaration or assignment has scanned signature pages with no extractable text, cross-document inventor checks hedge their findings ("missing inventor may be on the image-only page; verify manually") rather than firing a false-positive CRITICAL.
+- **Multi-docket extraction** — patent filings often carry both a Client Docket and an Attorney Docket. The cross-docket consistency check looks for ANY docket overlap, not strict equality.
 
 ## Supported Documents
 
@@ -23,7 +34,9 @@ The skill performs **70+ automated checks** across all required and optional fil
 | Assignment | No | Transfer of rights to assignee |
 | Power of Attorney | No | Authorization for practitioners |
 
-**Filenames don't matter.** The script identifies each PDF by inspecting its *content* (claim language, declaration boilerplate, XFA form streams, FIG. references, etc.), not by matching filenames against a fixed pattern list. A specification named `Application.pdf`, a declaration named `Formals.pdf`, an ADS named `MS3-0230US-A.pdf` — any naming convention works. XFA forms (PTO/AIA/01, /02, /14, /82, etc.) are distinguished from one another by inspecting their embedded XML.
+**Filenames don't matter.** The script identifies each file by inspecting its *content* (claim language, declaration boilerplate, XFA form streams, FIG. references, etc.), not by matching filenames against a fixed pattern list. A specification named `Application.pdf`, a declaration named `Formals.pdf`, an ADS named `MS3-0230US-A.pdf` — any naming convention works. XFA forms (PTO/AIA/01, /02, /14, /82, etc.) are distinguished from one another by inspecting their embedded XML.
+
+**Specs can be `.docx` or `.pdf`.** The USPTO accepts the specification in Word format, and the tool reads `.docx` files via python-docx and routes them to the Specification slot the same way it routes PDFs. Other filing documents (declaration, ADS, drawings, assignment, POA) should be PDFs.
 
 ## Installation
 
@@ -33,12 +46,12 @@ The skill performs **70+ automated checks** across all required and optional fil
 
 | Package | When needed | Install command |
 |---------|-------------|-----------------|
-| **PyPDF2** | Always — required to read any PDF and to extract XFA form data | `pip install PyPDF2` |
-| **pandoc + basictex** *(preferred PDF backend)* | When you want PDF output of the report | `brew install pandoc basictex` (macOS) |
-| **weasyprint + markdown** *(fallback PDF backend)* | When you want PDF output but don't want a LaTeX install | `pip install weasyprint markdown` |
+| **PyPDF2** | Always — used for XFA stream extraction and AcroForm inspection | `pip install PyPDF2` |
+| **pdfplumber** | Always — primary text extractor for spec/declaration/assignment/POA. Preserves paragraph structure PyPDF2 strips, which the spec-content checks need to work correctly. | `pip install pdfplumber` |
+| **python-docx** *(optional, for Word specs)* | Only if a `.docx` file is in the folder. The USPTO accepts the specification in `.docx`; this lets the tool read it. | `pip install python-docx` |
 | **pytesseract + pdf2image** *(optional OCR)* | Only for scanned/image-based filing documents that aren't text-searchable. **Not needed for the USPTO XFA-based ADS** — that's handled by the built-in XFA reader. | `pip install pytesseract pdf2image` + `brew install tesseract poppler` |
 
-If you skip the PDF backend, the script will still emit the Markdown report — only the `.pdf` won't be generated.
+The report is generated as a self-contained HTML file with embedded CSS — no external tooling (no pandoc, no LaTeX, no weasyprint) is required. To save the report as a PDF, open the HTML in any browser and use **File → Print → Save as PDF**. The output is identical on every operating system.
 
 ### Recommended: Reduce Permission Prompts in Claude Code
 
@@ -50,11 +63,10 @@ By default Claude Code asks for permission on every Bash call, every PDF read, a
     "allow": [
       "Bash(python3 *qc_patent_filing.py*)",
       "Bash(pip install PyPDF2*)",
-      "Bash(pip install weasyprint*)",
-      "Bash(pip install markdown*)",
+      "Bash(pip install pdfplumber*)",
+      "Bash(pip install python-docx*)",
       "Bash(pip install pytesseract*)",
       "Bash(pip install pdf2image*)",
-      "Bash(pandoc *)",
       "Bash(pdftotext *)",
       "Bash(pdfinfo *)",
       "Read(*.pdf)",
@@ -64,7 +76,7 @@ By default Claude Code asks for permission on every Bash call, every PDF read, a
 }
 ```
 
-These rules cover the script invocation, dependency installs, the PDF reads the script and skill perform, and the two report files written to the filing folder. After adding them, a typical run will produce only a handful of permission prompts (or none, if everything is allowlisted).
+These rules cover the script invocation, dependency installs, the PDF reads the script performs, and the report file written to the filing folder. After adding them, a typical run will produce only a handful of permission prompts (or none, if everything is allowlisted).
 
 ## Usage
 
@@ -103,9 +115,10 @@ Smith, John P., Jr.
 
 ### Output
 
-The script generates two report files:
-- `Patent_Filing_QC_Report.md` - Markdown format for easy reading
-- `Patent_Filing_QC_Report.pdf` - PDF format for distribution/archiving
+The script generates one report file:
+- `Patent_Filing_QC_Report.html` — self-contained HTML with embedded CSS. Opens in any browser. The visual layout is deterministic regardless of operating system or installed software.
+
+If you want a paper copy, open the HTML in a browser and use File → Print → Save as PDF. Browser-rendered PDFs are visually identical across Chrome, Safari, Firefox, and Edge.
 
 ## Quality Control Checks
 
@@ -177,7 +190,7 @@ Validates the drawings/figures:
 | Black and White Compliance | Drawings are black and white (or color petition noted) |
 | Legibility | Text and lines are clear and readable |
 
-### 5. ADS-Specific (5 + 2 conditional checks)
+### 5. ADS-Specific (5 + 1 conditional check)
 
 Validates the Application Data Sheet:
 
@@ -188,7 +201,6 @@ Validates the Application Data Sheet:
 | Entity Status | Small/micro/large entity status is specified |
 | Correspondence Address | Complete correspondence address provided |
 | Attorney/Agent Registration | Valid registration numbers for practitioners |
-| **Inventor Citizenship Populated** *(XFA only)* | All inventors have a citizenship dropdown populated. If blank for assignee-filers under 37 CFR 1.46, the warning notes that some practitioners intentionally leave this blank and capture citizenship in the Declaration — verify intent. |
 | **Attorney vs. Correspondence Customer Number** *(XFA only)* | The two customer-number fields in the ADS (correspondence and attorney/agent) usually match. Warns on mismatch. |
 
 When the ADS is read via XFA, the report also includes an **"ADS Data Summary (Extracted from XFA)"** table near the end showing all extracted fields (title, docket #, entity status, both customer numbers, assignee + address, drawing sheet count, representative figure, domestic continuity, foreign priority, non-publication request, AIA transition statement, signer, registration number, signature date, form pages) plus an inventor table with name / residency / city / country / citizenship.
@@ -297,15 +309,14 @@ Final review checks:
 
 ## Report Severity Levels
 
-Each check produces one of these results:
+Each check produces one of these results, shown as a colored badge in the HTML report:
 
-| Level | Icon | Meaning |
-|-------|------|---------|
-| PASS | ✅ | Check passed, no action needed |
-| WARNING | ⚠️ | Potential issue, review recommended |
-| CRITICAL | 🚨 | Must fix before filing |
-| LOW CONFIDENCE | ❓ | Possible issue, manual verification needed |
-| INFO | ℹ️ | Manual review recommended |
+| Level | Badge color | Meaning |
+|-------|-------------|---------|
+| **CRITICAL** | red | Must fix before filing |
+| **WARN** | amber | Potential issue, review recommended |
+| **INFO** | blue | Informational / manual review recommended (e.g., when extraction couldn't fully verify the check) |
+| **PASS** | green | Check passed, no action needed |
 
 ## Known Limitations
 
