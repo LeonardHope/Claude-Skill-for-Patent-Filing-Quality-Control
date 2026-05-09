@@ -84,11 +84,45 @@ class PatentFilingQC:
         self.ads_is_xfa = False
         self.authoritative_inventors: List[Dict] = []
         self.authoritative_source: Optional[str] = None
+        # Per-document count of pages that have no extractable text but do
+        # contain images (e.g., scanned signed declaration/assignment pages).
+        # Cross-doc checks should hedge findings against these documents.
+        self.image_only_pages: Dict[str, int] = {}
         
     def extract_pdf_text(self, pdf_path: Path, doc_type: str = "Document") -> str:
-        """Extract text from a PDF file, with OCR fallback for image-based PDFs"""
+        """Extract text from a PDF file. Tries pdfplumber first (preserves
+        paragraph structure that the regex-based section/claim checks need),
+        then PyPDF2 as a fallback, then OCR for image-only PDFs."""
+        # First, try pdfplumber. It generally preserves newlines between
+        # paragraphs and section headers that PyPDF2 strips, which is what
+        # the spec-content checks (Abstract, Brief Description, Claims, etc.)
+        # rely on. Lazy-imported so the dep is only required when actually used.
+        text = ""
+        image_only_count = 0
         try:
-            # First, try normal text extraction
+            import pdfplumber
+            with pdfplumber.open(pdf_path) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text() or ""
+                    if page_text:
+                        text += page_text + "\n"
+                    elif hasattr(page, 'images') and page.images:
+                        # Page has no extractable text but does contain images
+                        # — typical scanned signed page on declaration/assignment.
+                        image_only_count += 1
+            if image_only_count > 0:
+                self.image_only_pages[doc_type] = image_only_count
+            clean_text = text.strip()
+            if len(clean_text) > 100 and "Please wait" not in clean_text[:200]:
+                return text
+        except ImportError:
+            # pdfplumber not installed; fall through to PyPDF2.
+            pass
+        except Exception as e:
+            print(f"  ⚠️  pdfplumber failed on {pdf_path.name} ({e}); falling back to PyPDF2")
+
+        # Fallback: PyPDF2. Less faithful to layout but doesn't need the dep.
+        try:
             text = ""
             with open(pdf_path, 'rb') as file:
                 reader = PyPDF2.PdfReader(file)
@@ -516,8 +550,25 @@ class PatentFilingQC:
         self.report.files_found[doc_type] = None
         return None
 
-    def _quick_extract_text(self, pdf_path: Path, max_pages: int = 3) -> str:
-        """Cheap text extraction (no OCR) used for content-based classification."""
+    def _quick_extract_text(self, pdf_path: Path, max_pages: int = 999) -> str:
+        """Text extraction used for content-based classification. Reads ALL
+        pages by default — many key spec markers (CLAIMS preamble, ABSTRACT)
+        appear at the END of a long spec, not the first few pages. Reading
+        only the first 3 pages produced asymmetric classification confidence
+        between .pdf (only first pages seen) and .docx (full doc seen) for
+        the same content.
+        Uses pdfplumber when available (much better for PDFs with custom font
+        encodings — e.g., USPTO declarations whose body text PyPDF2 can't decode
+        but pdfplumber can). Falls back to PyPDF2 if pdfplumber is unavailable."""
+        try:
+            import pdfplumber
+            with pdfplumber.open(pdf_path) as pdf:
+                pages = pdf.pages[:max_pages]
+                return "\n".join((p.extract_text() or "") for p in pages)
+        except ImportError:
+            pass
+        except Exception:
+            pass
         try:
             with open(pdf_path, 'rb') as f:
                 reader = PyPDF2.PdfReader(f)
@@ -525,6 +576,36 @@ class PatentFilingQC:
                 return "\n".join((p.extract_text() or "") for p in pages)
         except Exception:
             return ""
+
+    def _extract_docx_text(self, docx_path: Path) -> str:
+        """Extract all visible text from a .docx file. Lazy-imports python-docx
+        so the dependency is only required when a .docx file is actually present."""
+        try:
+            import docx  # python-docx
+        except ImportError:
+            print(f"\n  🚨 Found Word document {docx_path.name} but python-docx is not installed.")
+            print(f"     Install it with: pip install python-docx --break-system-packages")
+            print(f"     Then re-run this QC.\n")
+            return ""
+        try:
+            doc = docx.Document(str(docx_path))
+            chunks = [p.text for p in doc.paragraphs]
+            # Also pull text from tables (some specs render claims in tables)
+            for tbl in doc.tables:
+                for row in tbl.rows:
+                    for cell in row.cells:
+                        chunks.append(cell.text)
+            return "\n".join(c for c in chunks if c)
+        except Exception as e:
+            self._document_read_failure('Word document', docx_path, str(e))
+            return ""
+
+    def _extract_text_any(self, path: Path, doc_type: str) -> str:
+        """Format-agnostic text extraction: dispatch on extension."""
+        suffix = path.suffix.lower()
+        if suffix == '.docx':
+            return self._extract_docx_text(path)
+        return self.extract_pdf_text(path, doc_type)
 
     def _extract_all_xfa_xml(self, pdf_path: Path) -> str:
         """Concatenate every XFA stream's text content. The 'template' stream
@@ -560,17 +641,26 @@ class PatentFilingQC:
         except Exception:
             return ""
 
-    def _classify_pdf(self, pdf_path: Path) -> Tuple[str, float]:
-        """Identify what kind of filing document a PDF is by inspecting its
-        content (not its filename). Returns (doc_type, confidence_score).
-        doc_type is one of: 'ADS', 'Specification', 'Drawings', 'Declaration',
-        'Assignment', 'Power of Attorney', 'Unknown'.
+    def _classify_file(self, path: Path) -> Tuple[str, float]:
+        """Identify what kind of filing document a file is by inspecting its
+        content (not its filename). Handles both PDF and DOCX. Returns
+        (doc_type, confidence_score). doc_type is one of: 'ADS',
+        'Specification', 'Drawings', 'Declaration', 'Assignment',
+        'Power of Attorney', 'Unknown'.
         """
-        # XFA forms: don't assume XFA == ADS. Multiple USPTO forms ship as XFA
-        # (PTO/AIA/01 + /02 Declarations, /14 ADS, /82 POA, etc.). Pull the
-        # XFA XML streams and classify on their content.
-        if self._is_xfa_form(pdf_path):
-            xfa_xml = self._extract_all_xfa_xml(pdf_path)
+        # DOCX path: only the spec is ever .docx in practice. Extract text
+        # and run it through the same scoring as a non-XFA PDF.
+        if path.suffix.lower() == '.docx':
+            text = self._extract_docx_text(path)
+            if not text.strip():
+                return ('Unknown', 0.0)
+            return self._score_text(text)
+
+        # PDF path. XFA forms: don't assume XFA == ADS. Multiple USPTO forms
+        # ship as XFA (PTO/AIA/01 + /02 Declarations, /14 ADS, /82 POA, etc.).
+        # Pull the XFA XML streams and classify on their content.
+        if self._is_xfa_form(path):
+            xfa_xml = self._extract_all_xfa_xml(path)
             xl = xfa_xml.lower()
             # Highly specific structural markers per form
             xfa_scores = {
@@ -598,12 +688,17 @@ class PatentFilingQC:
             # source text (the rendered PDF would just say "Please wait...").
             text = xfa_xml
         else:
-            text = self._quick_extract_text(pdf_path)
+            text = self._quick_extract_text(path)
             # If a non-XFA PDF returned almost no text, it's most likely the
             # drawings (image-only PDF). Try the full text path before deciding.
             if len(text.strip()) < 200:
-                text = self.extract_pdf_text(pdf_path, '<classifying>')
+                text = self.extract_pdf_text(path, '<classifying>')
 
+        return self._score_text(text)
+
+    def _score_text(self, text: str) -> Tuple[str, float]:
+        """Score raw text against doc-type signatures and return the best match.
+        Used by both PDF and DOCX classification paths."""
         tl = text.lower()
         head = tl[:1500]  # signatures that must appear near the top
 
@@ -651,15 +746,28 @@ class PatentFilingQC:
             2 * ('revoke' in tl and 'attorney' in tl)
         )
 
-        # Drawings: defining trait is FIG. references with very little prose.
+        # Drawings: defining traits are very little prose plus drawing-style
+        # markers (FIG. labels, sheet-numbering, sparse 3-digit reference
+        # numerals). Many drawings PDFs are image-only with the only
+        # extractable text being the page-margin header (docket, title, sheet
+        # numbers like "1/7" or "1 of 7") and a handful of reference numerals.
         has_fig_refs = bool(re.search(r'fig\.\s*\d', tl))
+        has_sheet_phrase = bool(re.search(r'sheet\s+\d+\s*(/|of)\s*\d+', tl))
+        # "1/7" or "01 / 07" alone on a line — common sheet-number format
+        has_bare_sheet_nums = bool(re.search(r'(?m)^\s*\d+\s*/\s*\d+\s*$', text))
+        # Many isolated 3-digit numbers (reference numerals) on their own lines
+        bare_3dig_lines = len(re.findall(r'(?m)^\s*\d{3}\s*$', text))
         prose_len = len(re.sub(r'\s+', ' ', text).strip())
+
         if has_fig_refs and prose_len < 1500:
             scores['Drawings'] = 8.0
         elif has_fig_refs and prose_len < 4000:
             scores['Drawings'] = 4.0
-        elif bool(re.search(r'sheet\s+\d+\s*(/|of)\s*\d+', tl)):
-            scores['Drawings'] = 3.0
+        elif has_sheet_phrase or has_bare_sheet_nums:
+            scores['Drawings'] = 5.0
+        elif prose_len < 2000 and bare_3dig_lines >= 5:
+            # Image-only drawings PDF with margin header + extracted ref numerals
+            scores['Drawings'] = 4.0
         else:
             scores['Drawings'] = 0.0
 
@@ -682,46 +790,103 @@ class PatentFilingQC:
         for s in slots:
             self.report.files_found[s] = None
 
-        all_pdfs = sorted(self.folder_path.glob('*.pdf'))
+        # Glob both PDFs and Word docs. The USPTO accepts the specification in
+        # .docx format; everything else (declarations, ADS, drawings, assignments,
+        # POAs) is always PDF — but we let the content classifier decide rather
+        # than encoding "only spec can be docx" as a hard rule.
+        all_files = sorted(
+            list(self.folder_path.glob('*.pdf')) +
+            list(self.folder_path.glob('*.docx'))
+        )
 
-        # Skip the QC report PDF if it's already in the folder from a prior run
-        all_pdfs = [p for p in all_pdfs if 'patent_filing_qc_report' not in p.name.lower()]
+        # Skip the QC report and any Office lock files (~$ prefix)
+        all_files = [
+            p for p in all_files
+            if 'patent_filing_qc_report' not in p.name.lower()
+            and not p.name.startswith('~$')
+        ]
 
-        # Classify every PDF
+        # Classify every file
         candidates_by_type: Dict[str, List[Tuple[Path, float]]] = {}
         unrecognized: List[Path] = []
-        for pdf in all_pdfs:
-            doc_type, confidence = self._classify_pdf(pdf)
+        for path in all_files:
+            doc_type, confidence = self._classify_file(path)
             if doc_type == 'Unknown':
-                unrecognized.append(pdf)
-                print(f"  ❓ Unrecognized PDF (low confidence): {pdf.name}")
+                unrecognized.append(path)
+                print(f"  ❓ Unrecognized file (low confidence): {path.name}")
                 continue
-            candidates_by_type.setdefault(doc_type, []).append((pdf, confidence))
-            print(f"  📄 {pdf.name} → {doc_type} (confidence {confidence:.0f})")
+            candidates_by_type.setdefault(doc_type, []).append((path, confidence))
+            print(f"  📄 {path.name} → {doc_type} (confidence {confidence:.0f})")
 
-        # For each slot, pick the highest-confidence candidate. If multiple
-        # PDFs claim the same slot, warn but continue with the best match.
+        # For each slot, pick a candidate and warn if there are duplicates.
+        # Spec-specific tie-breaker: when both a .pdf and .docx are present,
+        # prefer the .pdf since that's what gets filed at the USPTO. (We keep
+        # .docx support for the case where there's only a .docx.) For all other
+        # slots, sort purely by confidence.
         for doc_type, candidates in candidates_by_type.items():
-            candidates.sort(key=lambda x: -x[1])
-            best_pdf, best_conf = candidates[0]
-            self.report.files_found[doc_type] = best_pdf.name
+            if doc_type == 'Specification':
+                # PDF first, then by descending confidence
+                candidates.sort(key=lambda x: (
+                    0 if x[0].suffix.lower() == '.pdf' else 1,
+                    -x[1],
+                ))
+            else:
+                candidates.sort(key=lambda x: -x[1])
+            best_path, best_conf = candidates[0]
+            self.report.files_found[doc_type] = best_path.name
+
             if len(candidates) > 1:
                 others = ', '.join(p.name for p, _ in candidates[1:])
-                print(f"  ⚠️  Multiple PDFs classified as {doc_type}; using "
-                      f"{best_pdf.name} (also matched: {others})")
+                print(f"  ⚠️  Multiple files classified as {doc_type}; using "
+                      f"{best_path.name} (also matched: {others})")
+
+                # Compose a report-visible warning so the user sees this in
+                # the QC report, not just on the console.
+                exts = sorted({p.suffix.lower() for p, _ in candidates})
+                spec_dual_format = (
+                    doc_type == 'Specification'
+                    and '.pdf' in exts and '.docx' in exts
+                )
+                if spec_dual_format:
+                    msg = (f"Both a .pdf and a .docx version of the "
+                           f"specification are in the to-be-filed folder")
+                    details = (
+                        f"Picked: {best_path.name} (defaulting to .pdf when "
+                        f"both are present — the USPTO accepts spec filings "
+                        f"in either .docx or .pdf, but most practitioners file the .pdf).\n"
+                        f"Also present: {others}.\n\n"
+                        "Verify which one you actually intend to file. If the "
+                        "non-filed copy is just a working draft, consider moving "
+                        "it out before filing so the folder reflects exactly "
+                        "what's being submitted."
+                    )
+                else:
+                    msg = f"Multiple files classified as {doc_type}"
+                    details = (
+                        f"Picked: {best_path.name} "
+                        f"(highest classification confidence).\n"
+                        f"Also matched: {others}.\n\n"
+                        "Verify the correct file was used. If a non-current "
+                        "draft is in the folder, remove it before filing."
+                    )
+                self.report.add_issue(
+                    74, "Document Completeness",
+                    "Duplicate Files for Same Document Type",
+                    Severity.WARNING, msg, details
+                )
 
             if doc_type == 'Specification':
-                self.spec_text = self.extract_pdf_text(best_pdf, 'Specification')
+                self.spec_text = self._extract_text_any(best_path, 'Specification')
             elif doc_type == 'Drawings':
-                self.drawings_text = self.extract_pdf_text(best_pdf, 'Drawings')
+                self.drawings_text = self._extract_text_any(best_path, 'Drawings')
             elif doc_type == 'ADS':
-                self.ads_text = self._extract_ads_text(best_pdf)
+                self.ads_text = self._extract_ads_text(best_path)
             elif doc_type == 'Declaration':
-                self.declaration_text = self.extract_pdf_text(best_pdf, 'Declaration')
+                self.declaration_text = self._extract_text_any(best_path, 'Declaration')
             elif doc_type == 'Assignment':
-                self.assignment_text = self.extract_pdf_text(best_pdf, 'Assignment')
+                self.assignment_text = self._extract_text_any(best_path, 'Assignment')
             elif doc_type == 'Power of Attorney':
-                self.poa_text = self.extract_pdf_text(best_pdf, 'Power of Attorney')
+                self.poa_text = self._extract_text_any(best_path, 'Power of Attorney')
 
         # Optional: authoritative inventor list (inventors.json/txt or *.eml)
         self._load_authoritative_inventors()
@@ -816,6 +981,54 @@ class PatentFilingQC:
 
         return list(set(inventors))
     
+    def _drawings_text_extractable(self) -> bool:
+        """True if the drawings PDF has enough extractable text that
+        FIG.-label-based checks can produce meaningful results. False if it's
+        image-only (typical for sheets exported from CAD/Visio without text
+        overlays) — in which case checks that look for FIG.-N labels will
+        produce false positives.
+        Heuristic: needs at least 2 distinct FIG. references in extracted text."""
+        if not self.drawings_text:
+            return False
+        fig_count = len(set(re.findall(r'fig\.\s*(\d+)', self.drawings_text, re.IGNORECASE)))
+        return fig_count >= 2
+
+    def _extract_claims_section(self) -> str:
+        """Pull just the CLAIMS section text from the specification. Many
+        checks (13, 53, 54) need to operate on claim text only — running
+        them against the whole spec text produces false positives because
+        the body text contains many noun phrases that aren't claim elements."""
+        if not self.spec_text:
+            return ""
+        # Order matters: most specific first. Critically, the modern-spec
+        # pattern '\bCLAIMS\b\s*\n' should win over patterns that match the
+        # first 'CLAIMS' substring anywhere (which would catch cross-references
+        # like 'Patent Application No.…' early in the spec).
+        patterns = [
+            r'\bCLAIMS\b\s*\n(.{50,}?)(?:\bABSTRACT\b|\Z)',
+            r'CLAIMS\s+What is claimed[^:]*:\s*(.*?)(?:\bABSTRACT\b|\Z)',
+            r'\bWhat\s+is\s+claimed[^:]*:\s*(.*?)(?:\bABSTRACT\b|\Z)',
+            r'(?:CLAIMS?\s*\n|What is claimed[^\n]*\n)(.*?)(?:\bABSTRACT\b|\Z)',
+        ]
+        for pat in patterns:
+            m = re.search(pat, self.spec_text, re.DOTALL | re.IGNORECASE)
+            if m and len(m.group(1)) > 100:
+                return m.group(1)
+        return ""
+
+    def _is_continuation_filing(self) -> bool:
+        """True if the ADS XFA data indicates this is a continuation, divisional,
+        or CIP. For these filings, the parent's executed declaration and
+        assignment may legitimately be older than 1 year and the spec
+        legitimately references the parent application."""
+        if not self.ads_data:
+            return False
+        for entry in self.ads_data.get('domestic_continuity_entries', []) or []:
+            ct = (entry.get('continuation_type') or '').upper()
+            if ct in ('CON', 'DIV', 'CIP'):
+                return True
+        return False
+
     def extract_title(self, text: str) -> str:
         """Extract application title from text"""
         # Multiple patterns for different document formats
@@ -851,26 +1064,48 @@ class PatentFilingQC:
         return ""
     
     def extract_docket_number(self, text: str) -> str:
-        """Extract attorney docket number from text"""
-        # Patterns ordered from most specific to least specific
-        # Docket numbers typically look like: A088-0170US, 12345-001, ABC-123-US, etc.
-        patterns = [
-            # "Attorney Docket No.: A088-0170US" or "Docket No.: A088-0170US"
-            r'(?:Attorney\s*)?Docket\s*(?:No\.?|Number)[:\s]+([A-Z0-9][A-Z0-9\-\.]+[A-Z0-9])',
-            # "Docket: A088-0170US"
-            r'Docket[:\s]+([A-Z0-9][A-Z0-9\-\.]+[A-Z0-9])',
-            # Look for common docket number patterns directly (letter-numbers-letters format)
-            r'\b([A-Z]\d{2,4}-\d{3,5}[A-Z]{0,3})\b',
-        ]
+        """Extract a single docket number (legacy single-return wrapper).
+        Returns the first docket number found via extract_docket_numbers().
+        Prefer extract_docket_numbers() for new callers."""
+        dockets = self.extract_docket_numbers(text)
+        return next(iter(dockets), "")
 
-        for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                docket = match.group(1).strip()
-                # Validate it looks like a real docket number (not just "No" or "Number")
-                if len(docket) >= 5 and re.search(r'\d', docket):
-                    return docket
-        return ""
+    def extract_docket_numbers(self, text: str) -> set:
+        """Extract ALL docket-shaped tokens from text. Patent filings often
+        carry both a Client Docket and an Attorney Docket (e.g.,
+        'Client Docket No.: 412147-US-NP' alongside 'Attorney Docket No.:
+        MS1-9771US'). Cross-doc consistency checks need to know about both,
+        not just whichever appears first."""
+        dockets = set()
+        # 1. Explicit "<X> Docket No.: <docket>" patterns (highest confidence).
+        labelled = re.finditer(
+            r'(?:Attorney|Client|Customer|Firm|Reference|File)?\s*'
+            r'Docket\s*(?:No\.?|Number)?\s*[:#]?\s*'
+            r'([A-Z0-9][A-Z0-9\-\._/]{3,40}[A-Z0-9])',
+            text, re.IGNORECASE
+        )
+        for m in labelled:
+            d = m.group(1).strip().rstrip('.,;:')
+            if len(d) >= 5 and re.search(r'\d', d) and not d.lower().startswith('no'):
+                dockets.add(d)
+        # 2. Common bare docket-shaped tokens — dash-separated alphanumeric
+        #    sequences with at least one digit (catches both styles like
+        #    "MS1-9771USC3" and "412147-US-NP").
+        for m in re.finditer(
+            r'\b([A-Z]{1,5}\d{1,5}[-_]\d{2,5}[A-Z0-9\-_]{0,15})\b',
+            text, re.IGNORECASE
+        ):
+            d = m.group(1).strip()
+            if len(d) >= 5 and re.search(r'\d', d):
+                dockets.add(d)
+        for m in re.finditer(
+            r'\b(\d{4,7}[-_][A-Z]{1,3}(?:[-_][A-Z0-9]{1,5}){0,3})\b',
+            text, re.IGNORECASE
+        ):
+            d = m.group(1).strip()
+            if len(d) >= 5 and re.search(r'\d', d):
+                dockets.add(d)
+        return dockets
     
     def normalize_name(self, name: str) -> str:
         """Normalize a name for comparison"""
@@ -1275,144 +1510,211 @@ class PatentFilingQC:
         """Checks 1-8: Cross-document consistency"""
 
         # Check 1: Inventor names consistency
-        # Prefer structured XFA-extracted ADS inventors when available (more accurate
-        # for middle names, suffixes, and foreign names than regex extraction).
+        # Strategy: use the ADS XFA inventor list as ground truth (very
+        # reliable — structured fields). For each ADS inventor, verify the
+        # name appears in each other document's text. Avoids the brittleness
+        # of trying to regex-extract names from declarations/assignments,
+        # which use varied formats that the previous extract_inventors()
+        # patterns didn't reliably match.
+        ads_inventors = []
         if self.ads_data and self.ads_data.get('inventors'):
             ads_inventors = [self._format_xfa_inventor(inv) for inv in self.ads_data['inventors']]
-        else:
-            ads_inventors = self.extract_inventors(self.ads_text) if self.ads_text else []
-        decl_inventors = self.extract_inventors(self.declaration_text) if self.declaration_text else []
-        assign_inventors = self.extract_inventors(self.assignment_text) if self.assignment_text else []
-        drawings_inventors = self.extract_inventors(self.drawings_text) if self.drawings_text else []
+        elif self.ads_text:
+            ads_inventors = self.extract_inventors(self.ads_text)
 
-        # Track which sources were available vs missing for reporting visibility
-        source_status = {
-            'ADS': bool(self.ads_text or self.ads_data),
-            'Declaration': bool(self.declaration_text),
-            'Assignment': bool(self.assignment_text),
-            'Drawings': bool(self.drawings_text),
-        }
-
-        all_inventor_sets = [
-            ("ADS", set(self._normalize_for_compare(i) for i in ads_inventors)),
-            ("Declaration", set(self._normalize_for_compare(i) for i in decl_inventors)),
-            ("Assignment", set(self._normalize_for_compare(i) for i in assign_inventors)),
-            ("Drawings", set(self._normalize_for_compare(i) for i in drawings_inventors))
-        ]
-
-        # Filter out empty sets
-        non_empty_sets = [(name, inv_set) for name, inv_set in all_inventor_sets if inv_set]
-
-        skipped_sources = [name for name, inv_set in all_inventor_sets if not inv_set]
-        skipped_note = ""
-        if skipped_sources:
-            unread_or_missing = [s for s in skipped_sources if not source_status.get(s)]
-            present_but_unparsed = [s for s in skipped_sources if source_status.get(s)]
-            parts = []
-            if unread_or_missing:
-                parts.append(f"not present/unreadable: {', '.join(unread_or_missing)}")
-            if present_but_unparsed:
-                parts.append(f"present but no inventor names extracted: {', '.join(present_but_unparsed)}")
-            skipped_note = "Sources excluded from this check — " + "; ".join(parts)
-
-        if len(non_empty_sets) >= 2:
-            all_match = all(inv_set == non_empty_sets[0][1] for _, inv_set in non_empty_sets)
-            if all_match:
-                msg = f"Inventor names match across documents ({', '.join(n for n, _ in non_empty_sets)})"
-                self.report.add_issue(
-                    1, "Cross-Document Consistency", "Inventor Names Consistency",
-                    Severity.PASS, msg, skipped_note
-                )
-            else:
-                mismatches = []
-                for name, inv_set in non_empty_sets:
-                    mismatches.append(f"{name}: {sorted(inv_set)}")
-                if skipped_note:
-                    mismatches.append("")
-                    mismatches.append(skipped_note)
-                self.report.add_issue(
-                    1, "Cross-Document Consistency", "Inventor Names Consistency",
-                    Severity.CRITICAL, "Inventor names do not match across documents",
-                    "\n".join(mismatches)
-                )
-        else:
-            # Make the SKIPPED reason explicit instead of a vague WARNING
-            available = ', '.join(n for n, _ in non_empty_sets) or 'none'
-            details = (
-                f"Cross-doc inventor name comparison requires at least 2 sources "
-                f"with extractable names. Found names in: {available}."
-            )
-            if skipped_note:
-                details += "\n" + skipped_note
+        if not ads_inventors:
             self.report.add_issue(
                 1, "Cross-Document Consistency", "Inventor Names Consistency",
                 Severity.WARNING,
-                "SKIPPED — not enough sources with extractable inventor names to compare",
-                details
+                "SKIPPED — could not extract inventor names from ADS to use as reference"
             )
+        else:
+            other_docs = [
+                ('Declaration', self.declaration_text),
+                ('Assignment', self.assignment_text),
+            ]
+            # Drawings: include only if text is extractable. Image-only
+            # drawings PDFs don't contain inventor names as text, so checking
+            # for them would always produce a false-positive "all missing."
+            if self._drawings_text_extractable():
+                other_docs.append(('Drawings', self.drawings_text))
+            present_docs = [(n, t) for n, t in other_docs if t and len(t.strip()) > 100]
+
+            if not present_docs:
+                self.report.add_issue(
+                    1, "Cross-Document Consistency", "Inventor Names Consistency",
+                    Severity.WARNING,
+                    "SKIPPED — no other documents available to cross-check ADS inventor names against",
+                    f"ADS inventors: {ads_inventors}"
+                )
+            else:
+                per_doc_missing: Dict[str, List[str]] = {}
+                for doc_name, doc_text in present_docs:
+                    norm_doc = self._normalize_for_compare(doc_text)
+                    missing = []
+                    for inv_name in ads_inventors:
+                        last_name = inv_name.split()[-1] if inv_name.split() else ""
+                        last_norm = self._normalize_for_compare(last_name)
+                        full_norm = self._normalize_for_compare(inv_name)
+                        if (last_norm and last_norm in norm_doc) or \
+                           (full_norm and full_norm in norm_doc):
+                            continue
+                        missing.append(inv_name)
+                    if missing:
+                        per_doc_missing[doc_name] = missing
+
+                if not per_doc_missing:
+                    self.report.add_issue(
+                        1, "Cross-Document Consistency", "Inventor Names Consistency",
+                        Severity.PASS,
+                        f"All {len(ads_inventors)} ADS inventors appear in: "
+                        f"{', '.join(n for n, _ in present_docs)}"
+                    )
+                else:
+                    details_lines = []
+                    for doc_name, missing in per_doc_missing.items():
+                        line = (f"{doc_name}: missing {len(missing)} of "
+                                f"{len(ads_inventors)} — " + ', '.join(missing))
+                        # Hedge if the doc has image-only pages
+                        img_pages = self.image_only_pages.get(doc_name, 0)
+                        if img_pages:
+                            line += (f"  [Note: {doc_name} has {img_pages} image-only "
+                                     f"page(s) — name(s) may be there but not extractable.]")
+                        details_lines.append(line)
+                    # If every "missing" finding is shadowed by image-only pages,
+                    # downgrade severity from CRITICAL to WARNING.
+                    all_hedged = all(self.image_only_pages.get(n) for n in per_doc_missing)
+                    severity = Severity.WARNING if all_hedged else Severity.CRITICAL
+                    msg = ("Some ADS inventors not found in cross-checked document text — "
+                           "may be on image-only pages") if all_hedged else \
+                          "Some ADS inventors do not appear in all cross-checked documents"
+                    self.report.add_issue(
+                        1, "Cross-Document Consistency", "Inventor Names Consistency",
+                        severity, msg, "\n".join(details_lines)
+                    )
 
         # Check 1b (extension): authoritative-source cross-check.
         # If the user dropped an inventors.txt / inventors.json / .eml in the folder,
         # treat that list as ground truth and flag any document that disagrees.
         if self.authoritative_inventors:
+            # Build per-doc inventor sets from ADS XFA + extract from other docs
+            decl_inventors = self.extract_inventors(self.declaration_text) if self.declaration_text else []
+            assign_inventors = self.extract_inventors(self.assignment_text) if self.assignment_text else []
+            drawings_inventors = self.extract_inventors(self.drawings_text) if self.drawings_text else []
+            all_inventor_sets = [
+                ("ADS", set(self._normalize_for_compare(i) for i in ads_inventors)),
+                ("Declaration", set(self._normalize_for_compare(i) for i in decl_inventors)),
+                ("Assignment", set(self._normalize_for_compare(i) for i in assign_inventors)),
+                ("Drawings", set(self._normalize_for_compare(i) for i in drawings_inventors))
+            ]
             self._check_inventors_against_authoritative(all_inventor_sets)
         
         # Check 2: Application title consistency
-        spec_title = self.extract_title(self.spec_text)
-        # Prefer XFA-extracted title when available (regex extraction is brittle on
-        # the synthesized text and on real ADS form layouts).
+        # Strategy: get the canonical title from the ADS (XFA-extracted; very
+        # reliable), then search the spec text for it. This avoids the
+        # fragility of extract_title() trying to find the title without a
+        # known reference — regex patterns can't reliably identify the title
+        # from spec text alone (no "Title:" label on most specs).
+        ads_title = ""
         if self.ads_data and self.ads_data.get('title'):
             ads_title = self.ads_data['title']
         else:
             ads_title = self.extract_title(self.ads_text)
-        
-        if spec_title and ads_title:
-            if spec_title.upper() == ads_title.upper():
-                self.report.add_issue(
-                    2, "Cross-Document Consistency", "Application Title Consistency",
-                    Severity.PASS, "Application title matches across documents"
-                )
-            else:
-                self.report.add_issue(
-                    2, "Cross-Document Consistency", "Application Title Consistency",
-                    Severity.CRITICAL, "Application title mismatch",
-                    f"Spec: {spec_title}\nADS: {ads_title}"
-                )
-        else:
+
+        if not ads_title:
             self.report.add_issue(
                 2, "Cross-Document Consistency", "Application Title Consistency",
-                Severity.WARNING, "Unable to extract titles from both specification and ADS"
+                Severity.WARNING, "Unable to extract title from ADS"
             )
-        
-        # Check 3: Attorney docket number consistency
-        dockets = []
-        # Prefer XFA-extracted docket for ADS when available
-        if self.ads_data and self.ads_data.get('docket_number'):
-            dockets.append(("ADS", self.ads_data['docket_number']))
-            other_sources = [("Spec", self.spec_text),
-                             ("Declaration", self.declaration_text),
-                             ("Assignment", self.assignment_text)]
+        elif not self.spec_text:
+            self.report.add_issue(
+                2, "Cross-Document Consistency", "Application Title Consistency",
+                Severity.WARNING, "Specification not available to compare title"
+            )
         else:
-            other_sources = [("Spec", self.spec_text), ("ADS", self.ads_text),
-                             ("Declaration", self.declaration_text), ("Assignment", self.assignment_text)]
-        for name, text in other_sources:
-            if text:
-                docket = self.extract_docket_number(text)
-                if docket:
-                    dockets.append((name, docket))
-        
-        if len(dockets) >= 2:
-            all_match = all(d[1].upper() == dockets[0][1].upper() for d in dockets)
-            if all_match:
+            # Normalize: collapse whitespace, uppercase, strip trailing punctuation
+            def normalize(s):
+                return re.sub(r'\s+', ' ', s.upper()).strip().rstrip('.,;:')
+            ads_norm = normalize(ads_title)
+            spec_norm = normalize(self.spec_text)
+            if ads_norm in spec_norm:
                 self.report.add_issue(
-                    3, "Cross-Document Consistency", "Attorney Docket Number Consistency",
-                    Severity.PASS, "Attorney docket number matches across documents"
+                    2, "Cross-Document Consistency", "Application Title Consistency",
+                    Severity.PASS,
+                    f"ADS title appears verbatim in specification"
                 )
             else:
-                details = "\n".join([f"{name}: {docket}" for name, docket in dockets])
+                # Maybe minor differences (hyphenation, line breaks). Try matching
+                # on the first 60% of the title, ignoring punctuation differences.
+                title_words = ads_norm.split()
+                key_chunk = ' '.join(title_words[:max(4, int(len(title_words) * 0.6))])
+                if key_chunk in spec_norm:
+                    self.report.add_issue(
+                        2, "Cross-Document Consistency", "Application Title Consistency",
+                        Severity.PASS,
+                        "Most of ADS title appears in specification (minor wording differences detected)"
+                    )
+                else:
+                    self.report.add_issue(
+                        2, "Cross-Document Consistency", "Application Title Consistency",
+                        Severity.CRITICAL,
+                        "ADS title does not appear in specification — verify they describe the same application",
+                        f"ADS title: {ads_title}"
+                    )
+        
+        # Check 3: Attorney docket number consistency
+        # Patent filings often carry both a Client Docket and an Attorney Docket
+        # in the same document footer. We extract ALL docket-shaped tokens from
+        # each doc (as a set) and PASS if any docket overlaps across docs.
+        # For continuation/divisional/CIP filings, the parent's executed
+        # declaration and assignment legitimately carry the parent application's
+        # dockets (which differ from the child's), so we only require spec↔ADS
+        # consistency in that case.
+        docket_sets = {}
+        if self.ads_data and self.ads_data.get('docket_number'):
+            docket_sets["ADS"] = {self.ads_data['docket_number']}
+        elif self.ads_text:
+            docket_sets["ADS"] = self.extract_docket_numbers(self.ads_text)
+        for name, text in [("Spec", self.spec_text),
+                           ("Declaration", self.declaration_text),
+                           ("Assignment", self.assignment_text)]:
+            if text:
+                ds = self.extract_docket_numbers(text)
+                if ds:
+                    docket_sets[name] = ds
+
+        if len(docket_sets) >= 2:
+            is_continuation = self._is_continuation_filing()
+            # For continuations, only require Spec↔ADS to match. Dec/Asgn
+            # carried forward from a parent are expected to have different dockets.
+            sources_to_compare = list(docket_sets.keys())
+            if is_continuation:
+                sources_to_compare = [s for s in sources_to_compare if s in ("ADS", "Spec")]
+
+            if len(sources_to_compare) >= 2:
+                # Use case-insensitive comparison
+                normalized = {s: {d.upper() for d in docket_sets[s]} for s in sources_to_compare}
+                # PASS if any docket appears in EVERY compared doc
+                shared = set.intersection(*normalized.values()) if normalized else set()
+                if shared:
+                    suffix = " (Spec↔ADS only — parent's Dec/Asgn dockets carried forward)" if is_continuation else ""
+                    msg = f"Attorney docket number consistent across documents{suffix}: {sorted(shared)[0]}"
+                    self.report.add_issue(
+                        3, "Cross-Document Consistency", "Attorney Docket Number Consistency",
+                        Severity.PASS, msg
+                    )
+                else:
+                    details_lines = [f"{name}: {sorted(docket_sets[name])}" for name in docket_sets]
+                    self.report.add_issue(
+                        3, "Cross-Document Consistency", "Attorney Docket Number Consistency",
+                        Severity.CRITICAL, "Attorney docket number mismatch — no docket appears in all compared documents",
+                        "\n".join(details_lines)
+                    )
+            else:
                 self.report.add_issue(
                     3, "Cross-Document Consistency", "Attorney Docket Number Consistency",
-                    Severity.CRITICAL, "Attorney docket number mismatch", details
+                    Severity.WARNING,
+                    "Unable to compare dockets — only one source has extractable docket numbers"
                 )
         else:
             self.report.add_issue(
@@ -1461,47 +1763,47 @@ class PatentFilingQC:
             )
         
         # Check 5: Assignee name consistency
-        # Extract assignee from ADS and Assignment, compare them
+        # Use the XFA-extracted assignee from ADS as the canonical name (clean,
+        # structured), then verify it appears in the assignment text. The old
+        # version regex-extracted the assignee from synthesized ADS text and
+        # got newline-broken values; using XFA structured data is reliable.
         ads_assignee = None
-        assignment_assignee = None
-
-        # Look for assignee in ADS - try multiple patterns
-        if self.ads_text:
-            # Pattern 1: Look for "Organization Name" followed by company (handles OCR "ization")
-            org_match = re.search(
+        if self.ads_data and self.ads_data.get('assignee_org'):
+            ads_assignee = self.ads_data['assignee_org']
+        elif self.ads_text:
+            # Legacy fallback for non-XFA ADS
+            for pat in [
                 r'(?:Organization|ization)\s*Name\s*[|\s]+([A-Za-z][\w\s,]+(?:LLC|Inc|Corp))',
-                self.ads_text, re.IGNORECASE
-            )
-            if org_match:
-                ads_assignee = org_match.group(1).strip()
+                r'c/o\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+(?:,?\s*(?:LLC|Inc|Corp)))',
+                r'Applicant\s*Name[:\s|]+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+(?:,?\s*(?:LLC|Inc|Corp)))',
+            ]:
+                m = re.search(pat, self.ads_text, re.IGNORECASE)
+                if m:
+                    ads_assignee = re.sub(r'\s+', ' ', m.group(1).strip())
+                    break
 
-            # Pattern 2: Look for "c/o Company Name" in addresses
-            if not ads_assignee:
-                co_match = re.search(
-                    r'c/o\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+(?:,?\s*(?:LLC|Inc|Corp)))',
-                    self.ads_text, re.IGNORECASE
-                )
-                if co_match:
-                    ads_assignee = co_match.group(1).strip()
-
-            # Pattern 3: Look for "Applicant Name" field with company
-            if not ads_assignee:
-                applicant_match = re.search(
-                    r'Applicant\s*Name[:\s|]+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+(?:,?\s*(?:LLC|Inc|Corp)))',
-                    self.ads_text, re.IGNORECASE
-                )
-                if applicant_match:
-                    ads_assignee = applicant_match.group(1).strip()
-
-        # Look for assignee in Assignment
+        assignment_assignee = None
         if self.assignment_text:
-            # Look for company name pattern - "Word Word, LLC" or "Word Word LLC"
-            assignment_assignee_match = re.search(
-                r'([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+(?:,?\s*(?:LLC|Inc|Corp)))',
-                self.assignment_text
-            )
-            if assignment_assignee_match:
-                assignment_assignee = assignment_assignee_match.group(1).strip()
+            # Look for the same assignee name in assignment by matching key
+            # words from the ADS-derived name (rather than regex-extracting
+            # a fresh name from assignment text, which can pick up newlines).
+            if ads_assignee:
+                # Take significant words (3+ chars, not a common word) and
+                # check that the assignment contains them
+                key_words = [w for w in re.findall(r'[A-Za-z]{3,}', ads_assignee.upper())
+                             if w not in {'THE', 'AND', 'INC', 'LLC', 'CORP', 'LTD', 'CO'}]
+                asgn_norm = self._normalize_for_compare(self.assignment_text)
+                matches = sum(1 for w in key_words if w in asgn_norm)
+                if key_words and matches >= max(1, len(key_words) // 2):
+                    assignment_assignee = ads_assignee  # Found by key-word match
+            if not assignment_assignee:
+                # Fall back to regex extraction (collapses any newlines)
+                m = re.search(
+                    r'([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+(?:,?\s*(?:LLC|Inc|Corp)))',
+                    self.assignment_text
+                )
+                if m:
+                    assignment_assignee = re.sub(r'\s+', ' ', m.group(1).strip())
 
         # Normalize for comparison - handle OCR errors
         def normalize_company(name):
@@ -1578,21 +1880,55 @@ class PatentFilingQC:
             )
         
         # Check 7: Number of inventors consistency
-        if ads_inventors and decl_inventors:
-            if len(ads_inventors) == len(decl_inventors):
+        # Compare ADS inventor count to declaration "I hereby declare" count
+        # (each inventor signs their own declaration, so the phrase appears
+        # once per inventor in a multi-inventor declaration package).
+        if ads_inventors and self.declaration_text:
+            ads_count = len(ads_inventors)
+            decl_count = len(re.findall(r'(?:i|I)\s+hereby\s+declare', self.declaration_text))
+            if decl_count == 0:
+                # Try alternate signature/inventor markers
+                decl_count = len(re.findall(r'/[A-Z][^/]{2,40}/', self.declaration_text))
+            if decl_count == ads_count:
                 self.report.add_issue(
                     7, "Cross-Document Consistency", "Number of Inventors Consistency",
-                    Severity.PASS, f"Same number of inventors ({len(ads_inventors)}) in ADS and Declaration"
+                    Severity.PASS, f"Same number of inventors ({ads_count}) in ADS and Declaration"
+                )
+            elif decl_count == 0:
+                self.report.add_issue(
+                    7, "Cross-Document Consistency", "Number of Inventors Consistency",
+                    Severity.INFO,
+                    f"ADS has {ads_count} inventor(s); could not count inventors in declaration. "
+                    "Manual verification recommended."
                 )
             else:
-                self.report.add_issue(
-                    7, "Cross-Document Consistency", "Number of Inventors Consistency",
-                    Severity.CRITICAL, f"Inventor count mismatch: ADS has {len(ads_inventors)}, Declaration has {len(decl_inventors)}"
-                )
+                # Continuation note: parent's declaration may have fewer inventors
+                # if some have been added/removed in the continuation.
+                cont_note = ""
+                if self._is_continuation_filing():
+                    cont_note = (" Note: this is a continuation filing — if the parent's "
+                                 "declaration is carried forward, inventorship may have changed in "
+                                 "the continuation, in which case a new declaration is required.")
+                # Hedge if the declaration has image-only pages
+                img_pages = self.image_only_pages.get('Declaration', 0)
+                if img_pages and decl_count + img_pages >= ads_count:
+                    self.report.add_issue(
+                        7, "Cross-Document Consistency", "Number of Inventors Consistency",
+                        Severity.WARNING,
+                        f"Could not confirm count: ADS has {ads_count}, Declaration text shows "
+                        f"{decl_count} signed declaration(s) and {img_pages} additional image-only "
+                        f"page(s) which may contain the remaining {ads_count - decl_count}.",
+                    )
+                else:
+                    self.report.add_issue(
+                        7, "Cross-Document Consistency", "Number of Inventors Consistency",
+                        Severity.CRITICAL,
+                        f"Inventor count mismatch: ADS has {ads_count}, Declaration has {decl_count}." + cont_note
+                    )
         else:
             self.report.add_issue(
                 7, "Cross-Document Consistency", "Number of Inventors Consistency",
-                Severity.WARNING, "Unable to count inventors in both ADS and Declaration"
+                Severity.INFO, "Unable to count inventors — ADS or Declaration text not available"
             )
         
         # Check 8: Inventor citizenship/residency consistency
@@ -1804,13 +2140,14 @@ class PatentFilingQC:
             return
         
         # Check 13: Claim numbering sequential
-        # Try to find claims section first
-        # PyPDF2 often doesn't preserve newlines, so use flexible patterns
-        # IMPORTANT: Order matters - more specific patterns must come first
+        # Find the CLAIMS section first. The original code only found it via
+        # "What is claimed is:" preamble — many specs use just "CLAIMS" as a
+        # section header, so add that pattern first.
         claims_section_patterns = [
-            r'CLAIMS\s+What is claimed[^:]*:\s*(.*?)(?:ABSTRACT|$)',         # "CLAIMS What is claimed is:" (most specific)
+            r'\bCLAIMS\b\s*\n(.{50,}?)(?:\bABSTRACT\b|\Z)',                  # "CLAIMS\n..." (common modern format)
+            r'CLAIMS\s+What is claimed[^:]*:\s*(.*?)(?:ABSTRACT|$)',         # "CLAIMS What is claimed is:"
             r'What is claimed[^:]*:\s*(.*?)(?:ABSTRACT|$)',                  # Just "What is claimed is:"
-            r'(?:CLAIMS?\s*\n|What is claimed[^\n]*\n)(.*?)(?:ABSTRACT|$)',  # Original with newlines (fallback)
+            r'(?:CLAIMS?\s*\n|What is claimed[^\n]*\n)(.*?)(?:ABSTRACT|$)',  # Fallback with newlines
         ]
 
         claims_text = None
@@ -1823,15 +2160,21 @@ class PatentFilingQC:
         if not claims_text:
             claims_text = self.spec_text
 
-        # Find claim numbers - look for "N. " followed by claim preamble words
-        # PyPDF2 may use spaces instead of newlines between claims
-        # Also handles page numbers appearing before claim numbers (e.g., " 48 4. The")
+        # Find claim numbers within the claims section. The previous version
+        # required a specific preamble word (A/An/The) after "N. " — that
+        # missed claims that start with other words like "A computer-implemented",
+        # "Method for", "Computer system", etc. Real-world claim 1 frequently
+        # doesn't fit that narrow set, producing a false-positive "claim 1
+        # missing" warning.
+        # Strategy: anchor on number-then-period at start-of-line or after
+        # sentence punctuation, then accept ANY following word. To filter out
+        # decimal numbers ("1.5") and section refs ("1.2"), require non-digit
+        # immediately after the period.
         claim_patterns = [
-            r'(?:^|\n)\s*(\d+)\.\s+(?:A|An|The)\s+',           # Original with newlines
-            r'(?:\.\s+|\;\s+|:\s+)(\d+)\.\s+(?:A|An|The)\s+',  # After sentence end
-            r'\s{2,}(\d+)\.\s+(?:A|An|The)\s+',                # After multiple spaces
-            r'^\s*(\d+)\.\s+(?:A|An|The)\s+',                  # At start of claims section
-            r'\s+\d{2,3}\s+(\d+)\.\s+(?:A|An|The)\s+',         # After page number (2-3 digits)
+            r'(?:^|\n)\s*(\d+)\.\s+(?=\D)',                  # newline-anchored
+            r'(?:\.\s+|\;\s+|:\s+)(\d+)\.\s+(?=\D)',         # after sentence end
+            r'\s{2,}(\d+)\.\s+(?=\D)',                       # after multiple spaces
+            r'\s+\d{2,3}\s+(\d+)\.\s+(?=\D)',                # after page number
         ]
 
         claim_matches = []
@@ -1975,12 +2318,23 @@ class PatentFilingQC:
                 )
         
         # Check 15: Figure reference validity
+        # Drawings PDFs are commonly image-only (CAD/Visio exports without
+        # text overlays). When that's the case, FIG. labels exist visually
+        # but aren't extractable as text. Don't flag as a real "figure
+        # missing" issue when extraction fundamentally can't see the labels.
         fig_refs_in_spec = set(self._extract_figure_numbers(self.spec_text))
         fig_nums_in_drawings = set(self._extract_figure_numbers(self.drawings_text)) if self.drawings_text else set()
 
-        if fig_refs_in_spec and fig_nums_in_drawings:
+        if not self._drawings_text_extractable() and fig_refs_in_spec:
+            self.report.add_issue(
+                15, "Specification", "Figure Reference Validity",
+                Severity.INFO,
+                f"Drawings PDF appears to be image-only — cannot verify FIG. labels by text extraction. "
+                f"Spec references: FIG. {', '.join(str(n) for n in sorted(fig_refs_in_spec))}. "
+                f"Manually verify each is present in the drawings."
+            )
+        elif fig_refs_in_spec and fig_nums_in_drawings:
             missing_figs = fig_refs_in_spec - fig_nums_in_drawings
-            extra_figs = fig_nums_in_drawings - fig_refs_in_spec
             if not missing_figs:
                 self.report.add_issue(
                     15, "Specification", "Figure Reference Validity",
@@ -1994,7 +2348,9 @@ class PatentFilingQC:
         elif fig_refs_in_spec:
             self.report.add_issue(
                 15, "Specification", "Figure Reference Validity",
-                Severity.WARNING, f"Unable to extract figure numbers from drawings. Spec references: FIG. {', '.join(str(n) for n in sorted(fig_refs_in_spec))}"
+                Severity.INFO,
+                f"Drawings text extraction was minimal — cannot verify. "
+                f"Spec references: FIG. {', '.join(str(n) for n in sorted(fig_refs_in_spec))}"
             )
         else:
             self.report.add_issue(
@@ -2051,6 +2407,25 @@ class PatentFilingQC:
 
                         # Last word matches (usually the main noun)
                         if core1.split()[-1] == core2.split()[-1]:
+                            return True
+
+                        # Acronym match: one is the initials of the other
+                        # (e.g. "gnn" vs "graph neural network")
+                        def is_acronym_of(short, long):
+                            short = short.replace(' ', '').lower()
+                            words = long.split()
+                            if len(short) == len(words) and len(words) >= 2:
+                                initials = ''.join(w[0].lower() for w in words if w)
+                                return initials == short
+                            return False
+                        if is_acronym_of(core1, core2) or is_acronym_of(core2, core1):
+                            return True
+
+                        # Whitespace-artifact match: pdfplumber sometimes drops
+                        # spaces between word and trailing single-letter variable
+                        # (e.g. "embedding Z" → "embeddingZ"). Strip all spaces
+                        # and compare.
+                        if re.sub(r'\s', '', core1.lower()) == re.sub(r'\s', '', core2.lower()):
                             return True
 
                         return False
@@ -2285,42 +2660,54 @@ class PatentFilingQC:
             return
         
         # Check 22: Figure numbering sequential
-        # Extract figure numbers - handle PyPDF2 text extraction quirks where
-        # "FIG. 2" followed by reference numeral "118" becomes "FIG. 2118"
-        fig_nums = self._extract_figure_numbers(self.drawings_text)
-        if fig_nums:
-            fig_ints = sorted(set(fig_nums))
-            if fig_ints:
-                expected = list(range(1, max(fig_ints) + 1))
-                missing = set(expected) - set(fig_ints)
-                if not missing:
-                    self.report.add_issue(
-                        22, "Drawings", "Figure Numbering Sequential",
-                        Severity.PASS, f"Figures numbered sequentially (1-{max(fig_ints)})"
-                    )
+        # Same image-only-drawings caveat as Check 15 — if the drawings PDF
+        # has no extractable FIG. labels, we can't run a sequence check.
+        if not self._drawings_text_extractable():
+            self.report.add_issue(
+                22, "Drawings", "Figure Numbering Sequential",
+                Severity.INFO,
+                "Drawings PDF appears to be image-only — figure labels not "
+                "extractable as text. Manually verify FIG. numbering is sequential."
+            )
+        else:
+            fig_nums = self._extract_figure_numbers(self.drawings_text)
+            if fig_nums:
+                fig_ints = sorted(set(fig_nums))
+                if fig_ints:
+                    expected = list(range(1, max(fig_ints) + 1))
+                    missing = set(expected) - set(fig_ints)
+                    if not missing:
+                        self.report.add_issue(
+                            22, "Drawings", "Figure Numbering Sequential",
+                            Severity.PASS, f"Figures numbered sequentially (1-{max(fig_ints)})"
+                        )
+                    else:
+                        self.report.add_issue(
+                            22, "Drawings", "Figure Numbering Sequential",
+                            Severity.WARNING, f"Figure numbers may have gaps. Found: {fig_ints}, Missing: {sorted(missing)}"
+                        )
                 else:
                     self.report.add_issue(
                         22, "Drawings", "Figure Numbering Sequential",
-                        Severity.WARNING, f"Figure numbers may have gaps. Found: {fig_ints}, Missing: {sorted(missing)}"
+                        Severity.WARNING, "Unable to detect valid figure numbers in drawings"
                     )
             else:
                 self.report.add_issue(
                     22, "Drawings", "Figure Numbering Sequential",
-                    Severity.WARNING, "Unable to detect valid figure numbers in drawings"
+                    Severity.INFO, "No extractable figure numbers — manually verify"
                 )
-        else:
-            self.report.add_issue(
-                22, "Drawings", "Figure Numbering Sequential",
-                Severity.WARNING, "Unable to detect figure numbers in drawings"
-            )
         
-        # Check 23: Drawings have margin labels (title and docket number)
-        # USPTO practice: drawings should have a margin label with application title and docket number
+        # Check 23: Drawings have margin labels (title and docket number).
+        # Use the actual docket from XFA when available (the original code's
+        # docket regex matched only "A123-4567"-style and missed real-world
+        # firm/customer dockets like "MS1-9771USC3" or "412147-US03-CON").
         issues_23 = []
 
-        # Check for application title in drawings
+        # Title check — look for any title word appearing in drawings
         title_words = []
-        if self.spec_text:
+        if self.ads_data and self.ads_data.get('title'):
+            title_words = [w for w in self.ads_data['title'].split() if len(w) > 3]
+        elif self.spec_text:
             title_match = re.search(r'(?:TITLE|Title).*?(?:of.*?Invention)?[:\s]*([\w\s\-]+?)(?:\n|CROSS|BACKGROUND|FIELD)',
                                    self.spec_text, re.IGNORECASE)
             if title_match:
@@ -2337,17 +2724,27 @@ class PatentFilingQC:
         if not has_title:
             issues_23.append("Application title not detected in drawings margin")
 
-        # Check for docket number in drawings
-        docket_match = re.search(r'[A-Z]\d{2,4}[\s\-]*\d{3,4}[A-Z]{2}',
-                                self.ads_text or self.spec_text or '', re.IGNORECASE)
+        # Docket check — try both XFA-derived dockets and any docket-shaped
+        # token from spec/ADS text. Strip dashes/spaces for tolerant matching.
+        docket_candidates = []
+        if self.ads_data:
+            for key in ('docket_number',):
+                v = self.ads_data.get(key)
+                if v: docket_candidates.append(v)
+        # Also check for docket-shaped tokens in spec text
+        for m in re.finditer(r'\b([A-Z]{2,4}\d?[-_]\d{3,5}[A-Z]{0,5}\d?)\b',
+                             self.ads_text or self.spec_text or '', re.IGNORECASE):
+            docket_candidates.append(m.group(1))
+
+        norm_drawings = re.sub(r'[\s\-_]', '', self.drawings_text).upper()
         has_docket = False
-        if docket_match:
-            docket = docket_match.group(0)
-            docket_norm = re.sub(r'[\s\-]', '', docket).upper()
-            drawings_norm = re.sub(r'[\s\-]', '', self.drawings_text).upper()
-            has_docket = docket_norm in drawings_norm
-        else:
-            has_docket = bool(re.search(r'Docket\s*(?:No\.?|Number)', self.drawings_text, re.IGNORECASE))
+        for cand in docket_candidates:
+            cand_norm = re.sub(r'[\s\-_]', '', cand).upper()
+            if cand_norm and cand_norm in norm_drawings:
+                has_docket = True
+                break
+        if not has_docket and re.search(r'Docket\s*(?:No\.?|Number)', self.drawings_text, re.IGNORECASE):
+            has_docket = True
 
         if not has_docket:
             issues_23.append("Docket number not detected in drawings margin")
@@ -2449,45 +2846,33 @@ class PatentFilingQC:
             return
         
         # Check 27: Inventor addresses complete
-        # Check that each inventor has complete address information
-        # Split ADS text into inventor blocks
-
-        inventor_splits = re.split(r'(?=Inventor\s+\d+)', self.ads_text, flags=re.IGNORECASE)
-        inventor_sections = [s for s in inventor_splits if re.match(r'Inventor\s+\d+', s, re.IGNORECASE)]
-
-        if inventor_sections:
+        # Preferred path: when XFA was successfully parsed, use the structured
+        # inventor records directly. The legacy regex-on-OCR-text path produced
+        # false-positive "missing City/State/Country" warnings against XFA-derived
+        # data because the synthesized text doesn't carry the literal field
+        # labels the regex expected.
+        if self.ads_data and self.ads_data.get('inventors'):
             incomplete_inventors = []
             complete_count = 0
-
-            for section in inventor_sections:
-                # Get inventor number
-                inv_match = re.match(r'Inventor\s+(\d+)', section, re.IGNORECASE)
-                inv_num = inv_match.group(1) if inv_match else '?'
-
+            for idx, inv in enumerate(self.ads_data['inventors'], start=1):
                 missing_fields = []
-
-                # Check for Address 1 with actual content
-                if not re.search(r'Address\s*1\s+[A-Za-z0-9c/o]', section, re.IGNORECASE):
+                if not (inv.get('mail_address1') or '').strip():
                     missing_fields.append('Address 1')
-
-                # Check for City with actual city name (after Mailing Address section)
-                if not re.search(r'City\s+[A-Za-z]{2,}', section, re.IGNORECASE):
+                if not (inv.get('mail_city') or '').strip():
                     missing_fields.append('City')
-
-                # Check for State/Province with 2-letter code
-                if not re.search(r'State\s*/?\s*Province\s+[A-Z]{2}', section, re.IGNORECASE):
-                    missing_fields.append('State/Province')
-
-                # Check for Postal Code with 5 digits
-                if not re.search(r'Postal\s*Code\s+\d{5}', section, re.IGNORECASE):
+                if not (inv.get('mail_state') or '').strip():
+                    # State is required for US mailing addresses; for non-US,
+                    # absence is normal (many countries don't have a state field)
+                    if (inv.get('mail_country') or '').upper() == 'US':
+                        missing_fields.append('State')
+                if not (inv.get('mail_postcode') or '').strip():
                     missing_fields.append('Postal Code')
-
-                # Check for Country with 2-letter code
-                if not re.search(r'Country\s*[:\s]*[A-Z]{2}', section, re.IGNORECASE):
+                if not (inv.get('mail_country') or '').strip():
                     missing_fields.append('Country')
 
                 if missing_fields:
-                    incomplete_inventors.append(f"Inventor {inv_num}: missing {', '.join(missing_fields)}")
+                    name = self._format_xfa_inventor(inv) or f"Inventor {idx}"
+                    incomplete_inventors.append(f"{name}: missing {', '.join(missing_fields)}")
                 else:
                     complete_count += 1
 
@@ -2495,30 +2880,70 @@ class PatentFilingQC:
                 self.report.add_issue(
                     27, "ADS", "Inventor Addresses Complete",
                     Severity.WARNING,
-                    f"Incomplete inventor addresses: {'; '.join(incomplete_inventors[:3])}"
+                    f"{len(incomplete_inventors)} of {len(self.ads_data['inventors'])} "
+                    f"inventor mailing addresses are incomplete in the ADS",
+                    "\n".join(f"  • {line}" for line in incomplete_inventors)
                 )
             else:
                 self.report.add_issue(
                     27, "ADS", "Inventor Addresses Complete",
                     Severity.PASS,
-                    f"All {complete_count} inventor addresses appear complete"
+                    f"All {complete_count} inventor mailing addresses are complete in the ADS"
                 )
         else:
-            # Fallback: check if basic address fields exist anywhere in ADS
-            has_addresses = (
-                re.search(r'Address\s*1\s+[A-Za-z0-9]', self.ads_text, re.IGNORECASE) and
-                re.search(r'Postal\s*Code\s+\d{5}', self.ads_text, re.IGNORECASE)
-            )
-            if has_addresses:
-                self.report.add_issue(
-                    27, "ADS", "Inventor Addresses Complete",
-                    Severity.PASS, "Address information detected in ADS"
-                )
+            # Legacy path: regex against OCR'd text when no structured XFA data.
+            inventor_splits = re.split(r'(?=Inventor\s+\d+)', self.ads_text, flags=re.IGNORECASE)
+            inventor_sections = [s for s in inventor_splits if re.match(r'Inventor\s+\d+', s, re.IGNORECASE)]
+
+            if inventor_sections:
+                incomplete_inventors = []
+                complete_count = 0
+                for section in inventor_sections:
+                    inv_match = re.match(r'Inventor\s+(\d+)', section, re.IGNORECASE)
+                    inv_num = inv_match.group(1) if inv_match else '?'
+                    missing_fields = []
+                    if not re.search(r'Address\s*1\s+[A-Za-z0-9c/o]', section, re.IGNORECASE):
+                        missing_fields.append('Address 1')
+                    if not re.search(r'City\s+[A-Za-z]{2,}', section, re.IGNORECASE):
+                        missing_fields.append('City')
+                    if not re.search(r'State\s*/?\s*Province\s+[A-Z]{2}', section, re.IGNORECASE):
+                        missing_fields.append('State/Province')
+                    if not re.search(r'Postal\s*Code\s+\d{5}', section, re.IGNORECASE):
+                        missing_fields.append('Postal Code')
+                    if not re.search(r'Country\s*[:\s]*[A-Z]{2}', section, re.IGNORECASE):
+                        missing_fields.append('Country')
+                    if missing_fields:
+                        incomplete_inventors.append(f"Inventor {inv_num}: missing {', '.join(missing_fields)}")
+                    else:
+                        complete_count += 1
+
+                if incomplete_inventors:
+                    self.report.add_issue(
+                        27, "ADS", "Inventor Addresses Complete",
+                        Severity.WARNING,
+                        f"Incomplete inventor addresses: {'; '.join(incomplete_inventors[:3])}"
+                    )
+                else:
+                    self.report.add_issue(
+                        27, "ADS", "Inventor Addresses Complete",
+                        Severity.PASS,
+                        f"All {complete_count} inventor addresses appear complete"
+                    )
             else:
-                self.report.add_issue(
-                    27, "ADS", "Inventor Addresses Complete",
-                    Severity.WARNING, "Could not verify inventor addresses in ADS"
+                has_addresses = (
+                    re.search(r'Address\s*1\s+[A-Za-z0-9]', self.ads_text, re.IGNORECASE) and
+                    re.search(r'Postal\s*Code\s+\d{5}', self.ads_text, re.IGNORECASE)
                 )
+                if has_addresses:
+                    self.report.add_issue(
+                        27, "ADS", "Inventor Addresses Complete",
+                        Severity.PASS, "Address information detected in ADS"
+                    )
+                else:
+                    self.report.add_issue(
+                        27, "ADS", "Inventor Addresses Complete",
+                        Severity.WARNING, "Could not verify inventor addresses in ADS"
+                    )
         
         # Check 28: First named inventor identified
         # Compare first inventor from ADS with first named inventor on POA
@@ -2622,45 +3047,12 @@ class PatentFilingQC:
         if not self.ads_data:
             return
 
-        # Check 72: Citizenship populated for every inventor
-        # The ADS CitizedDropDown is often left blank when filing as an assignee
-        # under 37 CFR 1.46 (citizenship is then captured on the Declaration
-        # instead). Either case is OK, but the user should consciously confirm.
-        blank_citz = [self._format_xfa_inventor(inv) for inv in self.ads_data.get('inventors', [])
-                      if not (inv.get('citizenship') or '').strip()]
-        total_inv = len(self.ads_data.get('inventors', []))
-        if total_inv == 0:
-            pass  # nothing to check
-        elif not blank_citz:
-            self.report.add_issue(
-                72, "ADS", "Inventor Citizenship Populated",
-                Severity.PASS,
-                f"All {total_inv} inventor(s) have citizenship populated in the ADS"
-            )
-        else:
-            assignee_present = bool(self.ads_data.get('assignee_org'))
-            msg = f"{len(blank_citz)} of {total_inv} inventor(s) have a blank citizenship field in the ADS"
-            details_lines = ["Inventors with blank citizenship:"]
-            details_lines.extend(f"  • {n}" for n in blank_citz)
-            if assignee_present:
-                details_lines.append("")
-                details_lines.append(
-                    f"Assignee on file: {self.ads_data['assignee_org']}. When filing as an "
-                    "assignee under 37 CFR 1.46, some practitioners intentionally leave the "
-                    "ADS citizenship dropdowns blank and rely on the Declaration to capture "
-                    "citizenship. Verify this is intentional. If not, populate the dropdowns "
-                    "before filing."
-                )
-            else:
-                details_lines.append("")
-                details_lines.append(
-                    "No assignee filer detected. Citizenship is normally required on the "
-                    "ADS for individual-applicant filings — populate the dropdowns before filing."
-                )
-            self.report.add_issue(
-                72, "ADS", "Inventor Citizenship Populated",
-                Severity.WARNING, msg, "\n".join(details_lines)
-            )
+        # (Former Check 72 — "Inventor Citizenship Populated" — was removed.
+        # The CitizedDropDown element survives in the XFA schema for backwards
+        # compatibility, but the citizenship field is no longer a required or
+        # visible field on current PTO/AIA/14 forms, so the check produced
+        # false positives on every modern ADS without telling the user anything
+        # actionable.)
 
         # Check 73: Attorney customer number matches correspondence customer number
         corr_cn = (self.ads_data.get('customer_number') or '').strip()
@@ -2698,34 +3090,57 @@ class PatentFilingQC:
             return
         
         # Check 32: All inventors named in declaration
-        # Compare inventors in ADS with those in declaration
-        ads_inventors = self.extract_inventors(self.ads_text) if self.ads_text else []
-        decl_inventors = self.extract_inventors(self.declaration_text)
+        # Use ADS XFA inventors as ground truth (reliable structured data),
+        # then verify each name appears in the declaration text by last-name
+        # match. This is much more robust than regex-extracting names from
+        # the declaration's varied formats.
+        ads_inventor_names = []
+        if self.ads_data and self.ads_data.get('inventors'):
+            ads_inventor_names = [self._format_xfa_inventor(inv)
+                                  for inv in self.ads_data['inventors']]
+        elif self.ads_text:
+            ads_inventor_names = self.extract_inventors(self.ads_text)
 
-        if ads_inventors and decl_inventors:
-            ads_normalized = set(self.normalize_name(inv) for inv in ads_inventors)
-            decl_normalized = set(self.normalize_name(inv) for inv in decl_inventors)
-
-            missing = ads_normalized - decl_normalized
+        if ads_inventor_names:
+            decl_norm = self._normalize_for_compare(self.declaration_text)
+            missing = []
+            for inv_name in ads_inventor_names:
+                last_name = inv_name.split()[-1] if inv_name.split() else ""
+                last_norm = self._normalize_for_compare(last_name)
+                full_norm = self._normalize_for_compare(inv_name)
+                if (last_norm and last_norm in decl_norm) or \
+                   (full_norm and full_norm in decl_norm):
+                    continue
+                missing.append(inv_name)
             if not missing:
                 self.report.add_issue(
                     32, "Declaration", "All Inventors Named in Declaration",
-                    Severity.PASS, f"All {len(ads_inventors)} ADS inventors found in declaration"
+                    Severity.PASS,
+                    f"All {len(ads_inventor_names)} ADS inventors appear in the declaration"
                 )
             else:
+                cont_note = ""
+                if self._is_continuation_filing():
+                    cont_note = (" Note: this is a continuation filing — if inventorship "
+                                 "changed, a new declaration is required.")
+                img_pages = self.image_only_pages.get('Declaration', 0)
+                img_note = ""
+                if img_pages and len(missing) <= img_pages:
+                    img_note = (f" The declaration has {img_pages} image-only page(s) — "
+                                f"missing inventor(s) may be on those pages but could not be "
+                                f"verified by text extraction. Open the declaration and confirm "
+                                f"those pages cover the missing inventor(s).")
                 self.report.add_issue(
                     32, "Declaration", "All Inventors Named in Declaration",
-                    Severity.WARNING, f"Some inventors may be missing from declaration ({len(missing)} not matched)"
+                    Severity.WARNING,
+                    f"{len(missing)} of {len(ads_inventor_names)} ADS inventor(s) not found "
+                    f"in declaration text." + img_note + cont_note,
+                    "Not found in extracted declaration text:\n" + "\n".join(f"  • {n}" for n in missing)
                 )
-        elif decl_inventors:
-            self.report.add_issue(
-                32, "Declaration", "All Inventors Named in Declaration",
-                Severity.PASS, f"Declaration lists {len(decl_inventors)} inventors"
-            )
         else:
             self.report.add_issue(
                 32, "Declaration", "All Inventors Named in Declaration",
-                Severity.INFO, "Could not extract inventor names for comparison"
+                Severity.INFO, "Could not extract ADS inventors for cross-reference"
             )
         
         # Check 33: Oath vs declaration format
@@ -2752,36 +3167,55 @@ class PatentFilingQC:
             )
         
         # Check 34: Declaration references correct application
-        # Check if declaration contains docket number or title keywords
+        # Look for any expected docket number (from ADS XFA or spec text) or
+        # the application title (from ADS XFA) in the declaration.
+        # The previous version's hardcoded title-keyword list was bogus
+        # (hardcoded for one specific patent), so it never matched anything
+        # for any other filing.
+        all_expected_dockets = set()
+        if self.ads_data and self.ads_data.get('docket_number'):
+            all_expected_dockets.add(self.ads_data['docket_number'])
+        elif self.ads_text:
+            all_expected_dockets |= self.extract_docket_numbers(self.ads_text)
+        if self.spec_text:
+            all_expected_dockets |= self.extract_docket_numbers(self.spec_text)
+
         docket_in_decl = False
+        matched_docket = None
+        if all_expected_dockets:
+            decl_norm_strip = re.sub(r'[\s\-_]', '', self.declaration_text.upper())
+            for d in all_expected_dockets:
+                d_norm = re.sub(r'[\s\-_]', '', d.upper())
+                if d_norm and d_norm in decl_norm_strip:
+                    docket_in_decl = True
+                    matched_docket = d
+                    break
+
         title_in_decl = False
-
-        # Look for docket number
-        docket_pattern = r'(?:Attorney\s*)?Docket\s*(?:No\.?|Number)[:\s]*([A-Z0-9\-]+)'
-        spec_docket = re.search(docket_pattern, self.spec_text, re.IGNORECASE) if self.spec_text else None
-        if spec_docket:
-            expected_docket = spec_docket.group(1)
-            expected_norm = re.sub(r'\s*-\s*', '-', expected_docket.upper())
-            decl_norm = re.sub(r'\s*-\s*', '-', self.declaration_text.upper())
-            if expected_norm in decl_norm:
-                docket_in_decl = True
-
-        # Look for title keywords
-        title_keywords = ['AGENTIC', 'PIPELINE', 'FIRMWARE', 'HARDWARE']
-        decl_upper = self.declaration_text.upper().replace('7', 'TI')
-        keyword_matches = sum(1 for kw in title_keywords if kw in decl_upper)
-        if keyword_matches >= 2:
-            title_in_decl = True
+        if self.ads_data and self.ads_data.get('title'):
+            title_words = self.ads_data['title'].split()
+            key_chunk = ' '.join(title_words[:max(4, int(len(title_words) * 0.6))])
+            if self._normalize_for_compare(key_chunk) in self._normalize_for_compare(self.declaration_text):
+                title_in_decl = True
 
         if docket_in_decl:
             self.report.add_issue(
                 34, "Declaration", "Declaration References Correct Application",
-                Severity.PASS, f"Declaration contains correct docket number"
+                Severity.PASS, f"Declaration contains expected docket: {matched_docket}"
             )
         elif title_in_decl:
             self.report.add_issue(
                 34, "Declaration", "Declaration References Correct Application",
-                Severity.PASS, "Declaration references correct application title"
+                Severity.PASS, "Declaration references the application title from the ADS"
+            )
+        elif self._is_continuation_filing():
+            self.report.add_issue(
+                34, "Declaration", "Declaration References Correct Application",
+                Severity.INFO,
+                "Could not match this child application's docket/title in the declaration. "
+                "For continuations, the parent's executed declaration carried forward "
+                "typically references the parent's docket and original title — manual "
+                "verification recommended."
             )
         else:
             self.report.add_issue(
@@ -2849,10 +3283,22 @@ class PatentFilingQC:
                         Severity.CRITICAL, f"Declaration date is in the future: {decl_date.strftime('%Y-%m-%d')}"
                     )
                 elif (today - decl_date).days > 365:
-                    self.report.add_issue(
-                        35, "Declaration", "Declaration Date Logical",
-                        Severity.WARNING, f"Declaration date is over a year old: {decl_date.strftime('%Y-%m-%d')}"
-                    )
+                    # For continuations, the parent's executed declaration is
+                    # carried forward under 37 CFR 1.63(d) and will legitimately
+                    # be older than a year — that's expected, not anomalous.
+                    if self._is_continuation_filing():
+                        self.report.add_issue(
+                            35, "Declaration", "Declaration Date Logical",
+                            Severity.PASS,
+                            f"Declaration date {decl_date.strftime('%Y-%m-%d')} is older than 1 year, "
+                            f"which is expected for this continuation filing (parent's declaration "
+                            f"carried forward under 37 CFR 1.63(d))."
+                        )
+                    else:
+                        self.report.add_issue(
+                            35, "Declaration", "Declaration Date Logical",
+                            Severity.WARNING, f"Declaration date is over a year old: {decl_date.strftime('%Y-%m-%d')}"
+                        )
                 else:
                     self.report.add_issue(
                         35, "Declaration", "Declaration Date Logical",
@@ -2881,51 +3327,66 @@ class PatentFilingQC:
             return
         
         # Check 36: Assignment identifies all assignors (compare with ADS inventors)
-        ads_inventors = self.extract_inventors(self.ads_text) if self.ads_text else []
-        assignment_inventors = self.extract_inventors(self.assignment_text)
+        # Use the ADS XFA inventor list as ground truth and verify each name
+        # appears verbatim somewhere in the assignment text. This avoids the
+        # fragility of trying to extract assignor names via regex from the
+        # many possible assignment text formats.
+        ads_inventor_names = []
+        if self.ads_data and self.ads_data.get('inventors'):
+            ads_inventor_names = [self._format_xfa_inventor(inv)
+                                  for inv in self.ads_data['inventors']]
+        elif self.ads_text:
+            ads_inventor_names = self.extract_inventors(self.ads_text)
 
-        if ads_inventors and assignment_inventors:
-            # Normalize names for comparison
-            ads_normalized = set(self.normalize_name(inv) for inv in ads_inventors)
-            assignment_normalized = set(self.normalize_name(inv) for inv in assignment_inventors)
+        if ads_inventor_names and self.assignment_text:
+            asgn_norm = self._normalize_for_compare(self.assignment_text)
+            missing = []
+            found = []
+            for name in ads_inventor_names:
+                # Match by last name (most reliable cross-doc); fall back to full name
+                last_name = name.split()[-1] if name.split() else ""
+                last_normalized = self._normalize_for_compare(last_name)
+                full_normalized = self._normalize_for_compare(name)
+                if (last_normalized and last_normalized in asgn_norm) or \
+                   (full_normalized and full_normalized in asgn_norm):
+                    found.append(name)
+                else:
+                    missing.append(name)
 
-            # Check if all ADS inventors appear in assignment
-            missing_from_assignment = ads_normalized - assignment_normalized
-            extra_in_assignment = assignment_normalized - ads_normalized
-
-            if not missing_from_assignment:
+            if not missing:
                 self.report.add_issue(
                     36, "Assignment", "Assignment Identifies All Assignors",
                     Severity.PASS,
-                    f"All {len(ads_inventors)} inventors from ADS appear as assignors in assignment"
+                    f"All {len(ads_inventor_names)} inventors from ADS appear in the assignment"
                 )
             else:
-                # Format names for display
-                missing_display = [inv for inv in ads_inventors
-                                  if self.normalize_name(inv) in missing_from_assignment]
+                img_pages = self.image_only_pages.get('Assignment', 0)
+                img_note = ""
+                severity = Severity.CRITICAL
+                if img_pages and len(missing) <= img_pages:
+                    img_note = (f" The assignment has {img_pages} image-only page(s) — "
+                                f"missing inventor(s) may be on those pages but could not be "
+                                f"verified by text extraction. Open the assignment and confirm "
+                                f"those pages cover the missing inventor(s).")
+                    severity = Severity.WARNING
                 self.report.add_issue(
                     36, "Assignment", "Assignment Identifies All Assignors",
-                    Severity.CRITICAL,
-                    f"Inventors missing from assignment: {missing_display}",
-                    f"ADS inventors: {ads_inventors}\nAssignment assignors: {assignment_inventors}"
+                    severity,
+                    f"{len(missing)} of {len(ads_inventor_names)} ADS inventor(s) not found "
+                    f"in assignment text." + img_note,
+                    "Not found in extracted assignment text:\n" + "\n".join(f"  • {n}" for n in missing)
                 )
-        elif ads_inventors and not assignment_inventors:
+        elif ads_inventor_names and not self.assignment_text:
             self.report.add_issue(
                 36, "Assignment", "Assignment Identifies All Assignors",
-                Severity.WARNING,
-                f"Could not extract assignors from assignment to compare with {len(ads_inventors)} ADS inventors"
-            )
-        elif not ads_inventors and assignment_inventors:
-            self.report.add_issue(
-                36, "Assignment", "Assignment Identifies All Assignors",
-                Severity.WARNING,
-                f"Could not extract inventors from ADS to compare with {len(assignment_inventors)} assignment assignors"
+                Severity.INFO,
+                "Assignment not loaded — cannot verify assignors against ADS inventors"
             )
         else:
             self.report.add_issue(
                 36, "Assignment", "Assignment Identifies All Assignors",
                 Severity.INFO,
-                "Unable to extract inventor names from ADS or assignment for comparison"
+                "Unable to extract inventor names from ADS for comparison"
             )
         
         # Check 37: Assignment identifies assignee
@@ -2941,49 +3402,60 @@ class PatentFilingQC:
             )
         
         # Check 38: Assignment references correct application
-        # Verify assignment contains correct docket number and/or title
+        # Match against any docket-shaped token in the spec/ADS (the previous
+        # version's hardcoded title-keyword list ['AGENTIC', 'PIPELINE',
+        # 'FIRMWARE', 'PORTING', ...] was bogus — left over from someone else's
+        # patent and matched nothing for any other application).
+        ads_dockets = set()
+        if self.ads_data and self.ads_data.get('docket_number'):
+            ads_dockets.add(self.ads_data['docket_number'])
+        elif self.ads_text:
+            ads_dockets |= self.extract_docket_numbers(self.ads_text)
+        spec_dockets = self.extract_docket_numbers(self.spec_text) if self.spec_text else set()
+        all_expected_dockets = ads_dockets | spec_dockets
+
+        # Title from XFA (reliable)
+        expected_title = ""
+        if self.ads_data and self.ads_data.get('title'):
+            expected_title = self.ads_data['title']
+
         docket_in_assignment = False
+        matched_docket = None
+        if all_expected_dockets and self.assignment_text:
+            asgn_norm = re.sub(r'[\s\-_]', '', self.assignment_text.upper())
+            for d in all_expected_dockets:
+                d_norm = re.sub(r'[\s\-_]', '', d.upper())
+                if d_norm and d_norm in asgn_norm:
+                    docket_in_assignment = True
+                    matched_docket = d
+                    break
+
         title_in_assignment = False
-
-        # Extract docket number from spec/ADS
-        docket_pattern = r'(?:Attorney\s*)?Docket\s*(?:No\.?|Number)[:\s]*([A-Z0-9\-]+)'
-        spec_docket_match = re.search(docket_pattern, self.spec_text, re.IGNORECASE) if self.spec_text else None
-        ads_docket_match = re.search(docket_pattern, self.ads_text, re.IGNORECASE) if self.ads_text else None
-
-        expected_docket = None
-        if spec_docket_match:
-            expected_docket = spec_docket_match.group(1).strip()
-        elif ads_docket_match:
-            expected_docket = ads_docket_match.group(1).strip()
-
-        # Check if docket appears in assignment (normalize spaces around hyphens)
-        if expected_docket:
-            # Normalize both: remove spaces around hyphens, convert to uppercase
-            expected_norm = re.sub(r'\s*-\s*', '-', expected_docket.upper())
-            assignment_norm = re.sub(r'\s*-\s*', '-', self.assignment_text.upper())
-            if expected_norm in assignment_norm:
-                docket_in_assignment = True
-
-        # Check if key title words appear in assignment
-        # Look for AGENTIC, PIPELINE, FIRMWARE, PORTING, HARDWARE, CONFIGURATION
-        title_keywords = ['AGENTIC', 'PIPELINE', 'FIRMWARE', 'PORTING', 'HARDWARE', 'CONFIGURATION']
-        assignment_upper = self.assignment_text.upper()
-        # Handle OCR errors: 7 often becomes "ti" or vice versa
-        assignment_upper = assignment_upper.replace('7', 'TI')
-
-        keyword_matches = sum(1 for kw in title_keywords if kw in assignment_upper)
-        if keyword_matches >= 3:  # At least 3 of 6 keywords
-            title_in_assignment = True
+        if expected_title and self.assignment_text:
+            # Use first 60% of title words to allow minor wording differences
+            title_words = expected_title.split()
+            key_chunk = ' '.join(title_words[:max(4, int(len(title_words) * 0.6))])
+            if self._normalize_for_compare(key_chunk) in self._normalize_for_compare(self.assignment_text):
+                title_in_assignment = True
 
         if docket_in_assignment:
             self.report.add_issue(
                 38, "Assignment", "Assignment References Correct Application",
-                Severity.PASS, f"Assignment contains correct docket number: {expected_docket}"
+                Severity.PASS, f"Assignment contains expected docket: {matched_docket}"
             )
         elif title_in_assignment:
             self.report.add_issue(
                 38, "Assignment", "Assignment References Correct Application",
-                Severity.PASS, f"Assignment references correct application title ({keyword_matches} keywords matched)"
+                Severity.PASS, "Assignment references the application title from the ADS"
+            )
+        elif self._is_continuation_filing():
+            self.report.add_issue(
+                38, "Assignment", "Assignment References Correct Application",
+                Severity.INFO,
+                "Could not match this child application's docket/title in the assignment. "
+                "For continuations, the assignment carried forward from the parent typically "
+                "references the parent's docket and original title — manual verification "
+                "recommended."
             )
         else:
             self.report.add_issue(
@@ -3052,10 +3524,19 @@ class PatentFilingQC:
                     Severity.CRITICAL, f"Assignment date is in the future: {found_date.strftime('%Y-%m-%d')}"
                 )
             elif (today - found_date).days > 365:
-                self.report.add_issue(
-                    39, "Assignment", "Assignment Execution Date Logical",
-                    Severity.WARNING, f"Assignment date is over a year old: {found_date.strftime('%Y-%m-%d')}"
-                )
+                if self._is_continuation_filing():
+                    self.report.add_issue(
+                        39, "Assignment", "Assignment Execution Date Logical",
+                        Severity.PASS,
+                        f"Assignment date {found_date.strftime('%Y-%m-%d')} is older than 1 year, "
+                        f"which is expected for this continuation filing (parent's executed "
+                        f"assignment carried forward)."
+                    )
+                else:
+                    self.report.add_issue(
+                        39, "Assignment", "Assignment Execution Date Logical",
+                        Severity.WARNING, f"Assignment date is over a year old: {found_date.strftime('%Y-%m-%d')}"
+                    )
             else:
                 self.report.add_issue(
                     39, "Assignment", "Assignment Execution Date Logical",
@@ -3225,15 +3706,20 @@ class PatentFilingQC:
                     pages_with_numbers = 0
                     for i, page in enumerate(reader.pages):
                         page_text = page.extract_text() or ''
-                        # Look for page number patterns (standalone number matching page position)
-                        # Common formats: "Page X", "- X -", standalone number at end, "X of Y"
                         page_num = i + 1
-                        if (re.search(r'(?:Page|page)\s+' + str(page_num), page_text) or
-                            re.search(r'\b' + str(page_num) + r'\s*$', page_text) or
-                            re.search(r'^\s*' + str(page_num) + r'\b', page_text) or
-                            re.search(r'\b' + str(page_num) + r'\s+of\s+\d+', page_text) or
-                            re.search(r'-\s*' + str(page_num) + r'\s*-', page_text) or
-                            str(page_num) in page_text):
+                        pn = str(page_num)
+                        # Look ONLY for explicit page-number formats — NOT for
+                        # any occurrence of the digit anywhere on the page
+                        # (the previous code's `str(page_num) in page_text`
+                        # rule false-passed because paragraph numbers like
+                        # [0035] always contain the digit "35").
+                        patterns = [
+                            r'(?:Page|page)\s+' + pn + r'\b',          # "Page 35"
+                            r'\b' + pn + r'\s+of\s+\d+\b',              # "35 of 52"
+                            r'-\s*' + pn + r'\s*-',                     # "- 35 -"
+                            r'(?:^|\n)\s*' + pn + r'\s*(?:\n|$)',       # standalone "35" on its own line (margin)
+                        ]
+                        if any(re.search(p, page_text) for p in patterns):
                             pages_with_numbers += 1
 
                     # If most pages seem to have their page number in the text
@@ -3402,12 +3888,13 @@ class PatentFilingQC:
             )
 
         # Check 53: Antecedent basis in claims
+        # The previous regex `(?:CLAIMS|What is claimed)(.*?)(?:ABSTRACT|$)`
+        # matched at the *first* occurrence of "CLAIMS" anywhere in the spec
+        # (e.g., in cross-references like "Patent application No.…" early in
+        # the doc), grabbing essentially the whole spec as "claims text" and
+        # then finding spurious "antecedent issues" from the description body.
         if self.spec_text:
-            claims_match = re.search(
-                r'(?:CLAIMS|What is claimed)(.*?)(?:ABSTRACT|$)',
-                self.spec_text, re.DOTALL | re.IGNORECASE
-            )
-            claims_text = claims_match.group(1) if claims_match else ""
+            claims_text = self._extract_claims_section()
 
             if claims_text:
                 # Find elements introduced with "a" or "an"
@@ -3477,11 +3964,10 @@ class PatentFilingQC:
         # Check 54: No undefined claim terms
         if self.spec_text:
             # Extract claims and detailed description separately
-            claims_match = re.search(
-                r'(?:CLAIMS|What is claimed)(.*?)(?:ABSTRACT|$)',
-                self.spec_text, re.DOTALL | re.IGNORECASE
-            )
-            claims_text = claims_match.group(1) if claims_match else ""
+            # Use the same robust claims-section detection as Check 13/53
+            # (the previous regex matched the first "CLAIMS" anywhere in the
+            # spec including cross-references, pulling the whole document).
+            claims_text = self._extract_claims_section()
 
             desc_match = re.search(
                 r'DETAILED DESCRIPTION(.*?)(?:CLAIMS|What is claimed)',
@@ -3558,7 +4044,7 @@ class PatentFilingQC:
             'ADS': self.ads_text,
             'Declaration': self.declaration_text,
             'Assignment': self.assignment_text,
-            'POA': self.poa_text,
+            'Power of Attorney': self.poa_text,
         }
 
         for doc_type, text in doc_texts.items():
@@ -3580,19 +4066,28 @@ class PatentFilingQC:
             )
 
         # Check 56: File naming conventions
-        # Check if files follow good naming (contain docket number, no spaces/special chars)
+        # Verify each filename contains an expected docket number (taken from
+        # the ADS/spec). The previous version's hardcoded pattern `A\d{3}-\d{4}`
+        # only matched specific firm-internal formats like "A088-0170" and
+        # falsely flagged any other naming convention as "missing docket."
+        expected_dockets = set()
+        if self.ads_data and self.ads_data.get('docket_number'):
+            expected_dockets.add(self.ads_data['docket_number'])
+        if self.spec_text:
+            expected_dockets |= self.extract_docket_numbers(self.spec_text)
+
         naming_issues = []
-        docket_pattern = r'A\d{3}-\d{4}'  # e.g., A088-0170
-
         for doc_type, filename in self.report.files_found.items():
-            if filename:
-                # Check for docket number in filename
-                has_docket = bool(re.search(docket_pattern, filename, re.IGNORECASE))
-                # Check for problematic characters
-                has_spaces = ' ' in filename
-                has_special = bool(re.search(r'[^\w\-\.]', filename.replace(' ', '')))
-
-                if not has_docket and doc_type != 'Drawings':
+            if filename and doc_type != 'Drawings':
+                # Strip dashes/underscores/spaces for tolerant matching
+                fname_norm = re.sub(r'[\s\-_]', '', filename.upper())
+                has_any_docket = False
+                for d in expected_dockets:
+                    d_norm = re.sub(r'[\s\-_]', '', d.upper())
+                    if d_norm and d_norm in fname_norm:
+                        has_any_docket = True
+                        break
+                if not has_any_docket and expected_dockets:
                     naming_issues.append(f"{doc_type}: missing docket number")
 
         if naming_issues:
@@ -3652,34 +4147,42 @@ class PatentFilingQC:
         
         # Check 59: Claims reference specification elements
         if self.spec_text:
-            # Extract claims section
-            claims_section_patterns = [
-                r'CLAIMS\s+What is claimed[^:]*:\s*(.*?)(?:ABSTRACT|$)',
-                r'What is claimed[^:]*:\s*(.*?)(?:ABSTRACT|$)',
-                r'(?:CLAIMS?\s*\n|What is claimed[^\n]*\n)(.*?)(?:ABSTRACT|$)',
-            ]
-            claims_text_59 = None
-            for pattern in claims_section_patterns:
-                m = re.search(pattern, self.spec_text, re.DOTALL | re.IGNORECASE)
-                if m:
-                    claims_text_59 = m.group(1)
-                    break
+            claims_text_59 = self._extract_claims_section()
 
             # Extract detailed description (before claims)
             desc_match = re.search(
-                r'(?:DETAILED\s+DESCRIPTION|DESCRIPTION\s+OF.*?EMBODIMENTS?)(.*?)(?:CLAIMS|What is claimed)',
+                r'(?:DETAILED\s+DESCRIPTION|DESCRIPTION\s+OF.*?EMBODIMENTS?)(.*?)(?:\bCLAIMS\b|What is claimed)',
                 self.spec_text, re.DOTALL | re.IGNORECASE
             )
             desc_text = desc_match.group(1) if desc_match else self.spec_text[:len(self.spec_text)//2]
 
             if claims_text_59:
-                # Extract significant noun phrases from claims (elements with reference numerals)
-                claim_elements = set(re.findall(r'(?:a|an|the|said)\s+([\w\-]+(?:\s+[\w\-]+){0,2})\s+\d{2,3}',
-                                               claims_text_59, re.IGNORECASE))
-                # Also get key terms without numerals
-                claim_terms = set(re.findall(r'(?:a|an|the|said)\s+([\w\-]+(?:\s+[\w\-]+){0,2})(?:\s+configured|\s+comprising|\s+including|\s+coupled|\s+connected)',
-                                            claims_text_59, re.IGNORECASE))
-                all_claim_terms = claim_elements | claim_terms
+                # Extract noun phrases from claims that look like real claim
+                # elements: introduced by "a/an" (first mention) or referenced
+                # by "the/said". Filter out single-word common nouns and
+                # boilerplate.
+                STOPWORDS = {'method', 'system', 'apparatus', 'device', 'medium',
+                             'product', 'invention', 'embodiment', 'present',
+                             'following', 'above', 'said', 'wherein', 'thereof',
+                             'therein', 'further', 'least', 'one', 'more', 'each',
+                             'plurality', 'time', 'use', 'set', 'first', 'second',
+                             'third', 'fourth', 'fifth'}
+                # Multi-word noun phrases (2-3 words) — these are the meaningful
+                # claim terms. Single-word terms like "method" / "system" are
+                # too generic to verify.
+                np_pattern = r'\b(?:a|an|the|said)\s+([a-z][\w\-]*\s+[\w\-]+(?:\s+[\w\-]+)?)\b'
+                all_claim_terms = set()
+                for m in re.finditer(np_pattern, claims_text_59, re.IGNORECASE):
+                    term = m.group(1).strip().lower()
+                    # Exclude phrases that start with a stopword or are entirely
+                    # stopword-derived
+                    words = term.split()
+                    if words[0] in STOPWORDS:
+                        continue
+                    # Strip trailing verb participle if any
+                    if words[-1].endswith(('ing', 'ed')) and len(words) > 1:
+                        term = ' '.join(words[:-1])
+                    all_claim_terms.add(term)
 
                 if all_claim_terms:
                     desc_lower = desc_text.lower()
@@ -3754,9 +4257,16 @@ class PatentFilingQC:
                             Severity.PASS, f"Summary covers {found}/{len(key_terms)} key claim terms ({coverage:.0%} coverage)"
                         )
                     else:
+                        # Word-overlap heuristic — drafters legitimately use
+                        # different vocabulary in the summary vs. the claims,
+                        # so low coverage doesn't necessarily mean a real issue.
                         self.report.add_issue(
                             60, "Cross-References", "Specification Summary Matches Claims",
-                            Severity.WARNING, f"Summary may not fully reflect claims ({coverage:.0%} term coverage)"
+                            Severity.INFO,
+                            f"Heuristic: summary covers only {coverage:.0%} of claim 1 word tokens "
+                            f"({found}/{len(key_terms)}). Drafters often use different vocabulary "
+                            f"in the summary; this is best verified manually rather than "
+                            f"flagged as a finding."
                         )
                 else:
                     self.report.add_issue(
@@ -3775,7 +4285,19 @@ class PatentFilingQC:
             )
         
         # Check 61: Drawing figure count matches specification
-        if self.spec_text and self.drawings_text:
+        # Same image-only-drawings caveat as Check 15/22 — if the drawings PDF
+        # has no extractable FIG. labels, comparing counts is meaningless.
+        if not self._drawings_text_extractable():
+            spec_figs = set(self._extract_figure_numbers(self.spec_text)) if self.spec_text else set()
+            self.report.add_issue(
+                61, "Cross-References", "Drawing Figure Count Matches Specification",
+                Severity.INFO,
+                f"Drawings PDF appears to be image-only — figure count not verifiable by text extraction. "
+                f"Spec references {len(spec_figs)} figure(s)" + (
+                    f" (FIG. {', '.join(str(n) for n in sorted(spec_figs))})" if spec_figs else ""
+                ) + ". Manually verify drawings contain matching figures."
+            )
+        elif self.spec_text and self.drawings_text:
             spec_figs = set(self._extract_figure_numbers(self.spec_text))
             drawing_figs = set(self._extract_figure_numbers(self.drawings_text))
 
@@ -3785,7 +4307,6 @@ class PatentFilingQC:
                     Severity.PASS, f"Figure numbers match: {len(spec_figs)} figures (FIG. {', '.join(str(n) for n in sorted(spec_figs))})"
                 )
             elif len(spec_figs) == len(drawing_figs):
-                # Same count but different numbers
                 self.report.add_issue(
                     61, "Cross-References", "Drawing Figure Count Matches Specification",
                     Severity.WARNING, f"Same figure count ({len(spec_figs)}) but different numbers. Spec: {sorted(spec_figs)}, Drawings: {sorted(drawing_figs)}"
@@ -3798,38 +4319,20 @@ class PatentFilingQC:
         else:
             self.report.add_issue(
                 61, "Cross-References", "Drawing Figure Count Matches Specification",
-                Severity.WARNING, "Unable to compare figure counts"
+                Severity.INFO, "Unable to compare figure counts"
             )
         
         # Check 62: Claim count verification
+        # Use the shared claims-section helper and the same preamble-free
+        # pattern as Check 13 (claim 1 may not start with A/An/The/We/I).
         if self.spec_text:
-            # Try to find claims section first
-            # PyPDF2 often doesn't preserve newlines, so use flexible patterns
-            # IMPORTANT: Order matters - more specific patterns must come first
-            claims_section_patterns = [
-                r'CLAIMS\s+What is claimed[^:]*:\s*(.*?)(?:ABSTRACT|$)',         # "CLAIMS What is claimed is:" (most specific)
-                r'What is claimed[^:]*:\s*(.*?)(?:ABSTRACT|$)',                  # Just "What is claimed is:"
-                r'(?:CLAIMS?\s*\n|What is claimed[^\n]*\n)(.*?)(?:ABSTRACT|$)',  # Original with newlines (fallback)
-            ]
+            claims_text = self._extract_claims_section() or self.spec_text
 
-            claims_text = None
-            for pattern in claims_section_patterns:
-                claims_section_match = re.search(pattern, self.spec_text, re.DOTALL | re.IGNORECASE)
-                if claims_section_match:
-                    claims_text = claims_section_match.group(1)
-                    break
-
-            if not claims_text:
-                claims_text = self.spec_text
-
-            # Find claim numbers - look for "N. " followed by claim preamble
-            # PyPDF2 may use spaces instead of newlines between claims
             claim_patterns = [
-                r'(?:^|\n)\s*(\d+)\.\s+(?:A|An|The)\s+',           # Original with newlines
-                r'(?:\.\s+|\;\s+|:\s+)(\d+)\.\s+(?:A|An|The)\s+',  # After sentence end
-                r'\s{2,}(\d+)\.\s+(?:A|An|The)\s+',                # After multiple spaces
-                r'^\s*(\d+)\.\s+(?:A|An|The)\s+',                  # At start of claims section
-                r'\s+\d{2,3}\s+(\d+)\.\s+(?:A|An|The)\s+',         # After page number (2-3 digits)
+                r'(?:^|\n)\s*(\d+)\.\s+(?=\D)',          # newline-anchored
+                r'(?:\.\s+|\;\s+|:\s+)(\d+)\.\s+(?=\D)', # after sentence end
+                r'\s{2,}(\d+)\.\s+(?=\D)',               # after multiple spaces
+                r'\s+\d{2,3}\s+(\d+)\.\s+(?=\D)',        # after page number
             ]
 
             claim_nums = []
@@ -3875,151 +4378,123 @@ class PatentFilingQC:
             )
     
     def check_priority(self):
-        """Checks 63-65: Priority/related application checks"""
-        
-        # Check 63: Priority claim consistency
-        # Look for actual priority/continuation language (not just form labels)
-        spec_priority = False
-        ads_priority = False
-        priority_patterns = [
-            r'(?:claims|claiming)\s+(?:the\s+)?(?:benefit|priority)\s+(?:of|to|under)',
-            r'continuation(?:\-in\-part)?\s+of',
-            r'divisional\s+(?:of|application)',
-            r'(?:provisional|non-provisional)\s+(?:application|patent)',
-            r'filed\s+on\s+\w+\s+\d+.*?(?:Ser|Application)\s*(?:ial)?\s*(?:No|Number)',
-        ]
+        """Checks 63-65: Priority/related application checks.
+        Refactored to use ADS XFA structured continuity/priority data as the
+        source of truth instead of fragile regex on spec/ADS text. Previously,
+        Check 65 misidentified US provisional applications as 'foreign'
+        priority, and Check 64 missed Cross-Reference sections that don't use
+        the exact regex header format."""
 
+        ads_dom_entries = (self.ads_data.get('domestic_continuity_entries')
+                           if self.ads_data else None) or []
+        ads_for_entries = (self.ads_data.get('foreign_priority_entries')
+                           if self.ads_data else None) or []
+
+        # Detect priority language in the spec (broader patterns).
+        spec_priority_match = None
         if self.spec_text:
-            for pattern in priority_patterns:
-                if re.search(pattern, self.spec_text, re.IGNORECASE):
-                    spec_priority = True
+            for pat in [
+                r'(?:claims|claiming)\s+(?:the\s+)?(?:benefit|priority)\s+(?:of|to|under)',
+                r'\bcontinuation(?:[-\s]in[-\s]part)?\s+of',
+                r'\bdivisional\s+(?:of|application)',
+                r'\bprovisional\s+application\s+(?:no\.?|number)',
+            ]:
+                m = re.search(pat, self.spec_text, re.IGNORECASE)
+                if m:
+                    spec_priority_match = m.group(0)
                     break
 
-        if self.ads_text:
-            # Check ADS for domestic/foreign benefit sections with actual content
-            ads_benefit_match = re.search(
-                r'(?:Domestic\s+Benefit|Foreign\s+Priority).*?(?:Application\s*Number|Filing\s*Date)\s*[:\s]+(\d+)',
-                self.ads_text, re.IGNORECASE | re.DOTALL
-            )
-            if ads_benefit_match:
-                ads_priority = True
-
-        if spec_priority and ads_priority:
-            # Both have priority - extract app numbers to compare
-            spec_app_nums = set(re.findall(r'(?:Serial|Application)\s*(?:No\.?|Number)\s*[:\s]*(\d{2}[/,]\d{3}[,.]?\d{3})',
-                                          self.spec_text, re.IGNORECASE))
-            ads_app_nums = set(re.findall(r'(\d{2}[/,]\d{3}[,.]?\d{3})', self.ads_text))
-
-            if spec_app_nums and ads_app_nums:
-                # Normalize and compare
-                spec_norm = {re.sub(r'[,.]', '', n) for n in spec_app_nums}
-                ads_norm = {re.sub(r'[,.]', '', n) for n in ads_app_nums}
-                if spec_norm & ads_norm:
-                    self.report.add_issue(
-                        63, "Priority Claims", "Priority Claim Consistency",
-                        Severity.PASS, "Priority claims consistent between specification and ADS"
-                    )
-                else:
-                    self.report.add_issue(
-                        63, "Priority Claims", "Priority Claim Consistency",
-                        Severity.WARNING, f"Priority application numbers may differ: Spec={spec_app_nums}, ADS={ads_app_nums}"
-                    )
+        # ----- Check 63: Priority claim consistency -----
+        if ads_dom_entries or ads_for_entries:
+            # ADS HAS priority data — verify spec also references it
+            if spec_priority_match:
+                self.report.add_issue(
+                    63, "Priority Claims", "Priority Claim Consistency",
+                    Severity.PASS,
+                    f"Priority claims present in both ADS and specification "
+                    f"({len(ads_dom_entries)} domestic, {len(ads_for_entries)} foreign in ADS)"
+                )
             else:
                 self.report.add_issue(
                     63, "Priority Claims", "Priority Claim Consistency",
-                    Severity.PASS, "Priority claims present in both specification and ADS"
+                    Severity.WARNING,
+                    f"ADS lists {len(ads_dom_entries)} domestic and {len(ads_for_entries)} "
+                    f"foreign priority entries, but no priority language found in specification. "
+                    f"Spec should reference the parent/priority application(s)."
                 )
-        elif spec_priority and not ads_priority:
-            self.report.add_issue(
-                63, "Priority Claims", "Priority Claim Consistency",
-                Severity.WARNING, "Priority language in specification but not found in ADS"
-            )
-        elif ads_priority and not spec_priority:
-            self.report.add_issue(
-                63, "Priority Claims", "Priority Claim Consistency",
-                Severity.WARNING, "Priority information in ADS but not found in specification"
-            )
         else:
-            self.report.add_issue(
-                63, "Priority Claims", "Priority Claim Consistency",
-                Severity.PASS, "No priority claims detected in specification or ADS"
-            )
-
-        # Check 64: Related application references
-        if spec_priority or ads_priority:
-            # Check that related application info is present and consistent
-            spec_related = bool(re.search(r'(?:CROSS[\-\s]*REFERENCE|RELATED\s+APPLICATION)',
-                                         self.spec_text, re.IGNORECASE)) if self.spec_text else False
-
-            if spec_priority and spec_related:
+            if spec_priority_match:
                 self.report.add_issue(
-                    64, "Priority Claims", "Related Application References",
-                    Severity.PASS, "Related application cross-reference section found in specification"
+                    63, "Priority Claims", "Priority Claim Consistency",
+                    Severity.WARNING,
+                    "Priority language detected in specification but no priority entries in ADS. "
+                    "Verify the ADS continuity/foreign-priority sections are filled in correctly."
                 )
-            elif spec_priority and not spec_related:
+            else:
+                self.report.add_issue(
+                    63, "Priority Claims", "Priority Claim Consistency",
+                    Severity.PASS, "No priority claims detected in specification or ADS"
+                )
+
+        # ----- Check 64: Related application references in spec -----
+        if ads_dom_entries or ads_for_entries or spec_priority_match:
+            # Look for a Cross-Reference / Related Applications section
+            # using broader patterns. Many specs label this as "RELATED
+            # APPLICATIONS", "CROSS-REFERENCE TO RELATED APPLICATIONS",
+            # "PRIORITY CLAIM", etc.
+            spec_related = False
+            if self.spec_text:
+                for pat in [
+                    r'CROSS[-\s]*REFERENCE',
+                    r'RELATED\s+APPLICATION',
+                    r'PRIORITY\s+CLAIM',
+                    r'PRIORITY\s+TO\s+RELATED',
+                    r'\bcontinuation\s+of\b',
+                    r'\bclaims\s+(?:the\s+)?(?:benefit|priority)',
+                ]:
+                    if re.search(pat, self.spec_text, re.IGNORECASE):
+                        spec_related = True
+                        break
+
+            if spec_related:
                 self.report.add_issue(
                     64, "Priority Claims", "Related Application References",
-                    Severity.WARNING, "Priority claims present but no Cross-Reference section found in specification"
+                    Severity.PASS,
+                    "Related-application cross-reference language found in specification"
                 )
             else:
                 self.report.add_issue(
                     64, "Priority Claims", "Related Application References",
-                    Severity.PASS, "Related application information present in ADS"
+                    Severity.WARNING,
+                    "Priority claims present but no Cross-Reference / Related Applications section "
+                    "found in specification. Verify the spec includes proper priority/continuation "
+                    "language near the start."
                 )
         else:
             self.report.add_issue(
                 64, "Priority Claims", "Related Application References",
                 Severity.PASS, "No related applications detected"
             )
-        
-        # Check 65: Foreign priority documents
-        # Look for actual foreign priority claims, not just form labels or company names
-        has_foreign = False
-        foreign_details = []
 
-        if self.spec_text:
-            # Look for foreign priority claim language in specification
-            # e.g., "claims priority to [country] application", "PCT/XX/YYYY"
-            foreign_patterns = [
-                r'claims?\s+(?:the\s+)?(?:benefit|priority)\s+(?:of|to)\s+(?:a\s+)?(?:\w+\s+)?(?:foreign|international)',
-                r'PCT/[A-Z]{2}/\d{4}/\d+',  # PCT application numbers
-                r'priority\s+(?:of|to)\s+(?:\w+\s+)?application[^\n]+(?:filed\s+in|of)\s+[A-Z][a-z]+',  # "priority to application filed in Japan"
-                r'(?:EP|JP|CN|KR|DE|FR|GB|CA|AU|IN)\s*\d{5,}',  # Foreign application numbers
-            ]
-            for pattern in foreign_patterns:
-                match = re.search(pattern, self.spec_text, re.IGNORECASE)
-                if match:
-                    has_foreign = True
-                    foreign_details.append(match.group(0)[:50])
-                    break
-
-        if not has_foreign and self.ads_text:
-            # Check ADS for actual foreign priority data (not just form labels)
-            # Look for country codes with application numbers or dates in priority context
-            # Avoid matching form instructions or field labels
-            ads_foreign_patterns = [
-                r'(?:priority|benefit)[^\n]{0,30}(?:EP|JP|CN|KR|DE|FR|GB|CA|AU|IN|WO)\s*[\d\-/]+',
-                r'PCT/[A-Z]{2}/\d{4}/\d+',
-                # Look for filled-in foreign priority section (country + number pattern)
-                r'(?:^|\n)\s*(?:EP|JP|CN|KR|DE|FR|GB|CA|AU|IN)\s+\d{4}[\d\-]+',
-            ]
-            for pattern in ads_foreign_patterns:
-                match = re.search(pattern, self.ads_text, re.IGNORECASE)
-                if match:
-                    has_foreign = True
-                    foreign_details.append(match.group(0)[:50])
-                    break
-
-        if has_foreign:
+        # ----- Check 65: Foreign priority documents -----
+        # Use the XFA-structured foreign_priority_entries directly. A US
+        # provisional is a DOMESTIC priority (sfDomesticContinuity), not a
+        # foreign priority (sfForeignPriorityInfo). The previous regex-based
+        # check matched any "Provisional Application No.…" in the spec as
+        # "foreign," which is wrong.
+        if ads_for_entries:
+            countries = sorted({(e.get('country') or '?').upper() for e in ads_for_entries})
             self.report.add_issue(
                 65, "Priority Claims", "Foreign Priority Documents",
                 Severity.INFO,
-                f"Foreign priority claim detected: {foreign_details[0] if foreign_details else 'verify details'}"
+                f"{len(ads_for_entries)} foreign priority claim(s) in ADS "
+                f"({', '.join(countries)}). Verify that certified copies of the foreign "
+                f"priority documents are on file or being filed."
             )
         else:
             self.report.add_issue(
                 65, "Priority Claims", "Foreign Priority Documents",
-                Severity.PASS, "No foreign priority claims detected"
+                Severity.PASS, "No foreign priority claims in ADS"
             )
     
     def check_final_quality(self):
@@ -4142,28 +4617,18 @@ class PatentFilingQC:
             )
         
         # Check 68: No excessively long claims
+        # Same approach as Check 13/62: shared section helper + preamble-free
+        # claim-start pattern (the original A/An/The preamble missed claims
+        # that started with other words, undercounting by 1 — which is why
+        # this previously said '19 claims checked' for a 20-claim spec).
         if self.spec_text:
-            # Find claims section using flexible patterns (PyPDF2 may not preserve newlines)
-            claims_section_patterns = [
-                r'CLAIMS\s+What is claimed[^:]*:\s*(.*?)(?:ABSTRACT|$)',
-                r'What is claimed[^:]*:\s*(.*?)(?:ABSTRACT|$)',
-                r'(?:CLAIMS?\s*\n|What is claimed[^\n]*\n)(.*?)(?:ABSTRACT|$)',
-            ]
-            claims_text = None
-            for pattern in claims_section_patterns:
-                match = re.search(pattern, self.spec_text, re.DOTALL | re.IGNORECASE)
-                if match:
-                    claims_text = match.group(1)
-                    break
-            if not claims_text:
-                claims_text = self.spec_text
+            claims_text = self._extract_claims_section() or self.spec_text
 
-            # Find individual claims using flexible patterns
             claim_start_patterns = [
-                r'(?:^|\n)\s*(\d+)\.\s+(?:A|An|The)\s+',
-                r'(?:\.\s{1,3})(\d+)\.\s+(?:A|An|The)\s+',
-                r'\s{2,}(\d+)\.\s+(?:A|An|The)\s+',
-                r'\s+\d{2,3}\s+(\d+)\.\s+(?:A|An|The)\s+',
+                r'(?:^|\n)\s*(\d+)\.\s+(?=\D)',
+                r'(?:\.\s{1,3})(\d+)\.\s+(?=\D)',
+                r'\s{2,}(\d+)\.\s+(?=\D)',
+                r'\s+\d{2,3}\s+(\d+)\.\s+(?=\D)',
             ]
 
             # Use finditer to get positions for splitting
@@ -4267,30 +4732,18 @@ class PatentFilingQC:
                             Severity.WARNING, f"{len(missing)} claim reference numerals not found in specification: {', '.join(sorted(missing)[:5])}"
                         )
                 else:
-                    # No reference numerals in claims - check key terms instead
-                    claim_words = set(re.findall(r'\b([a-z]{5,})\b', claims_text_69.lower()))
-                    stop = {'comprising', 'including', 'wherein', 'thereof', 'therein', 'configured',
-                           'coupled', 'connected', 'having', 'being', 'method', 'system', 'further',
-                           'claim', 'according', 'recited', 'least', 'between', 'based', 'associated'}
-                    key_terms = claim_words - stop
-                    if key_terms:
-                        found = sum(1 for t in key_terms if t in desc_text_69.lower())
-                        coverage = found / len(key_terms)
-                        if coverage >= 0.7:
-                            self.report.add_issue(
-                                69, "Final Quality", "Specification References All Claims",
-                                Severity.PASS, f"Specification covers {coverage:.0%} of claim terminology"
-                            )
-                        else:
-                            self.report.add_issue(
-                                69, "Final Quality", "Specification References All Claims",
-                                Severity.WARNING, f"Specification may not fully support claims ({coverage:.0%} term coverage)"
-                            )
-                    else:
-                        self.report.add_issue(
-                            69, "Final Quality", "Specification References All Claims",
-                            Severity.PASS, "Claims and specification present"
-                        )
+                    # No reference numerals in claims to verify against the
+                    # specification. We deliberately do NOT fall back to a
+                    # word-coverage heuristic here — that's Check 60's job and
+                    # would just produce duplicate noise under a misleading
+                    # name (this check's name is "References All Claims",
+                    # not "term coverage").
+                    self.report.add_issue(
+                        69, "Final Quality", "Specification References All Claims",
+                        Severity.INFO,
+                        "No reference numerals detected in claims — cannot verify "
+                        "claim-to-specification element references. Manual review recommended."
+                    )
             else:
                 self.report.add_issue(
                     69, "Final Quality", "Specification References All Claims",
@@ -4328,109 +4781,301 @@ class PatentFilingQC:
                 Severity.WARNING, "Specification not found"
             )
     
-    def generate_markdown_report(self, output_path: str):
-        """Generate Markdown report"""
+    def generate_html_report(self, output_path: str):
+        """Emit a self-contained HTML report with embedded CSS. Produces the
+        same content as generate_markdown_report but with deterministic
+        rendering in any browser (and reliable Print → Save as PDF). No
+        external CSS, no external fonts, no markdown/pdflatex toolchain
+        dependency."""
+        import datetime
+        import html as _html
+
+        def esc(s) -> str:
+            return _html.escape("" if s is None else str(s))
+
+        def severity_class(sev: 'Severity') -> str:
+            return {
+                Severity.CRITICAL: 'critical',
+                Severity.WARNING: 'warning',
+                Severity.INFO: 'info',
+                Severity.PASS: 'pass',
+            }.get(sev, 'info')
+
+        def severity_label(sev: 'Severity') -> str:
+            return {
+                Severity.CRITICAL: 'CRITICAL',
+                Severity.WARNING: 'WARN',
+                Severity.INFO: 'INFO',
+                Severity.PASS: 'PASS',
+            }.get(sev, 'INFO')
+
+        critical_issues = [i for i in self.report.issues if i.severity == Severity.CRITICAL]
+        warnings = [i for i in self.report.issues if i.severity == Severity.WARNING]
+        info_issues = [i for i in self.report.issues if i.severity == Severity.INFO]
+        passed_issues = [i for i in self.report.issues if i.severity == Severity.PASS]
+
+        def group_by_category(issues):
+            groups: Dict[str, List] = {}
+            for issue in issues:
+                groups.setdefault(issue.category, []).append(issue)
+            return groups
+
+        # Try to use the application title from XFA data (when ADS read
+        # successfully) for the document subtitle; otherwise omit it.
+        subtitle = ""
+        if self.ads_data and self.ads_data.get('title'):
+            subtitle = self.ads_data['title']
+        docket = ""
+        if self.ads_data and self.ads_data.get('docket_number'):
+            docket = self.ads_data['docket_number']
+
+        date_str = datetime.datetime.now().strftime('%B %d, %Y at %H:%M')
+
+        # CSS — system fonts only; no emoji glyphs (use text labels in colored
+        # badges instead). Print rules avoid splitting issue cards across pages.
+        css = """
+            :root {
+                --c-critical: #b91c1c;
+                --c-critical-bg: #fef2f2;
+                --c-warn:     #b45309;
+                --c-warn-bg:  #fffbeb;
+                --c-info:     #1d4ed8;
+                --c-info-bg:  #eff6ff;
+                --c-pass:     #166534;
+                --c-pass-bg:  #f0fdf4;
+                --c-text:     #1f2937;
+                --c-muted:    #6b7280;
+                --c-border:   #e5e7eb;
+                --c-bg-soft:  #f9fafb;
+            }
+            * { box-sizing: border-box; }
+            html, body { margin: 0; padding: 0; }
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                             Roboto, Helvetica, Arial, sans-serif;
+                color: var(--c-text);
+                line-height: 1.5;
+                background: #fff;
+                font-size: 14px;
+            }
+            .page {
+                max-width: 980px;
+                margin: 0 auto;
+                padding: 32px 40px 56px;
+            }
+            header { border-bottom: 3px solid #0f172a; padding-bottom: 16px; margin-bottom: 24px; }
+            header h1 { font-size: 24px; margin: 0 0 4px; color: #0f172a; letter-spacing: -0.01em; }
+            header .subtitle { font-size: 14px; color: var(--c-muted); margin: 4px 0 0; }
+            header .meta { display: flex; gap: 24px; flex-wrap: wrap;
+                          font-size: 12px; color: var(--c-muted); margin-top: 12px; }
+            header .meta span { white-space: nowrap; }
+            header .meta b { color: var(--c-text); font-weight: 600; }
+
+            h2 { font-size: 18px; color: #0f172a; margin: 28px 0 12px;
+                 padding-bottom: 6px; border-bottom: 1px solid var(--c-border); }
+            h3 { font-size: 15px; color: #334155; margin: 18px 0 8px;
+                 text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
+
+            .summary { display: grid; grid-template-columns: repeat(4, 1fr);
+                       gap: 12px; margin: 12px 0 16px; }
+            .stat { padding: 16px; border-radius: 6px; border: 1px solid var(--c-border); }
+            .stat .num { font-size: 28px; font-weight: 700; line-height: 1.1; }
+            .stat .lbl { font-size: 12px; text-transform: uppercase;
+                         letter-spacing: 0.05em; color: var(--c-muted);
+                         margin-top: 4px; }
+            .stat.critical { background: var(--c-critical-bg); border-color: #fecaca; }
+            .stat.critical .num { color: var(--c-critical); }
+            .stat.warning  { background: var(--c-warn-bg);     border-color: #fcd34d; }
+            .stat.warning  .num { color: var(--c-warn); }
+            .stat.info     { background: var(--c-info-bg);     border-color: #bfdbfe; }
+            .stat.info     .num { color: var(--c-info); }
+            .stat.pass     { background: var(--c-pass-bg);     border-color: #bbf7d0; }
+            .stat.pass     .num { color: var(--c-pass); }
+            /* Stat cards are <a> elements — make them look clickable */
+            a.stat { text-decoration: none; color: inherit; display: block;
+                     transition: transform 0.1s ease, box-shadow 0.1s ease; cursor: pointer; }
+            a.stat:hover { transform: translateY(-2px);
+                           box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+            .stat.stat-empty { opacity: 0.55; }
+
+            /* Print-to-PDF button (top right, sticky on screen, hidden in print) */
+            .print-btn { position: fixed; top: 16px; right: 20px; z-index: 100;
+                         background: #0f172a; color: #fff; border: none;
+                         padding: 8px 14px; border-radius: 6px; font-size: 13px;
+                         font-weight: 600; cursor: pointer;
+                         box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+                         font-family: inherit; }
+            .print-btn:hover { background: #1e293b; }
+            .print-btn:active { transform: translateY(1px); }
+            @media print { .print-btn { display: none; } }
+            /* Smooth scroll when clicking the executive summary cards */
+            html { scroll-behavior: smooth; }
+
+            table { width: 100%; border-collapse: collapse; margin: 8px 0 16px;
+                    font-size: 13px; }
+            th, td { border: 1px solid var(--c-border); padding: 8px 12px;
+                     text-align: left; vertical-align: top; }
+            th { background: var(--c-bg-soft); font-weight: 600;
+                 font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em;
+                 color: var(--c-muted); }
+            td.docfound { font-family: "SF Mono", Menlo, Consolas, monospace;
+                          font-size: 12px; }
+            td.docfound.missing { color: var(--c-critical); }
+
+            .issue { border: 1px solid var(--c-border); border-left-width: 4px;
+                     border-radius: 4px; padding: 12px 14px;
+                     margin: 8px 0; background: #fff;
+                     page-break-inside: avoid; }
+            .issue.critical { border-left-color: var(--c-critical); }
+            .issue.warning  { border-left-color: var(--c-warn); }
+            .issue.info     { border-left-color: var(--c-info); }
+            .issue.pass     { border-left-color: var(--c-pass); }
+
+            .issue-head { display: flex; align-items: baseline; gap: 10px;
+                          flex-wrap: wrap; }
+            .badge { display: inline-block; padding: 2px 8px; border-radius: 3px;
+                     font-size: 11px; font-weight: 700;
+                     text-transform: uppercase; letter-spacing: 0.05em;
+                     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                                  Roboto, sans-serif; }
+            .badge.critical { background: var(--c-critical); color: #fff; }
+            .badge.warning  { background: var(--c-warn);     color: #fff; }
+            .badge.info     { background: var(--c-info);     color: #fff; }
+            .badge.pass     { background: var(--c-pass);     color: #fff; }
+
+            .issue-id { color: var(--c-muted); font-variant-numeric: tabular-nums;
+                        font-size: 12px; min-width: 28px; }
+            .issue-name { font-weight: 600; color: #0f172a; }
+            .issue-msg { margin: 6px 0 0 0; }
+            .issue-details { margin: 10px 0 0; padding: 10px 12px;
+                             background: var(--c-bg-soft);
+                             border-left: 3px solid var(--c-border);
+                             border-radius: 0 4px 4px 0;
+                             white-space: pre-wrap;
+                             font-size: 12.5px;
+                             color: #374151; }
+
+            footer { margin-top: 40px; padding-top: 12px;
+                     border-top: 1px solid var(--c-border);
+                     color: var(--c-muted); font-size: 12px; }
+
+            @media print {
+                @page { margin: 0.6in 0.6in; }
+                body { font-size: 11pt; }
+                .page { max-width: none; padding: 0; }
+                .summary { gap: 8px; }
+                .stat { padding: 10px; }
+                h2 { break-after: avoid; }
+                h3 { break-after: avoid; }
+                .issue { break-inside: avoid; }
+            }
+        """
+
         with open(output_path, 'w', encoding='utf-8') as f:
-            f.write("# Patent Filing Quality Control Report\n\n")
-            f.write(f"**Folder:** {self.report.folder_path}\n")
-            import datetime
-            f.write(f"**Date:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
+            f.write("<!DOCTYPE html>\n")
+            f.write("<html lang=\"en\">\n<head>\n")
+            f.write("<meta charset=\"utf-8\">\n")
+            f.write("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n")
+            title_text = f"Patent Filing QC Report"
+            if docket:
+                title_text += f" — {docket}"
+            f.write(f"<title>{esc(title_text)}</title>\n")
+            f.write(f"<style>{css}</style>\n")
+            f.write("</head>\n<body>\n")
+            f.write("<button class=\"print-btn\" onclick=\"window.print()\">"
+                    "Print to PDF</button>\n")
+            f.write("<main class=\"page\">\n")
 
-            # Summary counts
-            critical_count = self.report.get_critical_count()
-            warning_count = self.report.get_warning_count()
-            info_count = sum(1 for i in self.report.issues if i.severity == Severity.INFO)
-            pass_count = self.report.get_pass_count()
+            # Header
+            f.write("<header>\n")
+            f.write(f"<h1>Patent Filing Quality Control Report</h1>\n")
+            if subtitle:
+                f.write(f"<p class=\"subtitle\">{esc(subtitle)}</p>\n")
+            f.write("<div class=\"meta\">\n")
+            if docket:
+                f.write(f"<span><b>Docket:</b> {esc(docket)}</span>\n")
+            f.write(f"<span><b>Folder:</b> {esc(self.report.folder_path)}</span>\n")
+            f.write(f"<span><b>Generated:</b> {esc(date_str)}</span>\n")
+            f.write("</div>\n")
+            f.write("</header>\n")
 
-            f.write("## Executive Summary\n\n")
-            f.write(f"- 🚨 **Critical Issues:** {critical_count}\n")
-            f.write(f"- ⚠️ **Warnings:** {warning_count}\n")
-            f.write(f"- ℹ️ **Info/Manual Review:** {info_count}\n")
-            f.write(f"- ✅ **Passed:** {pass_count}\n\n")
+            # Executive Summary — each stat card is a link to its section
+            f.write("<h2>Executive Summary</h2>\n")
+            f.write("<div class=\"summary\">\n")
+            for cls, count, lbl, anchor in [
+                ('critical', len(critical_issues), 'Critical',      'sec-critical'),
+                ('warning',  len(warnings),        'Warnings',      'sec-warnings'),
+                ('info',     len(info_issues),     'Manual Review', 'sec-info'),
+                ('pass',     len(passed_issues),   'Passed',        'sec-passed'),
+            ]:
+                # Make the card a link only if the section exists (has issues).
+                if count > 0:
+                    f.write(f"<a class=\"stat {cls}\" href=\"#{anchor}\">"
+                            f"<div class=\"num\">{count}</div>"
+                            f"<div class=\"lbl\">{lbl}</div></a>\n")
+                else:
+                    f.write(f"<div class=\"stat {cls} stat-empty\">"
+                            f"<div class=\"num\">{count}</div>"
+                            f"<div class=\"lbl\">{lbl}</div></div>\n")
+            f.write("</div>\n")
 
-            # Files found
-            f.write("## Documents Found\n\n")
+            # Documents Found
+            f.write("<h2>Documents Found</h2>\n")
+            f.write("<table>\n<thead><tr><th>Document Type</th><th>File</th></tr></thead>\n<tbody>\n")
             for doc_type, filename in self.report.files_found.items():
-                status = "✅" if filename else "❌"
-                f.write(f"- {status} **{doc_type}:** {filename if filename else 'NOT FOUND'}\n")
-            f.write("\n")
+                if filename:
+                    f.write(f"<tr><td>{esc(doc_type)}</td>"
+                            f"<td class=\"docfound\">{esc(filename)}</td></tr>\n")
+                else:
+                    f.write(f"<tr><td>{esc(doc_type)}</td>"
+                            f"<td class=\"docfound missing\">NOT FOUND</td></tr>\n")
+            f.write("</tbody>\n</table>\n")
 
-            # Helper function to group issues by category
-            def group_by_category(issues):
-                categories = {}
-                for issue in issues:
-                    if issue.category not in categories:
-                        categories[issue.category] = []
-                    categories[issue.category].append(issue)
-                return categories
-
-            # Critical issues section
-            critical_issues = [i for i in self.report.issues if i.severity == Severity.CRITICAL]
-            if critical_issues:
-                f.write("## 🚨 Critical Issues (Must Fix Before Filing)\n\n")
-                categories = group_by_category(critical_issues)
-                for category, issues in sorted(categories.items()):
-                    f.write(f"### {category}\n\n")
-                    for issue in sorted(issues, key=lambda x: x.check_id):
-                        f.write(f"🚨 **{issue.check_id}. {issue.check_name}**\n")
-                        f.write(f"   {issue.message}\n")
+            def write_issue_section(heading: str, issues: List[QCIssue], anchor: str):
+                if not issues:
+                    return
+                f.write(f"<h2 id=\"{anchor}\">{esc(heading)}</h2>\n")
+                groups = group_by_category(issues)
+                for category in sorted(groups):
+                    f.write(f"<h3>{esc(category)}</h3>\n")
+                    for issue in sorted(groups[category], key=lambda x: x.check_id):
+                        cls = severity_class(issue.severity)
+                        lbl = severity_label(issue.severity)
+                        f.write(f"<div class=\"issue {cls}\">\n")
+                        f.write(f"  <div class=\"issue-head\">"
+                                f"<span class=\"badge {cls}\">{lbl}</span>"
+                                f"<span class=\"issue-id\">#{issue.check_id}</span>"
+                                f"<span class=\"issue-name\">{esc(issue.check_name)}</span>"
+                                f"</div>\n")
+                        f.write(f"  <div class=\"issue-msg\">{esc(issue.message)}</div>\n")
                         if issue.details:
-                            f.write(f"   ```\n   {issue.details}\n   ```\n")
-                        f.write("\n")
-                f.write("\n")
+                            f.write(f"  <div class=\"issue-details\">{esc(issue.details)}</div>\n")
+                        f.write("</div>\n")
 
-            # Warnings section
-            warnings = [i for i in self.report.issues if i.severity == Severity.WARNING]
-            if warnings:
-                f.write("## ⚠️ Warnings (Should Review)\n\n")
-                categories = group_by_category(warnings)
-                for category, issues in sorted(categories.items()):
-                    f.write(f"### {category}\n\n")
-                    for issue in sorted(issues, key=lambda x: x.check_id):
-                        f.write(f"⚠️ **{issue.check_id}. {issue.check_name}**\n")
-                        f.write(f"   {issue.message}\n")
-                        if issue.details:
-                            f.write(f"   ```\n   {issue.details}\n   ```\n")
-                        f.write("\n")
-                f.write("\n")
+            write_issue_section("Critical Issues — Must Fix Before Filing", critical_issues, "sec-critical")
+            write_issue_section("Warnings — Should Review", warnings, "sec-warnings")
+            write_issue_section("Info / Manual Review", info_issues, "sec-info")
+            write_issue_section("Passed Checks", passed_issues, "sec-passed")
 
-            # Info/Manual Review section
-            info_issues = [i for i in self.report.issues if i.severity == Severity.INFO]
-            if info_issues:
-                f.write("## ℹ️ Info/Manual Review Required\n\n")
-                categories = group_by_category(info_issues)
-                for category, issues in sorted(categories.items()):
-                    f.write(f"### {category}\n\n")
-                    for issue in sorted(issues, key=lambda x: x.check_id):
-                        f.write(f"ℹ️ **{issue.check_id}. {issue.check_name}**\n")
-                        f.write(f"   {issue.message}\n")
-                        f.write("\n")
-                f.write("\n")
-
-            # Passed section
-            passed_issues = [i for i in self.report.issues if i.severity == Severity.PASS]
-            if passed_issues:
-                f.write("## ✅ Passed Checks\n\n")
-                categories = group_by_category(passed_issues)
-                for category, issues in sorted(categories.items()):
-                    f.write(f"### {category}\n\n")
-                    for issue in sorted(issues, key=lambda x: x.check_id):
-                        f.write(f"✅ **{issue.check_id}. {issue.check_name}**\n")
-                        f.write(f"   {issue.message}\n")
-                        f.write("\n")
-                f.write("\n")
-
-            # ADS Data Summary (when XFA datasets stream was successfully parsed)
+            # ADS Data Summary (when XFA data is available)
             if self.ads_data:
-                f.write("## ADS Data Summary (Extracted from XFA)\n\n")
                 d = self.ads_data
-                f.write("| Field | Value |\n|-------|-------|\n")
+                f.write("<h2>ADS Data Summary (Extracted from XFA)</h2>\n")
+                f.write("<table>\n<thead><tr><th>Field</th><th>Value</th></tr></thead>\n<tbody>\n")
+
+                addr = d.get('assignee_address') or {}
+                addr_str = ', '.join(p for p in [
+                    addr.get('address1', ''), addr.get('address2', ''),
+                    addr.get('city', ''), addr.get('state', ''),
+                    addr.get('postcode', ''), addr.get('country', '')
+                ] if p)
                 rows = [
                     ("Invention Title", d.get('title', '') or '—'),
                     ("Attorney Docket Number", d.get('docket_number', '') or '—'),
                     ("Application Type", d.get('application_type', '') or '—'),
                     ("Submission Type", d.get('submission_type', '') or '—'),
-                    ("Entity Status", "Small" if d.get('small_entity') is True
+                    ("Entity Status",
+                     "Small" if d.get('small_entity') is True
                      else "Large/Regular" if d.get('small_entity') is False else '—'),
                     ("Drawing Sheets", d.get('drawing_sheets', '') or '—'),
                     ("Suggested Representative Figure", d.get('representative_figure', '') or '—'),
@@ -4438,12 +5083,6 @@ class PatentFilingQC:
                     ("Attorney/Agent Customer Number", d.get('attorney_customer_number', '') or '—'),
                     ("Assignee", d.get('assignee_org', '') or '—'),
                 ]
-                addr = d.get('assignee_address') or {}
-                addr_str = ', '.join(p for p in [
-                    addr.get('address1', ''), addr.get('address2', ''),
-                    addr.get('city', ''), addr.get('state', ''),
-                    addr.get('postcode', ''), addr.get('country', '')
-                ] if p)
                 if addr_str:
                     rows.append(("Assignee Address", addr_str))
                 rows.extend([
@@ -4470,27 +5109,33 @@ class PatentFilingQC:
                     rows.append(("ADS Signature Date", signer.get('date', '')))
 
                 for label, value in rows:
-                    safe = str(value).replace('|', '\\|').replace('\n', ' ')
-                    f.write(f"| {label} | {safe} |\n")
-                f.write("\n")
+                    f.write(f"<tr><td>{esc(label)}</td><td>{esc(value)}</td></tr>\n")
+                f.write("</tbody>\n</table>\n")
 
                 inventors = d.get('inventors') or []
                 if inventors:
-                    f.write("### Inventors in ADS\n\n")
-                    f.write("| # | Name | Residency | City | Country | Citizenship |\n")
-                    f.write("|---|------|-----------|------|---------|-------------|\n")
+                    f.write("<h3>Inventors in ADS</h3>\n")
+                    f.write("<table>\n<thead><tr>"
+                            "<th>#</th><th>Name</th><th>Residency</th>"
+                            "<th>City</th><th>Country</th><th>Citizenship</th>"
+                            "</tr></thead>\n<tbody>\n")
                     for idx, inv in enumerate(inventors, start=1):
                         name = self._format_xfa_inventor(inv)
                         residency = inv.get('residency') or '—'
                         city = inv.get('res_city') or '—'
                         country = inv.get('res_country') or '—'
                         citz = inv.get('citizenship') or 'Blank'
-                        f.write(f"| {idx} | {name} | {residency} | {city} | {country} | {citz} |\n")
-                    f.write("\n")
+                        f.write(f"<tr><td>{idx}</td><td>{esc(name)}</td>"
+                                f"<td>{esc(residency)}</td><td>{esc(city)}</td>"
+                                f"<td>{esc(country)}</td><td>{esc(citz)}</td></tr>\n")
+                    f.write("</tbody>\n</table>\n")
 
             # Footer
-            f.write("---\n\n")
-            f.write("*This report was generated by the Patent Filing QC skill for Claude Code CLI*\n")
+            f.write("<footer>\n")
+            f.write("Generated by the Patent Filing QC skill for Claude Code. ")
+            f.write("To save as PDF, use your browser's <em>Print → Save as PDF</em>.")
+            f.write("\n</footer>\n")
+            f.write("</main>\n</body>\n</html>\n")
 
 
 def main():
@@ -4567,43 +5212,10 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(exist_ok=True)
     
-    md_report = output_dir / "Patent_Filing_QC_Report.md"
-    print(f"📝 Generating Markdown report: {md_report}")
-    qc.generate_markdown_report(str(md_report))
-    
-    # Generate PDF using markdown-pdf or similar
-    pdf_report = output_dir / "Patent_Filing_QC_Report.pdf"
-    print(f"📄 Generating PDF report: {pdf_report}")
-    
-    # Use pandoc or weasyprint to convert MD to PDF
-    try:
-        import subprocess
-        # Try pandoc first
-        result = subprocess.run(
-            ['pandoc', str(md_report), '-o', str(pdf_report), 
-             '--pdf-engine=pdflatex', '-V', 'geometry:margin=1in'],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            print("✅ PDF generated successfully using pandoc")
-        else:
-            # Try weasyprint as fallback
-            try:
-                from weasyprint import HTML
-                from markdown import markdown
-                with open(md_report) as f:
-                    md_content = f.read()
-                html_content = markdown(md_content)
-                HTML(string=html_content).write_pdf(pdf_report)
-                print("✅ PDF generated successfully using weasyprint")
-            except:
-                print("⚠️  PDF generation failed. Install pandoc or weasyprint for PDF output.")
-                print("   For now, only Markdown report is available.")
-    except Exception as e:
-        print(f"⚠️  PDF generation failed: {e}")
-        print("   Install pandoc or weasyprint for PDF output.")
-        print("   For now, only Markdown report is available.")
+    html_report = output_dir / "Patent_Filing_QC_Report.html"
+    print(f"📝 Generating HTML report: {html_report}")
+    qc.generate_html_report(str(html_report))
+    print(f"   To save as PDF: open the HTML file in a browser, then File → Print → Save as PDF.")
     
     print()
     print("=" * 80)
