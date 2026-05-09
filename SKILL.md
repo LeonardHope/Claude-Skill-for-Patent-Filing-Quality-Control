@@ -249,13 +249,12 @@ The skill performs 70+ quality control checks across these categories:
 
 ## Understanding Check Results
 
-Each check produces one of five severity levels:
+Each check produces one of four severity levels (shown as colored badges in the HTML report):
 
-- **✅ PASS** - Check passed, no action needed
-- **⚠️ WARNING** - Potential issue detected, review recommended
-- **🚨 CRITICAL** - Issue must be fixed before filing
-- **❓ LOW CONFIDENCE** - Possible issue detected but could not be confirmed with certainty; manual verification needed
-- **ℹ️ INFO** - Manual review recommended, automated check not possible
+- **CRITICAL** (red) — Issue must be fixed before filing
+- **WARN** (amber) — Potential issue, review recommended
+- **INFO** (blue) — Manual review recommended (e.g., when extraction couldn't fully verify the check)
+- **PASS** (green) — Check passed, no action needed
 
 ## Best Practices
 
@@ -263,7 +262,7 @@ Each check produces one of five severity levels:
 2. **Don't ignore INFO items** - These require manual verification
 3. **Fix critical issues immediately** - These will cause filing rejections
 4. **Investigate warnings** - They may be false positives, but often indicate real problems
-5. **Keep both reports** - Archive with filing records for future reference
+5. **Archive the report** - Save the HTML report (or its print-to-PDF rendering) with the filing records
 6. **Review manually too** - Automated checks catch most issues, but human review is still essential
 
 ## Limitations
@@ -278,13 +277,14 @@ This skill provides automated detection for many issues, but cannot replace huma
 ## Script Details
 
 The main QC script is located at `scripts/qc_patent_filing.py` and includes:
-- Automatic document detection using filename patterns
-- PDF text extraction using PyPDF2
-- **XFA datasets-stream extraction for the USPTO web-fillable ADS** (no Adobe Acrobat Pro flattening required; reads inventor names with first/middle/last/suffix fields, title, docket #, customer #, residency, assignee, signer, etc., directly from the embedded XML)
-- OCR fallback (pytesseract + pdf2image) for image-only PDFs
-- Optional authoritative-source inventor list (`inventors.txt` / `inventors.json` / `*.eml`) for cross-checking against ADS / declaration / assignment / drawings
-- Pattern matching for common issues
-- Cross-document comparison logic
-- Comprehensive reporting in Markdown and PDF formats
+- **Content-based document classification** — files identified by content (claim language, declaration boilerplate, XFA element names, FIG. references), not filename
+- **pdfplumber as primary text extractor** — preserves paragraph structure that PyPDF2 strips, and recovers PDFs whose font encodings PyPDF2 cannot decode
+- **XFA datasets-stream extraction for the USPTO web-fillable ADS** — no Adobe Acrobat Pro flattening required; reads inventor names with first/middle/last/suffix fields, title, docket #, customer #, residency, assignee, signer, continuity entries, etc. directly from embedded XML
+- **`.docx` specification support** via python-docx (USPTO accepts spec in Word format)
+- **Image-only-page detection** — cross-document inventor checks hedge findings when scanned signature pages are present
+- **Continuation-aware** date and docket checks
+- **OCR fallback** (pytesseract + pdf2image) for fully image-based PDFs
+- **Optional authoritative-source inventor list** (`inventors.txt` / `inventors.json` / `*.eml`) for cross-checking against ADS / declaration / assignment / drawings
+- **Self-contained HTML report** with embedded CSS, clickable Executive Summary, and a Print-to-PDF button
 
 The script is designed to be run directly from Claude Code CLI without modification.
