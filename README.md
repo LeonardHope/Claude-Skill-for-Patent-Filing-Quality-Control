@@ -366,8 +366,4 @@ patent-filing-qc/
 
 ## License
 
-[Add your license here]
-
-## Contributing
-
-[Add contribution guidelines here]
+MIT License — see `LICENSE` file (or [the standard MIT license text](https://opensource.org/licenses/MIT)). Copyright © Leonard Hope.
