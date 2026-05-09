@@ -1837,7 +1837,18 @@ class PatentFilingQC:
                     Severity.WARNING,
                     f"Assignee names may differ: ADS='{ads_assignee}', Assignment='{assignment_assignee}'"
                 )
+        elif ads_assignee and self.assignment_text:
+            # ADS has an assignee, but we couldn't find it in assignment text.
+            # That's a mismatch worth warning about (the assignee on the ADS
+            # should appear in the assignment that transfers rights to them).
+            self.report.add_issue(
+                5, "Cross-Document Consistency", "Assignee Name Consistency",
+                Severity.WARNING,
+                f"ADS lists assignee '{ads_assignee}' but no matching name found "
+                f"in the assignment text. Verify the assignment is to the same entity."
+            )
         elif ads_assignee or assignment_assignee:
+            # Only one document available (no assignment, or no ADS data).
             assignee = ads_assignee or assignment_assignee
             self.report.add_issue(
                 5, "Cross-Document Consistency", "Assignee Name Consistency",
@@ -1885,10 +1896,13 @@ class PatentFilingQC:
         # once per inventor in a multi-inventor declaration package).
         if ads_inventors and self.declaration_text:
             ads_count = len(ads_inventors)
-            decl_count = len(re.findall(r'(?:i|I)\s+hereby\s+declare', self.declaration_text))
-            if decl_count == 0:
-                # Try alternate signature/inventor markers
-                decl_count = len(re.findall(r'/[A-Z][^/]{2,40}/', self.declaration_text))
+            # Count both "I hereby declare" phrases AND /Name/ signature patterns;
+            # use whichever is larger. Real declarations may have one declaration
+            # phrase covering all inventors with separate signatures, OR one
+            # phrase + signature per inventor.
+            phrase_count = len(re.findall(r'(?:i|I)\s+hereby\s+declare', self.declaration_text))
+            sig_count = len(re.findall(r'/[A-Z][^/\n]{2,40}/', self.declaration_text))
+            decl_count = max(phrase_count, sig_count)
             if decl_count == ads_count:
                 self.report.add_issue(
                     7, "Cross-Document Consistency", "Number of Inventors Consistency",
@@ -2045,23 +2059,23 @@ class PatentFilingQC:
             # Look for various signature indicators
             # PyPDF2 may not extract all text, so check multiple patterns
             signature_indicators = [
-                '/s/',                          # Electronic signature
-                'signature',                    # Generic signature reference
-                'inventor signature',           # Inventor signature label
-                'witness signature',            # Witness signature label
-                'witnessed by',                 # Witness section header
-                'legal name of inventor',       # Name above signature line
-                'signed',                       # Signed indicator
-                'executed',                     # Executed indicator
-                r'\d{1,2}/\d{1,2}/\d{2,4}',    # Date pattern (regex)
-                r'\d{1,2}/\d{1,2}/20\d{2}',    # Full year date pattern (regex)
+                '/s/',                              # /s/ electronic signature marker
+                'signature',                        # Generic signature reference
+                'inventor signature',
+                'witness signature',
+                'witnessed by',
+                'legal name of inventor',
+                'signed',
+                'executed',
+                r'\d{1,2}/\d{1,2}/\d{2,4}',         # Date pattern
+                r'\d{4}-\d{2}-\d{2}',               # ISO date
+                r'/[A-Z][^/\n]{2,40}/',             # /Name/ signature pattern
             ]
             dec_text_lower = self.declaration_text.lower()
             sig_found = False
             for indicator in signature_indicators:
-                if indicator.startswith('\\'):
-                    # Regex pattern
-                    if re.search(indicator, self.declaration_text, re.IGNORECASE):
+                if indicator.startswith('\\') or indicator.startswith('/['):
+                    if re.search(indicator, self.declaration_text):
                         sig_found = True
                         break
                 elif indicator in dec_text_lower:
@@ -2086,26 +2100,25 @@ class PatentFilingQC:
 
         # Check 12: Assignment signatures present
         if self.assignment_text:
-            # Look for various signature indicators
             signature_indicators = [
-                '/s/',                          # Electronic signature
-                'signature',                    # Generic signature reference
-                'inventor signature',           # Inventor signature label
-                'witness signature',            # Witness signature label
-                'witnessed by',                 # Witness section header
-                'legal name of inventor',       # Name above signature line
-                'assignor',                     # Assignor (who signs assignment)
-                'signed',                       # Signed indicator
-                'executed',                     # Executed indicator
-                r'\d{1,2}/\d{1,2}/\d{2,4}',    # Date pattern (regex)
-                r'\d{1,2}/\d{1,2}/20\d{2}',    # Full year date pattern (regex)
+                '/s/',
+                'signature',
+                'inventor signature',
+                'witness signature',
+                'witnessed by',
+                'legal name of inventor',
+                'assignor',
+                'signed',
+                'executed',
+                r'\d{1,2}/\d{1,2}/\d{2,4}',
+                r'\d{4}-\d{2}-\d{2}',
+                r'/[A-Z][^/\n]{2,40}/',          # /Name/ signature pattern
             ]
             assign_text_lower = self.assignment_text.lower()
             sig_found = False
             for indicator in signature_indicators:
-                if indicator.startswith('\\'):
-                    # Regex pattern
-                    if re.search(indicator, self.assignment_text, re.IGNORECASE):
+                if indicator.startswith('\\') or indicator.startswith('/['):
+                    if re.search(indicator, self.assignment_text):
                         sig_found = True
                         break
                 elif indicator in assign_text_lower:
@@ -2946,20 +2959,21 @@ class PatentFilingQC:
                     )
         
         # Check 28: First named inventor identified
-        # Compare first inventor from ADS with first named inventor on POA
+        # Compare first inventor from ADS with first named inventor on POA.
+        # Use XFA structured data when available (reliable structured fields).
         ads_first_inventor = None
         poa_first_inventor = None
 
-        # Extract first inventor from ADS (Inventor 1)
-        # Pattern: After "Suffix" line, the name appears as "FirstName LASTNAME"
-        inv1_section = re.search(r'Inventor\s+1(.*?)(?:Inventor\s+2|Correspondence|$)',
-                                  self.ads_text, re.DOTALL | re.IGNORECASE)
-        if inv1_section:
-            section = inv1_section.group(1)
-            # Look for name after Suffix line - format: "Chitrak GUPTA" or "First Middle LAST"
-            name_match = re.search(r'Suffix\s*\n\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,})', section)
-            if name_match:
-                ads_first_inventor = name_match.group(1).strip()
+        if self.ads_data and self.ads_data.get('inventors'):
+            ads_first_inventor = self._format_xfa_inventor(self.ads_data['inventors'][0])
+        elif self.ads_text:
+            inv1_section = re.search(r'Inventor\s+1(.*?)(?:Inventor\s+2|Correspondence|$)',
+                                      self.ads_text, re.DOTALL | re.IGNORECASE)
+            if inv1_section:
+                section = inv1_section.group(1)
+                name_match = re.search(r'Suffix\s*\n\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,})', section)
+                if name_match:
+                    ads_first_inventor = name_match.group(1).strip()
 
         # Extract first named inventor from POA
         # POA forms often need OCR to extract filled-in values
@@ -3227,32 +3241,41 @@ class PatentFilingQC:
         import datetime
         decl_text_for_date = self.declaration_text
 
+        def find_dates(text):
+            """Return list of (month, day, year) tuples for dates in text.
+            Recognizes M/D/Y, M-D-Y, ISO YYYY-MM-DD, and Month D, YYYY."""
+            results = []
+            for m in re.finditer(r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', text):
+                results.append(m.groups())  # (month, day, year)
+            for m in re.finditer(r'(\d{4})-(\d{2})-(\d{2})\b', text):
+                # ISO format: YYYY-MM-DD → reorder to (month, day, year)
+                y, mo, d = m.groups()
+                results.append((mo, d, y))
+            for m in re.finditer(
+                r'(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})',
+                text, re.IGNORECASE
+            ):
+                day_str, year_str = m.groups()
+                month_word_match = re.search(
+                    r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+' + day_str,
+                    text, re.IGNORECASE
+                )
+                if month_word_match:
+                    months = {'JANUARY':'1','FEBRUARY':'2','MARCH':'3','APRIL':'4',
+                              'MAY':'5','JUNE':'6','JULY':'7','AUGUST':'8',
+                              'SEPTEMBER':'9','OCTOBER':'10','NOVEMBER':'11','DECEMBER':'12'}
+                    results.append((months[month_word_match.group(1).upper()], day_str, year_str))
+            return results
+
         # Try OCR if no dates found in PyPDF2 text (dates often on signature pages)
-        date_matches = re.findall(r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', decl_text_for_date)
+        date_matches = find_dates(decl_text_for_date)
         if not date_matches and OCR_AVAILABLE:
             decl_files = list(self.folder_path.glob('*Dec*.pdf')) + list(self.folder_path.glob('*declaration*.pdf'))
             if decl_files:
                 try:
                     images = convert_from_path(decl_files[0])
                     ocr_text = '\n'.join(pytesseract.image_to_string(img) for img in images)
-                    date_matches = re.findall(r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', ocr_text)
-                    # Also try "Month DD, YYYY" format
-                    if not date_matches:
-                        month_matches = re.findall(
-                            r'(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})',
-                            ocr_text
-                        )
-                        if month_matches:
-                            # Convert to consistent format for processing below
-                            for day, year in month_matches:
-                                # Find the month name
-                                m_match = re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+' + day, ocr_text)
-                                if m_match:
-                                    month_name = m_match.group(1)
-                                    month_num = {'January': '1', 'February': '2', 'March': '3', 'April': '4',
-                                               'May': '5', 'June': '6', 'July': '7', 'August': '8',
-                                               'September': '9', 'October': '10', 'November': '11', 'December': '12'}
-                                    date_matches.append((month_num.get(month_name, '1'), day, year))
+                    date_matches = find_dates(ocr_text)
                 except Exception:
                     pass
 
@@ -3472,6 +3495,7 @@ class PatentFilingQC:
             r'(?:dated|executed|signed)[:\s]*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})',
             r'(?:dated|executed|signed)[:\s]*(\w+\s+\d{1,2},?\s+\d{4})',
             r'(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})',
+            r'(\d{4}-\d{2}-\d{2})\b',  # ISO format YYYY-MM-DD
         ]
 
         found_date = None
@@ -3479,7 +3503,7 @@ class PatentFilingQC:
             match = re.search(pattern, assign_text_for_date, re.IGNORECASE)
             if match:
                 date_str = match.group(1)
-                for fmt in ['%m/%d/%Y', '%m-%d-%Y', '%B %d, %Y', '%B %d %Y', '%m/%d/%y', '%m-%d-%y']:
+                for fmt in ['%Y-%m-%d', '%m/%d/%Y', '%m-%d-%Y', '%B %d, %Y', '%B %d %Y', '%m/%d/%y', '%m-%d-%y']:
                     try:
                         candidate = datetime.datetime.strptime(date_str, fmt)
                         if candidate.year >= 2020:
@@ -3503,7 +3527,7 @@ class PatentFilingQC:
                         match = re.search(pattern, ocr_text, re.IGNORECASE)
                         if match:
                             date_str = match.group(1)
-                            for fmt in ['%m/%d/%Y', '%m-%d-%Y', '%B %d, %Y', '%B %d %Y', '%m/%d/%y', '%m-%d-%y']:
+                            for fmt in ['%Y-%m-%d', '%m/%d/%Y', '%m-%d-%Y', '%B %d, %Y', '%B %d %Y', '%m/%d/%y', '%m-%d-%y']:
                                 try:
                                     candidate = datetime.datetime.strptime(date_str, fmt)
                                     if candidate.year >= 2020:
@@ -3653,10 +3677,23 @@ class PatentFilingQC:
             )
         
         # Check 44: POA properly signed
-        if '/s/' in self.poa_text or 'signature' in self.poa_text.lower():
+        # Recognize /s/, "signature", and /Name/ patterns. Also hedge if the
+        # POA has image-only pages (signature may be on scanned page).
+        has_sig = ('/s/' in self.poa_text
+                   or 'signature' in self.poa_text.lower()
+                   or bool(re.search(r'/[A-Z][^/\n]{2,40}/', self.poa_text)))
+        img_pages = self.image_only_pages.get('Power of Attorney', 0)
+        if has_sig:
             self.report.add_issue(
                 44, "Power of Attorney", "POA Properly Signed",
                 Severity.PASS, "Signature indicators detected in POA"
+            )
+        elif img_pages:
+            self.report.add_issue(
+                44, "Power of Attorney", "POA Properly Signed",
+                Severity.INFO,
+                f"No text-based signature indicators found, but POA has {img_pages} "
+                f"image-only page(s) — signature may be a scanned image. Verify manually."
             )
         else:
             self.report.add_issue(
@@ -3761,13 +3798,25 @@ class PatentFilingQC:
         """Checks 50-54: Common error detection"""
         
         # Check 50: No placeholder text remaining
-        placeholders = ['[INSERT]', '[TBD]', 'TODO', 'XXX', '***', 'PLACEHOLDER']
-        found_placeholders = []
-        
+        # Match common placeholder forms — "[INSERT ...]", "[TBD]", "TODO", etc.
+        # The previous version required exact "[INSERT]" with no inner text,
+        # which missed real-world placeholders like "[INSERT NAME HERE]".
+        placeholder_patterns = [
+            (r'\[INSERT[^\]]{0,80}\]',  '[INSERT…]'),
+            (r'\[TBD[^\]]{0,80}\]',     '[TBD…]'),
+            (r'\[FILL[^\]]{0,80}\]',    '[FILL…]'),
+            (r'\[PLACEHOLDER[^\]]{0,80}\]', '[PLACEHOLDER…]'),
+            (r'\[\s*___+\s*\]',         '[___]'),
+            (r'\bTODO\b',               'TODO'),
+            (r'\bFIXME\b',              'FIXME'),
+            (r'\bXXX\b',                'XXX'),
+            (r'\*\*\*+',                '***'),
+        ]
         all_text = self.spec_text + self.ads_text + self.declaration_text + self.assignment_text
-        for placeholder in placeholders:
-            if placeholder in all_text:
-                found_placeholders.append(placeholder)
+        found_placeholders = []
+        for pat, label in placeholder_patterns:
+            if re.search(pat, all_text):
+                found_placeholders.append(label)
         
         if not found_placeholders:
             self.report.add_issue(
