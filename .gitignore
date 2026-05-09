@@ -1,0 +1,39 @@
+# Operating system
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# Anything Ben-or-others' real client matter folders. Filing folders typically
+# contain confidential application content. The skill is meant to be RUN
+# against such folders, not to bundle them — so they should never be in the
+# repo. Common patterns:
+FINAL - TO BE REVIEWED-SIGNED/
+*MS-Matters/
+*MS1-*/
+*-CON/
+*-Application.*
+*-Specification.*
+*-Drawings.*
+*-ADS.*
+*-Declaration.*
+*-Assignment.*
+*-POA.*
+*-Formals.*
+*-Executed-*
+
+# Generated reports — these are output, not source. Belong in the matter
+# folder where the script was run, not in this repo.
+Patent_Filing_QC_Report.html
+Patent_Filing_QC_Report.md
+Patent_Filing_QC_Report.pdf
