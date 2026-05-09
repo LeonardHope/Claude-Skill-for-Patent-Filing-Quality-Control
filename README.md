@@ -351,7 +351,7 @@ When the script detects an XFA-based ADS, the console will show `✅ XFA extract
 2. **Don't ignore INFO items** - These require manual verification
 3. **Fix critical issues first** - These will cause filing rejections
 4. **Investigate warnings** - May be false positives, but often indicate real problems
-5. **Keep both reports** - Archive with filing records
+5. **Archive the report** - Save the HTML report (or its print-to-PDF rendering) with the filing records
 6. **Human review is essential** - Automated checks supplement but don't replace attorney review
 
 ## File Structure

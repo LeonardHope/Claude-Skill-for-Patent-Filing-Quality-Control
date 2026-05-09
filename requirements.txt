@@ -1,0 +1,22 @@
+# Patent Filing QC — Python dependencies
+#
+# Install all with:  pip install -r requirements.txt --break-system-packages
+
+# Required — PDF reading (basic)
+PyPDF2>=3.0
+
+# Required — better text extraction (preserves paragraph structure that the
+# section/claim/abstract checks rely on; recovers from font encodings PyPDF2
+# cannot decode).
+pdfplumber>=0.11
+
+# Optional — Word-format specifications. Only needed if any .docx file is
+# present in the filing folder.
+python-docx>=1.0
+
+# Optional — OCR fallback for scanned/image-only PDFs (declarations and
+# assignments where signature pages are scanned). Requires the system-level
+# `tesseract` and `poppler` binaries (`brew install tesseract poppler` on
+# macOS, equivalent on other platforms).
+pytesseract>=0.3
+pdf2image>=1.16
