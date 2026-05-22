@@ -95,8 +95,12 @@ class PatentFilingQC:
         self.assignment_text = ""
         self.poa_text = ""
         self.drawings_text = ""
+        self.ids_text = ""
+        self.ids_assertion_text = ""
         self.ads_data: Optional[Dict] = None
         self.ads_is_xfa = False
+        self.ids_is_xfa = False
+        self.ids_assertion_is_xfa = False
         self.authoritative_inventors: List[Dict] = []
         self.authoritative_source: Optional[str] = None
         # Per-document count of pages that have no extractable text but do
@@ -111,6 +115,7 @@ class PatentFilingQC:
         self.documents: Dict[str, Optional[Path]] = {
             'Specification': None, 'Drawings': None, 'ADS': None,
             'Declaration': None, 'Assignment': None, 'Power of Attorney': None,
+            'IDS': None, 'IDS Written Assertion': None,
         }
         # Files that classified as "Unknown" — surfaced in the report so the
         # user knows about them.
@@ -634,6 +639,47 @@ class PatentFilingQC:
             return self._extract_docx_text(path)
         return self.extract_pdf_text(path, doc_type)
 
+    def _extract_acroform_fields(self, pdf_path: Path) -> Dict[str, str]:
+        """Read AcroForm field values from a non-XFA PDF. Returns a dict
+        {field_name: value_str}. Buttons (checkboxes / radios) come back as
+        the chosen value ("/Yes", "/Off", an export-name, etc.). Returns an
+        empty dict if the PDF has no AcroForm or PyPDF2 can't read it."""
+        try:
+            with open(pdf_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                fields = reader.get_fields() or {}
+                out = {}
+                for name, info in fields.items():
+                    v = info.get('/V', '')
+                    if v is None:
+                        v = ''
+                    if hasattr(v, 'get_object'):
+                        v = v.get_object()
+                    out[name] = str(v)
+                return out
+        except Exception:
+            return {}
+
+    def _extract_ids_text(self, ids_path: Path, doc_type: str) -> str:
+        """IDS-aware text extraction. The USPTO SB/08 IDS form is an XFA
+        (web-fillable) PDF — the rendered page is just a 'Please wait...'
+        placeholder. When the form is XFA, return the XFA XML so the form
+        labels, field names, and any datasets-stream values are all
+        searchable by downstream checks. Otherwise (flattened or scanned
+        IDS, written-assertion forms with embedded text, etc.), fall back
+        to standard PDF text extraction."""
+        if self._is_xfa_form(ids_path):
+            if doc_type == 'IDS':
+                self.ids_is_xfa = True
+            elif doc_type == 'IDS Written Assertion':
+                self.ids_assertion_is_xfa = True
+            print(f"  ℹ️  {doc_type} appears to be an XFA (web-fillable) form — reading XFA streams")
+            xml = self._extract_all_xfa_xml(ids_path)
+            if xml:
+                return xml
+            print(f"  ⚠️  Could not extract XFA streams from {doc_type}; falling back to text extraction")
+        return self.extract_pdf_text(ids_path, doc_type)
+
     def _extract_all_xfa_xml(self, pdf_path: Path) -> str:
         """Concatenate every XFA stream's text content. The 'template' stream
         holds form UI labels and static text (e.g., 'I hereby declare' on a
@@ -668,20 +714,24 @@ class PatentFilingQC:
         except Exception:
             return ""
 
-    def _classify_file(self, path: Path) -> Tuple[str, float]:
+    def _classify_file(self, path: Path) -> List[Tuple[str, float]]:
         """Identify what kind of filing document a file is by inspecting its
-        content (not its filename). Handles both PDF and DOCX. Returns
-        (doc_type, confidence_score). doc_type is one of: 'ADS',
-        'Specification', 'Drawings', 'Declaration', 'Assignment',
-        'Power of Attorney', 'Unknown'.
+        content (not its filename). Handles both PDF and DOCX. Returns a list
+        of (doc_type, confidence_score) tuples. Most files return a single-
+        item list. Combined documents (e.g., a 'Patent Assignment and
+        Declaration' that contains both the executed assignment AND the
+        §1.63 oath in one PDF) return two tuples so the file gets loaded
+        into both slots. doc_type is one of: 'ADS', 'Specification',
+        'Drawings', 'Declaration', 'Assignment', 'Power of Attorney',
+        'Unknown'.
         """
         # DOCX path: only the spec is ever .docx in practice. Extract text
         # and run it through the same scoring as a non-XFA PDF.
         if path.suffix.lower() == '.docx':
             text = self._extract_docx_text(path)
             if not text.strip():
-                return ('Unknown', 0.0)
-            return self._score_text(text)
+                return [('Unknown', 0.0)]
+            return self._classify_text(text)
 
         # PDF path. XFA forms: don't assume XFA == ADS. Multiple USPTO forms
         # ship as XFA (PTO/AIA/01 + /02 Declarations, /14 ADS, /82 POA, etc.).
@@ -707,10 +757,24 @@ class PatentFilingQC:
                     40 * ('power of attorney' in xl) +
                     20 * ('appoint' in xl and 'practitioner' in xl)
                 ),
+                'IDS': (
+                    100 * ('pto/sb/08a' in xl or 'pto/sb/08b' in xl) +
+                    50 * ('pto-sb-08' in xl) +
+                    30 * (xl.count('information disclosure') >= 3) +
+                    20 * ('cite-no' in xl or 'cite_no' in xl) +
+                    -50 * ('pto/sb/08c' in xl)
+                ),
+                'IDS Written Assertion': (
+                    100 * ('pto/sb/08c' in xl) +
+                    40 * ('ids size fee' in xl or 'ids.sizefee' in xl) +
+                    20 * ('written assertion' in xl and '1.98' in xl)
+                ),
             }
             best_xfa = max(xfa_scores, key=lambda k: xfa_scores[k])
             if xfa_scores[best_xfa] >= 30:
-                return (best_xfa, float(xfa_scores[best_xfa]))
+                # USPTO XFA forms are single-purpose, so no combined-doc check
+                # here — return the one matching type.
+                return [(best_xfa, float(xfa_scores[best_xfa]))]
             # Fall through to text-based classification using the XFA XML as the
             # source text (the rendered PDF would just say "Please wait...").
             text = xfa_xml
@@ -721,11 +785,51 @@ class PatentFilingQC:
             if len(text.strip()) < 200:
                 text = self.extract_pdf_text(path, '<classifying>')
 
-        return self._score_text(text)
+        return self._classify_text(text)
 
-    def _score_text(self, text: str) -> Tuple[str, float]:
-        """Score raw text against doc-type signatures and return the best match.
-        Used by both PDF and DOCX classification paths."""
+    def _classify_text(self, text: str) -> List[Tuple[str, float]]:
+        """Score text and apply combined-document detection. Returns a list
+        of (doc_type, confidence) tuples — usually one, occasionally two for
+        combined Dec+Assignment filings."""
+        best_type, best_score, scores = self._score_text(text)
+        if best_type == 'Unknown':
+            return [('Unknown', best_score)]
+
+        results: List[Tuple[str, float]] = [(best_type, float(best_score))]
+
+        # Combined-doc detection: a single PDF containing both the executed
+        # assignment AND the §1.63 declaration is a common U.S. practice.
+        # The signed oath block typically lives on scanned image pages and
+        # extracts to little/no text — meaning the Declaration score loses
+        # to the (text-rich) Assignment score even though both are present.
+        # When the title page carries a combined-doc header, register the
+        # file under both slots so declaration-content checks can run.
+        tl = text.lower()
+        head = tl[:2500]
+        combined_markers = (
+            'assignment and declaration',
+            'declaration and assignment',
+            'assignment & declaration',
+            'declaration & assignment',
+        )
+        if any(m in head for m in combined_markers):
+            for other in ('Declaration', 'Assignment'):
+                if other == best_type:
+                    continue
+                # Threshold of 5 keeps this conservative — the runner-up
+                # needs at least one strong marker (e.g., the "37 CFR 1.63"
+                # header citation or a whole-word "assignor") before we
+                # promote it to a second classification.
+                other_score = scores.get(other, 0)
+                if other_score >= 5:
+                    results.append((other, float(other_score)))
+
+        return results
+
+    def _score_text(self, text: str) -> Tuple[str, float, Dict[str, float]]:
+        """Score raw text against doc-type signatures. Returns
+        (best_type, best_score, all_scores). The full scores dict lets
+        callers detect combined documents by inspecting the runner-up."""
         tl = text.lower()
         head = tl[:1500]  # signatures that must appear near the top
 
@@ -773,6 +877,30 @@ class PatentFilingQC:
             2 * ('revoke' in tl and 'attorney' in tl)
         )
 
+        # IDS (main form: SB/08a US patents, SB/08b foreign/NPL, or combined).
+        # Negative weight on SB/08c keeps the size-fee assertion form from
+        # collapsing into this slot.
+        scores['IDS'] = (
+            8 * ('pto/sb/08a' in tl or 'pto/sb/08b' in tl) +
+            6 * ('information disclosure statement' in tl) +
+            5 * bool(re.search(r'\bcite\s+no\.?', tl)) +
+            4 * ('u.s. patent documents' in tl or 'foreign patent documents' in tl) +
+            3 * ('non patent literature' in tl or 'non-patent literature' in tl) +
+            -10 * ('pto/sb/08c' in tl) +              # exclude written assertion
+            -8 * bool(re.search(r'what\s+is\s+claimed', tl))  # exclude spec
+        )
+
+        # IDS Written Assertion (PTO/SB/08C — the §1.17(v) IDS size-fee
+        # certification, separate from the IDS itself).
+        scores['IDS Written Assertion'] = (
+            10 * ('pto/sb/08c' in tl) +
+            6 * ('ids size fee' in tl) +
+            5 * (('written assertion' in tl) and
+                 (('37 cfr 1.98' in tl) or ('§1.98' in tl) or
+                  ('37 cfr 1.17(v)' in tl) or ('§1.17(v)' in tl))) +
+            2 * ('ids.sizefee' in tl)
+        )
+
         # Drawings: defining traits are very little prose plus drawing-style
         # markers (FIG. labels, sheet-numbering, sparse 3-digit reference
         # numerals). Many drawings PDFs are image-only with the only
@@ -801,8 +929,8 @@ class PatentFilingQC:
         best_type = max(scores, key=lambda k: scores[k])
         best_score = scores[best_type]
         if best_score < 3:
-            return ('Unknown', best_score)
-        return (best_type, float(best_score))
+            return ('Unknown', best_score, scores)
+        return (best_type, float(best_score), scores)
     
     def load_documents(self):
         """Locate and load all filing documents by classifying every PDF in the
@@ -813,7 +941,8 @@ class PatentFilingQC:
         # Initialize all six slots so the report's "Documents Found" list shows
         # which kinds were not detected.
         slots = ['Specification', 'Drawings', 'ADS',
-                 'Declaration', 'Assignment', 'Power of Attorney']
+                 'Declaration', 'Assignment', 'Power of Attorney',
+                 'IDS', 'IDS Written Assertion']
         for s in slots:
             self.report.files_found[s] = None
 
@@ -833,16 +962,24 @@ class PatentFilingQC:
             and not p.name.startswith('~$')
         ]
 
-        # Classify every file
+        # Classify every file. _classify_file returns a list because a single
+        # combined Dec+Assignment PDF can register under both slots.
         candidates_by_type: Dict[str, List[Tuple[Path, float]]] = {}
         for path in all_files:
-            doc_type, confidence = self._classify_file(path)
-            if doc_type == 'Unknown':
+            classifications = self._classify_file(path)
+            real = [(t, c) for t, c in classifications if t != 'Unknown']
+            if not real:
                 self.unrecognized_files.append(path)
                 print(f"  ❓ Unrecognized file (low confidence): {path.name}")
                 continue
-            candidates_by_type.setdefault(doc_type, []).append((path, confidence))
-            print(f"  📄 {path.name} → {doc_type} (confidence {confidence:.0f})")
+            for doc_type, confidence in real:
+                candidates_by_type.setdefault(doc_type, []).append((path, confidence))
+            if len(real) == 1:
+                t, c = real[0]
+                print(f"  📄 {path.name} → {t} (confidence {c:.0f})")
+            else:
+                summary = ", ".join(f"{t} ({c:.0f})" for t, c in real)
+                print(f"  📄 {path.name} → combined doc: {summary}")
 
         # For each slot, pick a candidate and warn if there are duplicates.
         # Spec-specific tie-breaker: when both a .pdf and .docx are present,
@@ -914,6 +1051,10 @@ class PatentFilingQC:
                 self.assignment_text = self._extract_text_any(best_path, 'Assignment')
             elif doc_type == 'Power of Attorney':
                 self.poa_text = self._extract_text_any(best_path, 'Power of Attorney')
+            elif doc_type == 'IDS':
+                self.ids_text = self._extract_ids_text(best_path, 'IDS')
+            elif doc_type == 'IDS Written Assertion':
+                self.ids_assertion_text = self._extract_ids_text(best_path, 'IDS Written Assertion')
 
         # Optional: authoritative inventor list (inventors.json/txt or *.eml)
         self._load_authoritative_inventors()
@@ -1014,11 +1155,15 @@ class PatentFilingQC:
         image-only (typical for sheets exported from CAD/Visio without text
         overlays) — in which case checks that look for FIG.-N labels will
         produce false positives.
-        Heuristic: needs at least 2 distinct FIG. references in extracted text."""
+        Heuristic: needs at least 2 distinct FIG. references in extracted text.
+        Counts both normal ("FIG. N") and reversed ("N.GIF" — landscape pages
+        rotated to portrait) orientations so rotated drawings aren't classified
+        as image-only."""
         if not self.drawings_text:
             return False
-        fig_count = len(set(re.findall(r'fig\.\s*(\d+)', self.drawings_text, re.IGNORECASE)))
-        return fig_count >= 2
+        normal = set(re.findall(r'fig\.\s*(\d+)', self.drawings_text, re.IGNORECASE))
+        reversed_ = set(re.findall(r'(\d+)\s*\.\s*GIF\b', self.drawings_text))
+        return len(normal | reversed_) >= 2
 
     def _extract_claims_section(self) -> str:
         """Pull just the CLAIMS section text from the specification. Many
@@ -1402,6 +1547,22 @@ class PatentFilingQC:
             if 10 <= num <= 20:
                 fig_nums.add(num)
 
+        # Pattern 6: Reversed FIG label from rotated landscape pages.
+        # When a drawings page has /Rotate=90 or 270 (common for landscape
+        # figures bound into a portrait filing), text extractors return the
+        # characters in reverse reading order, so "FIG. 1" comes out as
+        # "1\n.GIF" or "1.GIF". Match uppercase GIF preceded by a digit and a
+        # literal dot — narrow enough to avoid matching the .gif image-format
+        # extension, which would normally be lowercase.
+        for match in re.finditer(r'(\d{1,2})\s*\.\s*GIF\b', text):
+            # Reverse the captured digits — the whole substring extracts
+            # backwards, so "FIG. 10" comes out as "01.GIF" and "01" must
+            # flip back to "10" before parsing. (Single-digit numbers are
+            # palindromic and unaffected.)
+            num = int(match.group(1)[::-1])
+            if 1 <= num <= 20:
+                fig_nums.add(num)
+
         return sorted(fig_nums)
 
     def _extract_reference_numerals(self, text: str) -> dict:
@@ -1507,18 +1668,42 @@ class PatentFilingQC:
     def _extract_reference_numerals_from_drawings(self, text: str) -> set:
         """
         Extract reference numerals from drawings text.
-        Drawings often have limited text, so this extracts what's available.
-        """
-        if not text:
-            return set()
 
+        Landscape drawing pages are routinely rotated to portrait for filing
+        (/Rotate=90 or 270). On those pages, text extractors return digits in
+        reversed reading order — so a reference numeral "124" comes out as
+        "421". To avoid polluting the cross-check with reversed numerals, we
+        re-extract per-page from the source PDF, detect rotation, and reverse
+        digit tokens on rotated pages before collecting. Falls back to the
+        plain-text extractor's output when the source PDF isn't available.
+        """
         refs = set()
-        # Look for 3-digit numbers that are likely reference numerals
-        pattern = r'\b(\d{3})\b'
-        for match in re.finditer(pattern, text):
-            num = match.group(1)
-            if 100 <= int(num) <= 999:
-                refs.add(num)
+        pdf_path = self.documents.get('Drawings') if hasattr(self, 'documents') else None
+
+        per_page = []  # list of (page_text, rotation)
+        if pdf_path and Path(pdf_path).suffix.lower() == '.pdf':
+            try:
+                import pdfplumber
+                with pdfplumber.open(pdf_path) as pdf:
+                    for page in pdf.pages:
+                        page_text = page.extract_text() or ""
+                        rotation = getattr(page, 'rotation', 0) or 0
+                        per_page.append((page_text, rotation))
+            except Exception:
+                per_page = []
+
+        if not per_page and text:
+            per_page = [(text, 0)]
+
+        for page_text, rotation in per_page:
+            if not page_text:
+                continue
+            for match in re.finditer(r'\b(\d{3})\b', page_text):
+                num = match.group(1)
+                if rotation in (90, 270):
+                    num = num[::-1]
+                if 100 <= int(num) <= 999:
+                    refs.add(num)
 
         return refs
 
@@ -1533,6 +1718,7 @@ class PatentFilingQC:
         self.check_declaration()
         self.check_assignment()
         self.check_poa()
+        self.check_ids()
         self.check_formatting()
         self.check_common_errors()
         self.check_file_quality()
@@ -1552,9 +1738,10 @@ class PatentFilingQC:
                 Severity.WARNING,
                 f"{len(names)} file(s) in the folder did not classify as any "
                 f"of the recognized document types (Specification, Drawings, "
-                f"ADS, Declaration, Assignment, Power of Attorney). They may "
-                f"be unrelated, may have unreadable content, or may be a "
-                f"document type the tool doesn't yet support.",
+                f"ADS, Declaration, Assignment, Power of Attorney, IDS, "
+                f"IDS Written Assertion). They may be unrelated, may have "
+                f"unreadable content, or may be a document type the tool "
+                f"doesn't yet support.",
                 "\n".join(f"  • {n}" for n in names)
             )
 
@@ -1591,15 +1778,13 @@ class PatentFilingQC:
                 "SKIPPED — could not extract inventor names from ADS to use as reference"
             )
         else:
+            # Drawings deliberately excluded: USPTO drawings carry a docket/title
+            # header, not inventor names (37 CFR §1.84 doesn't require them), so
+            # checking for inventor names there produces false positives.
             other_docs = [
                 ('Declaration', self.declaration_text),
                 ('Assignment', self.assignment_text),
             ]
-            # Drawings: include only if text is extractable. Image-only
-            # drawings PDFs don't contain inventor names as text, so checking
-            # for them would always produce a false-positive "all missing."
-            if self._drawings_text_extractable():
-                other_docs.append(('Drawings', self.drawings_text))
             present_docs = [(n, t) for n, t in other_docs if t and len(t.strip()) > 100]
 
             if not present_docs:
@@ -1658,15 +1843,15 @@ class PatentFilingQC:
         # If the user dropped an inventors.txt / inventors.json / .eml in the folder,
         # treat that list as ground truth and flag any document that disagrees.
         if self.authoritative_inventors:
-            # Build per-doc inventor sets from ADS XFA + extract from other docs
+            # Build per-doc inventor sets from ADS XFA + extract from other docs.
+            # Drawings deliberately excluded — they carry a docket header, not
+            # inventor names, so cross-checking would produce false positives.
             decl_inventors = self.extract_inventors(self.declaration_text) if self.declaration_text else []
             assign_inventors = self.extract_inventors(self.assignment_text) if self.assignment_text else []
-            drawings_inventors = self.extract_inventors(self.drawings_text) if self.drawings_text else []
             all_inventor_sets = [
                 ("ADS", set(self._normalize_for_compare(i) for i in ads_inventors)),
                 ("Declaration", set(self._normalize_for_compare(i) for i in decl_inventors)),
                 ("Assignment", set(self._normalize_for_compare(i) for i in assign_inventors)),
-                ("Drawings", set(self._normalize_for_compare(i) for i in drawings_inventors))
             ]
             self._check_inventors_against_authoritative(all_inventor_sets)
         
@@ -2562,15 +2747,21 @@ class PatentFilingQC:
 
             # Check 3: Cross-reference with drawings (if text extractable)
             if drawings_refs:
+                # spec_refs only contains numerals that match the canonical
+                # "the X NUM" element-naming pattern. To verify a drawings
+                # numeral truly isn't in the spec, fall back to a bare-token
+                # search of the spec text — practitioners often reference
+                # numerals in prose that doesn't match the strict regex
+                # (e.g., "as shown at 800", "process 800", figure captions).
                 spec_ref_nums = set(spec_refs.keys())
-                in_spec_not_drawings = spec_ref_nums - drawings_refs
-                in_drawings_not_spec = drawings_refs - spec_ref_nums
+                truly_missing = []
+                for n in sorted(drawings_refs - spec_ref_nums):
+                    if not re.search(rf'\b{re.escape(n)}\b', self.spec_text):
+                        truly_missing.append(n)
 
-                # Only flag if truly missing (not found at all in spec, even as operations)
-                if in_drawings_not_spec:
-                    # This is actually rare since most drawings text extraction is limited
-                    # Don't flag as critical - drawings refs are hard to extract reliably
-                    warnings.append(f"Reference numerals in drawings may need verification: {sorted(in_drawings_not_spec)}")
+                if truly_missing:
+                    # Drawings refs are hard to extract reliably — warn, don't critical.
+                    warnings.append(f"Reference numerals in drawings may need verification: {truly_missing}")
 
             # Check 4: Verify all reference numerals are properly introduced
             # (This is a simplified check - full antecedent basis check is complex)
@@ -3380,10 +3571,29 @@ class PatentFilingQC:
                 today = datetime.datetime.now()
 
                 if decl_date > today:
-                    self.report.add_issue(
-                        35, "Declaration", "Declaration Date Logical",
-                        Severity.CRITICAL, f"Declaration date is in the future: {decl_date.strftime('%Y-%m-%d')}"
-                    )
+                    # Many practitioners use DD-MM-YYYY (most non-US countries)
+                    # rather than the US M/D/Y the regex assumes. If swapping
+                    # day and month yields a valid past date, treat this as a
+                    # format-ambiguity WARNING, not a CRITICAL future-date error.
+                    alt_date = None
+                    try:
+                        if int(day) <= 12 and int(month) <= 12 and int(day) != int(month):
+                            alt_date = datetime.datetime(int(year), int(day), int(month))
+                    except ValueError:
+                        alt_date = None
+                    if alt_date and alt_date <= today and (today - alt_date).days <= 365:
+                        self.report.add_issue(
+                            35, "Declaration", "Declaration Date Logical",
+                            Severity.WARNING,
+                            f"Declaration date ambiguous — parses as future ({decl_date.strftime('%Y-%m-%d')}) "
+                            f"under US M/D/Y, but as valid past ({alt_date.strftime('%Y-%m-%d')}) under DD-MM-YYYY",
+                            "Confirm the intended interpretation matches the format used in the signed declaration."
+                        )
+                    else:
+                        self.report.add_issue(
+                            35, "Declaration", "Declaration Date Logical",
+                            Severity.CRITICAL, f"Declaration date is in the future: {decl_date.strftime('%Y-%m-%d')}"
+                        )
                 elif (today - decl_date).days > 365:
                     # For continuations, the parent's executed declaration is
                     # carried forward under 37 CFR 1.63(d) and will legitimately
@@ -3778,7 +3988,219 @@ class PatentFilingQC:
                 44, "Power of Attorney", "POA Properly Signed",
                 Severity.WARNING, "Signatures not clearly detected in POA"
             )
-    
+
+    def check_ids(self):
+        """Checks 76–80: Information Disclosure Statement (IDS) — MVP.
+
+        IDS documents are optional under MPEP 609. When neither a main IDS
+        form nor a written assertion is present, this check group reports
+        PASS once (Check 76) and skips the remaining IDS checks. When
+        present, this group sanity-checks the form contents but does NOT
+        attempt deep per-reference validation — that is deliberately
+        out-of-scope for v1 and flagged for manual review.
+        """
+        ids_path = self.documents.get('IDS')
+        wa_path = self.documents.get('IDS Written Assertion')
+        ids_text = self.ids_text or ""
+        wa_text = self.ids_assertion_text or ""
+        tl_ids = ids_text.lower()
+        tl_wa = wa_text.lower()
+
+        # Check 76: IDS Document Recognition
+        if not ids_path and not wa_path:
+            self.report.add_issue(
+                76, "IDS", "IDS Documents Present",
+                Severity.PASS,
+                "No IDS documents present — IDS is optional under MPEP 609. "
+                "Skipping IDS-specific checks."
+            )
+            return
+
+        found_list = []
+        if ids_path:
+            found_list.append(f"IDS form: {ids_path.name}")
+        if wa_path:
+            found_list.append(f"Written Assertion (SB/08c): {wa_path.name}")
+        self.report.add_issue(
+            76, "IDS", "IDS Documents Present",
+            Severity.INFO,
+            f"{len(found_list)} IDS-related document(s) found.",
+            "\n".join(f"  • {s}" for s in found_list)
+        )
+
+        # Check 77: IDS form signed
+        if ids_path:
+            # The USPTO SB/08 XFA form stores signatures as
+            # <basic-signature><text-string>...</text-string></basic-signature>
+            # nested inside <electronic-signature>. An empty <text-string/>
+            # means the field is unfilled. A filled non-empty value (e.g.,
+            # "/Leonard J. Hope/") means a typed S-signature is present.
+            sig_match = re.search(
+                r'<\s*basic-signature\b[^>]*>\s*<\s*text-string\b[^>]*>([^<]+)</\s*text-string',
+                ids_text, re.IGNORECASE)
+            reg_match = re.search(
+                r'<\s*registered-number\b[^>]*>\s*(\d{4,6})\s*</',
+                ids_text, re.IGNORECASE)
+            sig_val = sig_match.group(1).strip() if sig_match else ""
+            reg_val = reg_match.group(1).strip() if reg_match else ""
+            if sig_val and reg_val:
+                self.report.add_issue(
+                    77, "IDS", "IDS Form Signed",
+                    Severity.PASS,
+                    f"IDS appears signed: '{sig_val}' (Reg. No. {reg_val})."
+                )
+            elif sig_val or reg_val:
+                self.report.add_issue(
+                    77, "IDS", "IDS Form Signed",
+                    Severity.WARNING,
+                    f"Partial signature data on IDS — "
+                    f"signature='{sig_val or '(empty)'}', "
+                    f"reg no='{reg_val or '(empty)'}'. "
+                    f"Confirm the form is properly signed."
+                )
+            else:
+                self.report.add_issue(
+                    77, "IDS", "IDS Form Signed",
+                    Severity.WARNING,
+                    "IDS form has no filled signature or practitioner "
+                    "registration number. Sign before filing."
+                )
+
+        # Check 78: IDS Reference Counts
+        if ids_path:
+            # XFA structure: each citation category has ONE outer block
+            # (e.g., <us-patent-cite>...</us-patent-cite>) that contains
+            # MULTIPLE <us-doc-reference> siblings — one per cited document.
+            # Template slots have self-closing <doc-number/> (empty); filled
+            # references have <doc-number>VALUE</doc-number>. NPL items live
+            # in <us-nplcit> with their content in a <text> child.
+            def count_filled(outer_tag: str, leaf_tag: str) -> int:
+                total = 0
+                pattern = rf'<{outer_tag}\b[^>]*>(.*?)</{outer_tag}\s*>'
+                for blk in re.finditer(pattern, ids_text, re.IGNORECASE | re.DOTALL):
+                    body = blk.group(1)
+                    total += len(re.findall(
+                        rf'<{leaf_tag}\b[^>]*>\s*[^<\s][^<]*?\s*</\s*{leaf_tag}\s*>',
+                        body, re.IGNORECASE | re.DOTALL))
+                return total
+
+            us_pat = count_filled('us-patent-cite',          'doc-number')
+            us_pub = count_filled('us-pub-appl-cite',        'doc-number')
+            fp     = count_filled('us-foreign-document-cite','doc-number')
+            npl    = count_filled('us-nplcit',               'text')
+
+            # Collect actual doc-numbers for the details panel (handy for a
+            # human eyeball-check that the right references made it in).
+            us_doc_numbers = re.findall(
+                r'<\s*doc-number\b[^>]*>\s*([^<\s][^<]*?)\s*</\s*doc-number\s*>',
+                ids_text, re.IGNORECASE)
+            total = us_pat + us_pub + fp + npl
+            if total > 0:
+                self.report.add_issue(
+                    78, "IDS", "IDS Reference Counts",
+                    Severity.INFO,
+                    f"IDS lists {total} reference(s): "
+                    f"{us_pat} US patent(s), {us_pub} US publication(s), "
+                    f"{fp} foreign document(s), {npl} NPL item(s). "
+                    f"Verify each cited reference is accompanied by a copy "
+                    f"or covered by a §1.98(a)(2) exception.",
+                    "Cited US patent doc numbers (first 20): " +
+                    ", ".join(us_doc_numbers[:20])
+                    if us_doc_numbers else ""
+                )
+            else:
+                self.report.add_issue(
+                    78, "IDS", "IDS Reference Counts",
+                    Severity.WARNING,
+                    "IDS form has no filled reference citations. Either the "
+                    "form is empty or the extractor missed them — verify "
+                    "manually before filing."
+                )
+
+        # Check 79: Written Assertion checkbox selection
+        if wa_path:
+            # PTO/SB/08c is a regular AcroForm PDF (not XFA). The 4 §1.17(v)
+            # checkboxes live as "Check Box1".."Check Box4" with value
+            # "/Yes" when checked, "/Off" when not.
+            wa_fields = self._extract_acroform_fields(wa_path)
+            cb_states = {name: val for name, val in wa_fields.items()
+                         if re.match(r'check\s*box\s*\d', name, re.IGNORECASE)}
+            checked = [name for name, val in cb_states.items()
+                       if val.lower() in ('/yes', 'yes', 'on', '1', 'true')]
+            box_meanings = {
+                '1': '§1.17(v): no IDS size fee required',
+                '2': '§1.17(v)(1): fee tier 1',
+                '3': '§1.17(v)(2): fee tier 2',
+                '4': '§1.17(v)(3): fee tier 3',
+            }
+            if len(checked) == 1:
+                # Extract box number
+                m = re.search(r'(\d)', checked[0])
+                meaning = box_meanings.get(m.group(1), '?') if m else '?'
+                self.report.add_issue(
+                    79, "IDS", "Written Assertion Selection Made",
+                    Severity.PASS,
+                    f"Written Assertion has one selection: {checked[0]} "
+                    f"(asserts: {meaning})."
+                )
+            elif len(checked) > 1:
+                self.report.add_issue(
+                    79, "IDS", "Written Assertion Selection Made",
+                    Severity.CRITICAL,
+                    f"Written Assertion has {len(checked)} boxes checked, "
+                    f"but only one is allowed per §1.17(v). Checked: "
+                    f"{', '.join(checked)}."
+                )
+            elif cb_states:
+                # We found checkbox fields but none are checked
+                self.report.add_issue(
+                    79, "IDS", "Written Assertion Selection Made",
+                    Severity.CRITICAL,
+                    "Written Assertion has NO §1.17(v) box checked. The "
+                    "form will be treated as no assertion made. Check "
+                    "exactly one of the four options before filing."
+                )
+            else:
+                self.report.add_issue(
+                    79, "IDS", "Written Assertion Selection Made",
+                    Severity.INFO,
+                    "Could not read AcroForm checkbox fields. Manually "
+                    "verify exactly one §1.17(v) option is selected."
+                )
+
+        # Check 80: Written Assertion signed
+        if wa_path:
+            wa_fields = self._extract_acroform_fields(wa_path)
+            sig_val = wa_fields.get('Signature', '').strip()
+            name_val = wa_fields.get('Name PrintTyped', '').strip()
+            reg_val = wa_fields.get(
+                'Practitioner Registration Number if applicable', ''
+            ).strip()
+            date_val = wa_fields.get('Date', '').strip()
+            if sig_val and (name_val or reg_val):
+                self.report.add_issue(
+                    80, "IDS", "Written Assertion Signed",
+                    Severity.PASS,
+                    f"Written Assertion signed: '{sig_val}' "
+                    f"(name: {name_val or 'n/a'}, "
+                    f"reg no: {reg_val or 'n/a'}, "
+                    f"date: {date_val or 'n/a'})."
+                )
+            elif sig_val:
+                self.report.add_issue(
+                    80, "IDS", "Written Assertion Signed",
+                    Severity.WARNING,
+                    f"Written Assertion has a signature ('{sig_val}') but "
+                    f"name/reg no fields are empty. Confirm signature is valid."
+                )
+            else:
+                self.report.add_issue(
+                    80, "IDS", "Written Assertion Signed",
+                    Severity.WARNING,
+                    "Written Assertion has no filled signature field. "
+                    "Sign before filing."
+                )
+
     def check_formatting(self):
         """Checks 45, 49: USPTO formatting compliance"""
 
@@ -4041,9 +4463,13 @@ class PatentFilingQC:
             claims_text = self._extract_claims_section()
 
             if claims_text:
-                # Find elements introduced with "a" or "an"
+                # Find elements introduced with "a" or "an".
+                # Use a lookahead so the captured noun phrase isn't consumed —
+                # otherwise "a request for a firmware update" matches once at
+                # the first "a" (capturing "request for a") and the second "a"
+                # never starts a new match, so "firmware update" is missed.
                 introduced = set()
-                intro_pattern = r'\b(?:a|an)\s+([\w\-]+(?:\s+[\w\-]+){0,2})\b'
+                intro_pattern = r'\b(?:a|an)\s+(?=([\w\-]+(?:\s+[\w\-]+){0,2})\b)'
                 for match in re.finditer(intro_pattern, claims_text, re.IGNORECASE):
                     element = match.group(1).lower().strip()
                     # Filter out common non-elements
@@ -4052,12 +4478,42 @@ class PatentFilingQC:
 
                 # Find elements referenced with "the" or "said"
                 referenced = []
-                ref_pattern = r'\b(?:the|said)\s+([\w\-]+(?:\s+[\w\-]+){0,2})\b'
+                ref_pattern = r'\b(?:the|said)\s+(?=([\w\-]+(?:\s+[\w\-]+){0,2})\b)'
+                # Quantifier phrases aren't noun antecedents — "the at least
+                # one processor" refers back to "at least one processor", with
+                # "at least one" as the quantifier and "processor" as the noun.
+                quantifier_phrases = {
+                    'at least one', 'one or more', 'two or more', 'three or more',
+                    'at least two', 'at least three',
+                }
+                # Continuation tokens that follow the antecedent but aren't
+                # part of the noun phrase — "the instructions further causing"
+                # means "the instructions, further causing the apparatus to…";
+                # the antecedent is "instructions", not "instructions further causing".
+                continuation_tokens = {'further', 'thereby', 'whereby', 'wherein'}
                 for match in re.finditer(ref_pattern, claims_text, re.IGNORECASE):
                     element = match.group(1).lower().strip()
-                    # Filter out common non-elements and preamble terms
+                    # Truncate at continuation tokens
+                    words = element.split()
+                    for i, w in enumerate(words):
+                        if w in continuation_tokens:
+                            words = words[:i]
+                            break
+                    element = ' '.join(words)
+                    if not element:
+                        continue
+                    # Skip pure quantifier phrases
+                    if element in quantifier_phrases:
+                        continue
+                    # Filter out common non-elements and preamble terms.
+                    # "instructions" and "operations" are part of the standard
+                    # apparatus / CRM claim boilerplate ("storing computer-
+                    # executable instructions", "perform operations comprising")
+                    # — conventionally referenced as "the X" without an explicit
+                    # "a/an X" intro, and USPTO-tolerated.
                     skip_terms = ['method', 'system', 'device', 'apparatus', 'medium', 'product',
-                                 'claim', 'claims', 'invention', 'present', 'following', 'above']
+                                 'claim', 'claims', 'invention', 'present', 'following', 'above',
+                                 'instructions', 'operations']
                     if element not in skip_terms and not any(s in element for s in skip_terms):
                         referenced.append(element)
 
@@ -4125,21 +4581,44 @@ class PatentFilingQC:
                 term_pattern = r'\b([\w\-]+(?:\s+[\w\-]+){1,3})\b'
                 claim_terms = set()
 
+                # Words that, if they appear as the first or last token, mean
+                # the regex grabbed something across a phrase boundary (verb
+                # continuation, preposition tail, or conjunction). Drop or
+                # truncate rather than treating these as real claim terms.
+                conjunction_prep_words = {
+                    'and', 'or', 'but', 'nor', 'yet',
+                    'to', 'for', 'with', 'by', 'from', 'in', 'on', 'at', 'of',
+                    'further', 'thereby', 'whereby', 'wherein',
+                }
+
                 for match in re.finditer(term_pattern, claims_text, re.IGNORECASE):
                     term = match.group(1).lower().strip()
-                    # Filter to likely technical terms (multi-word or technical suffixes)
+                    # Collapse newlines and runs of whitespace introduced by PDF
+                    # extraction across line breaks (e.g., 'and\nverifying').
+                    term = re.sub(r'\s+', ' ', term)
                     words = term.split()
+                    # Skip if the first token is a conjunction/preposition —
+                    # the term started mid-phrase, not at a noun head.
+                    if words and words[0] in conjunction_prep_words:
+                        continue
+                    # Trim trailing conjunctions/prepositions.
+                    while words and words[-1] in conjunction_prep_words:
+                        words.pop()
+                    term = ' '.join(words)
                     if len(words) >= 2 and len(term) > 10:
                         # Skip common phrases
                         skip_phrases = ['the method', 'the system', 'the device', 'claim 1',
                                        'wherein the', 'comprising', 'configured to', 'adapted to',
-                                       'based on', 'according to', 'at least one', 'one or more']
+                                       'based on', 'according to', 'at least one', 'one or more',
+                                       'or more', 'or fewer']
                         if not any(skip in term for skip in skip_phrases):
                             claim_terms.add(term)
 
-                # Check if claim terms appear in description
+                # Check if claim terms appear in description. Normalize
+                # whitespace in the description too, so a hyphenated term
+                # split across a line break in the claims still matches.
                 undefined_terms = []
-                description_lower = description_text.lower()
+                description_lower = re.sub(r'\s+', ' ', description_text.lower())
 
                 for term in claim_terms:
                     # Check for exact match or close match in description
@@ -4292,12 +4771,13 @@ class PatentFilingQC:
         if self.spec_text:
             claims_text_59 = self._extract_claims_section()
 
-            # Extract detailed description (before claims)
-            desc_match = re.search(
-                r'(?:DETAILED\s+DESCRIPTION|DESCRIPTION\s+OF.*?EMBODIMENTS?)(.*?)(?:\bCLAIMS\b|What is claimed)',
-                self.spec_text, re.DOTALL | re.IGNORECASE
-            )
-            desc_text = desc_match.group(1) if desc_match else self.spec_text[:len(self.spec_text)//2]
+            # Search the whole spec (minus the claims themselves), not just
+            # Detailed Description — claim terms are frequently defined in the
+            # Summary or Brief Description sections, and restricting to DD
+            # produces false positives.
+            search_corpus = self.spec_text
+            if claims_text_59 and claims_text_59 in search_corpus:
+                search_corpus = search_corpus.replace(claims_text_59, '')
 
             if claims_text_59:
                 # Extract noun phrases from claims that look like real claim
@@ -4309,27 +4789,77 @@ class PatentFilingQC:
                              'following', 'above', 'said', 'wherein', 'thereof',
                              'therein', 'further', 'least', 'one', 'more', 'each',
                              'plurality', 'time', 'use', 'set', 'first', 'second',
-                             'third', 'fourth', 'fifth'}
+                             'third', 'fourth', 'fifth', 'at'}
+                # Tokens that, if captured at the tail of a phrase, mean the
+                # regex grabbed past the noun head — strip them rather than
+                # treating the captured tail as part of the noun phrase.
+                TAIL_TRIM = {'and', 'or', 'but', 'nor', 'yet',
+                             'to', 'for', 'with', 'by', 'from', 'in', 'on',
+                             'at', 'of', 'through', 'into', 'onto',
+                             'further', 'thereby', 'whereby', 'wherein'}
                 # Multi-word noun phrases (2-3 words) — these are the meaningful
                 # claim terms. Single-word terms like "method" / "system" are
                 # too generic to verify.
                 np_pattern = r'\b(?:a|an|the|said)\s+([a-z][\w\-]*\s+[\w\-]+(?:\s+[\w\-]+)?)\b'
+                # Claim-only qualifiers: standard USPTO claim-construction
+                # adjectives (e.g., "non-transitory" added to CRM claims post-
+                # Nuijten) that aren't expected to appear verbatim in the spec
+                # — the spec describes equivalents without the qualifier.
+                CLAIM_ONLY_QUALIFIERS = {'non-transitory'}
                 all_claim_terms = set()
                 for m in re.finditer(np_pattern, claims_text_59, re.IGNORECASE):
                     term = m.group(1).strip().lower()
-                    # Exclude phrases that start with a stopword or are entirely
-                    # stopword-derived
+                    # Collapse whitespace (newlines from PDF line breaks)
+                    term = re.sub(r'\s+', ' ', term)
                     words = term.split()
-                    if words[0] in STOPWORDS:
+                    if not words or words[0] in STOPWORDS:
                         continue
-                    # Strip trailing verb participle if any
-                    if words[-1].endswith(('ing', 'ed')) and len(words) > 1:
-                        term = ' '.join(words[:-1])
-                    all_claim_terms.add(term)
+                    # Alternate trimming: a trailing verb participle ("causing")
+                    # may shield an inner continuation token ("further") and
+                    # vice versa. Keep trimming until stable.
+                    changed = True
+                    while changed and words:
+                        changed = False
+                        if words[-1] in TAIL_TRIM:
+                            words.pop()
+                            changed = True
+                            continue
+                        if len(words) > 1 and words[-1].endswith(('ing', 'ed')):
+                            words.pop()
+                            changed = True
+                    # Need at least 2 words remaining to be a meaningful phrase
+                    if len(words) < 2:
+                        continue
+                    all_claim_terms.add(' '.join(words))
 
                 if all_claim_terms:
-                    desc_lower = desc_text.lower()
-                    missing = [t for t in all_claim_terms if t.lower() not in desc_lower]
+                    # Normalize whitespace in the corpus so phrases broken
+                    # across line breaks in claims still match the spec.
+                    desc_lower = re.sub(r'\s+', ' ', search_corpus.lower())
+
+                    def is_supported(t: str) -> bool:
+                        if t in desc_lower:
+                            return True
+                        # Try with claim-only qualifiers removed.
+                        stripped = ' '.join(w for w in t.split() if w not in CLAIM_ONLY_QUALIFIERS)
+                        if stripped and stripped != t and stripped in desc_lower:
+                            return True
+                        # Fallback: every content word (non-stopword) appears
+                        # individually in the spec. Catches cases where the
+                        # spec describes the same concept with slightly
+                        # different surrounding words (e.g., "computer-readable
+                        # storage medium" in spec vs "computer-readable medium"
+                        # in claim).
+                        content_words = [w for w in t.split()
+                                         if w not in STOPWORDS
+                                         and w not in CLAIM_ONLY_QUALIFIERS]
+                        if len(content_words) >= 2 and all(
+                            re.search(rf'\b{re.escape(w)}\b', desc_lower) for w in content_words
+                        ):
+                            return True
+                        return False
+
+                    missing = [t for t in all_claim_terms if not is_supported(t)]
                     if not missing:
                         self.report.add_issue(
                             59, "Cross-References", "Claims Reference Specification Elements",
