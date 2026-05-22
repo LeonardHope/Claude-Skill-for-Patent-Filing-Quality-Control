@@ -151,7 +151,7 @@ Cross-document mismatches against the authoritative source are flagged CRITICAL.
 The skill performs 70+ quality control checks across these categories:
 
 ### Cross-Document Consistency (8 + 1 conditional checks)
-- Inventor names match across ADS, declaration, assignment, and drawings
+- Inventor names match across ADS, declaration, and assignment (drawings excluded — they carry a docket/title header, not inventor names)
 - Application title consistency
 - Attorney docket number consistency
 - Correspondence address alignment
@@ -284,7 +284,7 @@ The main QC script is located at `scripts/qc_patent_filing.py` and includes:
 - **Image-only-page detection** — cross-document inventor checks hedge findings when scanned signature pages are present
 - **Continuation-aware** date and docket checks
 - **OCR fallback** (pytesseract + pdf2image) for fully image-based PDFs
-- **Optional authoritative-source inventor list** (`inventors.txt` / `inventors.json` / `*.eml`) for cross-checking against ADS / declaration / assignment / drawings
+- **Optional authoritative-source inventor list** (`inventors.txt` / `inventors.json` / `*.eml`) for cross-checking against ADS / declaration / assignment
 - **Self-contained HTML report** with embedded CSS, clickable Executive Summary, and a Print-to-PDF button
 
 The script is designed to be run directly from Claude Code CLI without modification.
