@@ -5815,7 +5815,8 @@ def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(description='Patent Filing Quality Control')
     parser.add_argument('folder', help='Path to folder containing patent filing documents')
-    parser.add_argument('--output-dir', default='.', help='Directory for output reports (default: current directory)')
+    parser.add_argument('--output-dir', default=None,
+                        help='Directory for output reports (default: same folder as the filing documents)')
     
     args = parser.parse_args()
     
@@ -5881,12 +5882,14 @@ def main():
                 print(f"   Details: {issue.details}")
         print()
     
-    # Generate reports
-    output_dir = Path(args.output_dir)
+    # Generate reports. Default the output directory to the filing folder
+    # itself — that's where users look first, and the script is typically
+    # invoked from a different CWD (e.g., by Claude Code running the skill).
+    output_dir = Path(args.output_dir) if args.output_dir else Path(args.folder)
     output_dir.mkdir(exist_ok=True)
-    
+
     html_report = output_dir / "Patent_Filing_QC_Report.html"
-    print(f"📝 Generating HTML report: {html_report}")
+    print(f"📝 Generating HTML report: {html_report.resolve()}")
     qc.generate_html_report(str(html_report))
     print(f"   To save as PDF: open the HTML file in a browser, then File → Print → Save as PDF.")
     
