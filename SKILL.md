@@ -1,6 +1,6 @@
 ---
 name: patent-filing-qc
-description: Comprehensive quality control for U.S. patent application filing documents. Use when the user asks to QC, check, validate, or review patent filing documents before submission to the USPTO. Performs 70+ automated and manual checks across specification, drawings, ADS, declaration, assignment, and power of attorney documents. Detects cross-document inconsistencies, formatting issues, missing required fields, and common errors.
+description: Quality control for U.S. patent application filing documents. Use when the user asks to QC, check, validate, or review patent filing documents before submission to the USPTO. Focuses on identity/right-file verification and cross-document consistency (inventors, title, docket, ADS/declaration/assignment alignment) rather than drafting-quality review of a presumed-correct spec.
 ---
 
 # Patent Filing QC
@@ -33,8 +33,6 @@ Confirm the folder path containing all filing documents. The folder should typic
 
 **Filenames don't matter — the script identifies documents by their *content*, not their names.** A specification named `Application.pdf`, a declaration named `Formals.pdf`, or any other naming convention works as long as the content of the file is recognizable. XFA forms (any PTO/AIA/* form, not just the ADS) are classified by inspecting their embedded XML rather than assuming form type from the filename.
 
-**Format-wise, the spec can be `.docx` or `.pdf`.** The USPTO accepts the specification in Word format, and so does this tool — the classifier reads .docx the same way it reads PDFs and routes it to the Specification slot when its content matches. Other documents (declaration, ADS, drawings, assignment, POA) should be PDFs.
-
 **Note on the ADS:** The USPTO web-fillable ADS (PTO/AIA/14) is an XFA form. The script reads the form's embedded XFA datasets stream directly, so no Adobe Acrobat Pro flattening is required. If the ADS extraction succeeds, the console will show `✅ XFA extraction successful` — every ADS field needed for cross-document checks is then available structured.
 
 ### Step 2: Install Dependencies
@@ -42,13 +40,13 @@ Confirm the folder path containing all filing documents. The folder should typic
 The user does not need to install anything by hand. If the script fails or warns about a missing dependency, you should install it for them automatically (asking permission once when prompted) and re-run.
 
 Required:
-- **PyPDF2** — `pip install PyPDF2 --break-system-packages`. Used for XFA stream extraction and AcroForm inspection. If you see `ModuleNotFoundError: No module named 'PyPDF2'`, install it before re-running.
-- **pdfplumber** — `pip install pdfplumber --break-system-packages`. Used as the primary text extractor for spec/declaration/assignment/POA. Preserves paragraph structure that PyPDF2 strips, which the section-detection and claim-parsing checks rely on. Without it, the script falls back to PyPDF2 and many spec-content checks will produce false positives.
+- **PyPDF2** — `pip install PyPDF2 --break-system-packages`. If you see `ModuleNotFoundError: No module named 'PyPDF2'`, install it before re-running.
 
-For Word (.docx) specifications (the USPTO accepts the spec in .docx; everything else stays PDF):
-- **python-docx** — `pip install python-docx --break-system-packages`. Only required if a `.docx` file is present in the folder. The script will print an install hint if it encounters a `.docx` without python-docx installed.
+For PDF report output (the script always emits Markdown unconditionally; the `.pdf` requires one of these backends):
+- **pandoc + basictex** (preferred): `brew install pandoc basictex`
+- **weasyprint** (fallback): `pip install weasyprint markdown --break-system-packages`
 
-The report is HTML with embedded CSS (no pandoc, no LaTeX, no weasyprint required). If the user wants a PDF copy, they open the HTML in any browser and use File → Print → Save as PDF.
+If the script prints `⚠️ PDF generation failed. Install pandoc or weasyprint for PDF output.`, install one of those backends (default to weasyprint since it's the smaller install) and re-run the script. Do **not** synthesize a PDF yourself — the script's PDF output is canonical, see Step 4.
 
 Optional (only for image-based / scanned PDFs that aren't text-searchable; **not** needed for the USPTO XFA-based ADS):
 - `pip install pytesseract pdf2image --break-system-packages` + `brew install tesseract poppler`
@@ -69,32 +67,33 @@ python3 /path/to/skill/scripts/qc_patent_filing.py <folder-path> --output-dir <o
 The script will:
 1. Automatically detect all filing documents in the folder
 2. Extract text from PDFs
-3. Run all 70+ quality control checks
-4. Generate one self-contained HTML report file in the output folder
+3. Run the active quality control checks (drafting-quality checks of the spec have been removed; the script focuses on file-identity and cross-document consistency)
+4. Generate both Markdown and PDF report files in the documents folder
 
-### Step 4: Ensure the Report Is Generated
+### Step 4: Ensure Both Reports Are Generated
 
-The script writes one report file:
-- `Patent_Filing_QC_Report.html` — self-contained HTML with embedded CSS. Opens in any browser. To save as PDF, the user uses their browser's File → Print → Save as PDF.
-
-There is no longer a separate `.md` or `.pdf` artifact. The HTML is the canonical, visual report. Don't try to convert it to PDF yourself with pandoc, weasyprint, or any other tool — the user can print to PDF from their browser if they want one, and any conversion you'd run would just reintroduce the layout problems that made us stop generating PDFs directly.
+The script will write two report files into the output folder:
+- `Patent_Filing_QC_Report.md` - Markdown format for easy reading
+- `Patent_Filing_QC_Report.pdf` - PDF format for distribution/archiving
 
 **The script's output is canonical. Do not synthesize a substitute or supplemental report under any circumstances.**
 
-- Do NOT write your own narrative report (executive summary, action items, "False Positives Identified," pre-filing checklist, etc.) and save it as `Patent_Filing_QC_Report.html` or any other filename. The script's report is the report.
+- Do NOT write your own narrative report (executive summary, action items, "False Positives Identified," pre-filing checklist, etc.) and save it as `Patent_Filing_QC_Report.pdf` or any other filename. The script's report is the report.
 - Do NOT re-classify, downgrade, override, or annotate findings in the script's report. If a check produces a false positive, the fix goes into the *check logic in the script* — not into a hand-authored override document. Open a follow-up with the user about the bad check; do not silently re-categorize it for them.
 - Do NOT supplement the script's findings with your own manual review of the PDFs (POA wording, claim antecedent basis, etc.). Manual review is the user's job, not yours; the report flags items for manual review and stops there.
-- If the script crashes or fails to produce the report file, **stop and tell the user** what failed. Do not generate a hand-authored substitute and pass it off as the script's output. The cost of a missing report is small; the cost of a freelance report that *looks* like the skill's output but isn't is high — it conceals what the script actually flagged.
+- If the script crashes or fails to produce one of the two report files, **stop and tell the user** what failed. Do not generate a hand-authored substitute and pass it off as the script's output. The cost of a missing report is small; the cost of a freelance report that *looks* like the skill's output but isn't is high — it conceals what the script actually flagged.
+
+The PDF is generated by the script from the Markdown using `fpdf2`. If only the Markdown is produced (e.g., `fpdf2` is not installed), report that to the user and ask them to install it; do not paper over the gap.
 
 ### Step 5: Output Behavior
 
-**IMPORTANT: Do NOT display the report content in the conversation.** The report file speaks for itself. After generation:
-1. Confirm to the user that the report has been generated
-2. Provide the file path of the `.html` report and tell the user they can open it in a browser
+**IMPORTANT: Do NOT display the report content in the conversation.** The report files speak for themselves. After generation:
+1. Confirm to the user that the reports have been generated
+2. Provide the file paths for both `.md` and `.pdf` reports
 3. Mention only the high-level summary counts (e.g., "3 Critical, 6 Warnings, 36 Passes")
 4. Do NOT echo, paste, or reproduce the report content in the chat
 
-**IMPORTANT: Do NOT re-Read the source PDFs after the script has run.** The script already performs the full text/XFA extraction and runs all 70+ checks against the result. Re-reading the PDFs with the Read tool produces no additional information, slows the workflow, and (in default permission mode) generates a permission prompt for every file. Trust the script's output. Only Read individual PDFs if the user specifically asks you to inspect a passage they have a question about.
+**IMPORTANT: Do NOT re-Read the source PDFs after the script has run.** The script already performs the full text/XFA extraction and runs all active checks against the result. Re-reading the PDFs with the Read tool produces no additional information, slows the workflow, and (in default permission mode) generates a permission prompt for every file. Trust the script's output. Only Read individual PDFs if the user specifically asks you to inspect a passage they have a question about.
 
 Reports include:
 - **Executive Summary** - Pass/Warning/Critical counts
@@ -102,7 +101,7 @@ Reports include:
 - **Critical Issues** - Must fix before filing (highlighted first)
 - **Warnings** - Should review (may indicate problems)
 - **Potential Issues (Low Confidence)** - Possible problems that could not be confirmed with certainty; requires manual verification
-- **Detailed Results** - All 70 checks organized by category
+- **Detailed Results** - All active checks organized by category
 
 ### Step 6: Avoiding False Positives
 
@@ -148,10 +147,15 @@ Cross-document mismatches against the authoritative source are flagged CRITICAL.
 
 ## QC Check Categories
 
-The skill performs 70+ quality control checks across these categories:
+The skill is deliberately scoped to file-identity and cross-document
+consistency checks. Drafting-quality checks of the specification (antecedent
+basis, claim terminology, abstract length, section presence, etc.) and the
+USPTO-formatting checks (line/page numbering) have been removed — by filing
+time the spec is assumed correct, and report noise is more costly than the
+marginal signal those checks provide.
 
 ### Cross-Document Consistency (8 + 1 conditional checks)
-- Inventor names match across ADS, declaration, and assignment (drawings excluded — they carry a docket/title header, not inventor names)
+- Inventor names match across ADS, declaration, assignment, and drawings
 - Application title consistency
 - Attorney docket number consistency
 - Correspondence address alignment
@@ -167,27 +171,23 @@ The skill performs 70+ quality control checks across these categories:
 - Declaration signatures present
 - Assignment signatures present (if included)
 
-### Specification-Specific (15 checks)
-- Sequential claim numbering
-- Valid claim dependencies
-- Figure references match drawings
-- Reference numeral consistency
-- Abstract present and length compliant (≤150 words)
-- Required sections present (Background, Brief Description, Detailed Description, Claims)
+### Specification-Specific (4 checks)
+- Sequential claim numbering (Check 13)
+- Valid claim dependencies (Check 14)
+- Figure references match drawings (Check 15)
+- Claims section present (Check 21)
 
-### Drawings-Specific (5 checks)
-- Sequential figure numbering
-- Figure labels present
-- Sheet numbering format
-- Black and white compliance
-- Legibility
+### Drawings-Specific (2 checks)
+- Sequential figure numbering (Check 22)
+- Drawings margin labels — title and docket number present (Check 23)
 
-### ADS-Specific (5 + 1 conditional check)
+### ADS-Specific (5 + 2 conditional checks)
 - Complete inventor addresses
 - First named inventor identified
 - Entity status specified
 - Correspondence address complete
 - Attorney/agent registration numbers
+- **Inventor citizenship populated** *(when XFA data available — flags blank `CitizedDropDown` fields and reminds user about 37 CFR 1.46 assignee-filer convention)*
 - **Attorney vs. correspondence customer number** *(when XFA data available — warns on mismatch between the two customer-number fields)*
 
 ### Declaration-Specific (4 checks)
@@ -209,19 +209,9 @@ The skill performs 70+ quality control checks across these categories:
 - Address matches ADS
 - Proper signatures
 
-### USPTO Formatting Compliance (5 checks)
-- Line numbering every 5 lines
-- Margin compliance (top: 2cm, left: 2.5cm, right: 2cm, bottom: 2cm)
-- Font size (≥12 pt)
-- Double spacing
-- Page numbering
-
-### Common Error Detection (5 checks)
-- No placeholder text ([INSERT], TODO, XXX, etc.)
-- No visible track changes or comments
-- Consistent claim terminology
-- Proper antecedent basis
-- Claim terms defined in specification
+### Common Error Detection (2 checks)
+- No placeholder text ([INSERT], TODO, XXX, etc.) (Check 50)
+- No visible track changes or comments (Check 51)
 
 ### File Quality (4 checks)
 - PDFs are text-searchable (not scanned images)
@@ -229,32 +219,39 @@ The skill performs 70+ quality control checks across these categories:
 - No password protection
 - Reasonable file sizes
 
-### Cross-Reference Validation (4 checks)
-- Claims reference specification elements
-- Summary matches claims scope
-- Figure count consistency
-- Claim count verification
+### Cross-Reference Validation (2 checks)
+- Drawing figure count matches specification (Check 61)
+- Claim count verification (Check 62)
 
 ### Priority/Related Applications (3 checks)
 - Priority claim consistency across documents
 - Related application references match
 - Foreign priority documentation
 
-### Final Quality (5 checks)
-- No obvious typos in critical fields
-- Dates properly formatted
-- No excessively long claims
-- Specification supports all claims
-- Consistent figure reference format
+### Final Quality (1 check)
+- Dates properly formatted (Check 67)
+
+### Removed checks
+The following checks were intentionally removed and will not appear in the
+report: 16 (reference numeral consistency), 17 (abstract length), 18
+(background section present), 19 (brief description of drawings present),
+20 (detailed description present), 24 (drawings sheet numbering), 25 (no
+color drawings), 45 (specification line numbering), 49 (specification page
+numbering), 52 (consistent claim terminology), 53 (antecedent basis in
+claims), 54 (no undefined claim terms), 59 (claims reference specification
+elements), 60 (specification summary matches claims), 66 (typos in critical
+fields), 68 (no excessively long claims), 69 (specification references all
+claims), 70 (consistent figure reference format).
 
 ## Understanding Check Results
 
-Each check produces one of four severity levels (shown as colored badges in the HTML report):
+Each check produces one of five severity levels:
 
-- **CRITICAL** (red) — Issue must be fixed before filing
-- **WARN** (amber) — Potential issue, review recommended
-- **INFO** (blue) — Manual review recommended (e.g., when extraction couldn't fully verify the check)
-- **PASS** (green) — Check passed, no action needed
+- **✅ PASS** - Check passed, no action needed
+- **⚠️ WARNING** - Potential issue detected, review recommended
+- **🚨 CRITICAL** - Issue must be fixed before filing
+- **❓ LOW CONFIDENCE** - Possible issue detected but could not be confirmed with certainty; manual verification needed
+- **ℹ️ INFO** - Manual review recommended, automated check not possible
 
 ## Best Practices
 
@@ -262,7 +259,7 @@ Each check produces one of four severity levels (shown as colored badges in the 
 2. **Don't ignore INFO items** - These require manual verification
 3. **Fix critical issues immediately** - These will cause filing rejections
 4. **Investigate warnings** - They may be false positives, but often indicate real problems
-5. **Archive the report** - Save the HTML report (or its print-to-PDF rendering) with the filing records
+5. **Keep both reports** - Archive with filing records for future reference
 6. **Review manually too** - Automated checks catch most issues, but human review is still essential
 
 ## Limitations
@@ -277,14 +274,13 @@ This skill provides automated detection for many issues, but cannot replace huma
 ## Script Details
 
 The main QC script is located at `scripts/qc_patent_filing.py` and includes:
-- **Content-based document classification** — files identified by content (claim language, declaration boilerplate, XFA element names, FIG. references), not filename
-- **pdfplumber as primary text extractor** — preserves paragraph structure that PyPDF2 strips, and recovers PDFs whose font encodings PyPDF2 cannot decode
-- **XFA datasets-stream extraction for the USPTO web-fillable ADS** — no Adobe Acrobat Pro flattening required; reads inventor names with first/middle/last/suffix fields, title, docket #, customer #, residency, assignee, signer, continuity entries, etc. directly from embedded XML
-- **`.docx` specification support** via python-docx (USPTO accepts spec in Word format)
-- **Image-only-page detection** — cross-document inventor checks hedge findings when scanned signature pages are present
-- **Continuation-aware** date and docket checks
-- **OCR fallback** (pytesseract + pdf2image) for fully image-based PDFs
-- **Optional authoritative-source inventor list** (`inventors.txt` / `inventors.json` / `*.eml`) for cross-checking against ADS / declaration / assignment
-- **Self-contained HTML report** with embedded CSS, clickable Executive Summary, and a Print-to-PDF button
+- Automatic document detection using filename patterns
+- PDF text extraction using PyPDF2
+- **XFA datasets-stream extraction for the USPTO web-fillable ADS** (no Adobe Acrobat Pro flattening required; reads inventor names with first/middle/last/suffix fields, title, docket #, customer #, residency, assignee, signer, etc., directly from the embedded XML)
+- OCR fallback (pytesseract + pdf2image) for image-only PDFs
+- Optional authoritative-source inventor list (`inventors.txt` / `inventors.json` / `*.eml`) for cross-checking against ADS / declaration / assignment / drawings
+- Pattern matching for common issues
+- Cross-document comparison logic
+- Comprehensive reporting in Markdown and PDF formats
 
 The script is designed to be run directly from Claude Code CLI without modification.

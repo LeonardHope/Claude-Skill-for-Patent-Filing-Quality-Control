@@ -95,12 +95,8 @@ class PatentFilingQC:
         self.assignment_text = ""
         self.poa_text = ""
         self.drawings_text = ""
-        self.ids_text = ""
-        self.ids_assertion_text = ""
         self.ads_data: Optional[Dict] = None
         self.ads_is_xfa = False
-        self.ids_is_xfa = False
-        self.ids_assertion_is_xfa = False
         self.authoritative_inventors: List[Dict] = []
         self.authoritative_source: Optional[str] = None
         # Per-document count of pages that have no extractable text but do
@@ -115,87 +111,103 @@ class PatentFilingQC:
         self.documents: Dict[str, Optional[Path]] = {
             'Specification': None, 'Drawings': None, 'ADS': None,
             'Declaration': None, 'Assignment': None, 'Power of Attorney': None,
-            'IDS': None, 'IDS Written Assertion': None,
         }
         # Files that classified as "Unknown" — surfaced in the report so the
         # user knows about them.
         self.unrecognized_files: List[Path] = []
-        
-    def extract_pdf_text(self, pdf_path: Path, doc_type: str = "Document") -> str:
-        """Extract text from a PDF file. Tries pdfplumber first (preserves
-        paragraph structure that the regex-based section/claim checks need),
-        then PyPDF2 as a fallback, then OCR for image-only PDFs."""
-        # First, try pdfplumber. It generally preserves newlines between
-        # paragraphs and section headers that PyPDF2 strips, which is what
-        # the spec-content checks (Abstract, Brief Description, Claims, etc.)
-        # rely on. Lazy-imported so the dep is only required when actually used.
-        text = ""
-        image_only_count = 0
-        try:
-            import pdfplumber
-            with pdfplumber.open(pdf_path) as pdf:
-                for page in pdf.pages:
-                    page_text = page.extract_text() or ""
-                    if page_text:
-                        text += page_text + "\n"
-                    elif hasattr(page, 'images') and page.images:
-                        # Page has no extractable text but does contain images
-                        # — typical scanned signed page on declaration/assignment.
-                        image_only_count += 1
-            if image_only_count > 0:
-                self.image_only_pages[doc_type] = image_only_count
-            clean_text = text.strip()
-            if len(clean_text) > 100 and "Please wait" not in clean_text[:200]:
-                return text
-        except ImportError:
-            # pdfplumber not installed; fall through to PyPDF2.
-            pass
-        except Exception as e:
-            print(f"  ⚠️  pdfplumber failed on {pdf_path.name} ({e}); falling back to PyPDF2")
+        # Per-run text-extraction cache, keyed by Path. Populated by
+        # _quick_extract_text (classification pass) and consumed by
+        # extract_pdf_text so each PDF is read at most once per run.
+        self._pdf_text_cache: Dict[Path, str] = {}
 
-        # Fallback: PyPDF2. Less faithful to layout but doesn't need the dep.
+    def extract_pdf_text(self, pdf_path: Path, doc_type: str = "Document") -> str:
+        """Extract text from a PDF file. Tries PyPDF2 first (much faster),
+        falls back to pdfplumber for PDFs with custom font encodings PyPDF2
+        can't decode, then OCR for image-only PDFs. Results are cached per
+        path so the classification pass and the load pass don't double-extract.
+
+        Drawings are skipped through OCR — they're almost always image-only
+        and the remaining drawings checks (22, 23) handle minimal text
+        gracefully via _drawings_text_extractable."""
+        # Cache hit: classification pass already extracted this file.
+        cached = self._pdf_text_cache.get(pdf_path)
+        if cached is not None and len(cached.strip()) > 100:
+            return cached
+
+        text = ""
+
+        # Try PyPDF2 first — it's ~5-10x faster than pdfplumber on the same
+        # PDF, and the remaining checks no longer need pdfplumber's paragraph
+        # structure (the drafting-quality checks that did were removed).
         try:
-            text = ""
             with open(pdf_path, 'rb') as file:
                 reader = PyPDF2.PdfReader(file)
                 for page in reader.pages:
                     page_text = page.extract_text()
                     if page_text:
                         text += page_text + "\n"
-
-            # Check if we got meaningful text (more than just whitespace/boilerplate)
             clean_text = text.strip()
             if len(clean_text) > 100 and "Please wait" not in clean_text[:200]:
+                self._pdf_text_cache[pdf_path] = text
                 return text
+        except Exception:
+            pass
 
-            # Text extraction failed or returned minimal content - try OCR
-            if OCR_AVAILABLE:
-                print(f"  ℹ️  {doc_type} appears to be image-based, attempting OCR...")
-                try:
-                    images = convert_from_path(pdf_path)
-                    ocr_text = ""
-                    for i, image in enumerate(images):
-                        page_text = pytesseract.image_to_string(image)
-                        ocr_text += page_text + "\n"
-
-                    if len(ocr_text.strip()) > 100:
-                        print(f"  ✅ OCR successful for {doc_type}")
-                        return ocr_text
-                    else:
-                        self._document_read_failure(doc_type, pdf_path, "OCR returned minimal text")
-                        return ""
-                except Exception as ocr_error:
-                    self._document_read_failure(doc_type, pdf_path, f"OCR failed: {str(ocr_error)}")
-                    return ""
-            else:
-                self._document_read_failure(doc_type, pdf_path,
-                    "Image-based PDF detected but OCR not available. "
-                    "Install pytesseract and pdf2image: pip install pytesseract pdf2image")
-                return ""
-
+        # PyPDF2 came up minimal — try pdfplumber, which can decode custom
+        # font encodings (e.g., some USPTO declarations) that PyPDF2 misreads.
+        image_only_count = 0
+        plumber_text = ""
+        try:
+            import pdfplumber
+            with pdfplumber.open(pdf_path) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text() or ""
+                    if page_text:
+                        plumber_text += page_text + "\n"
+                    elif hasattr(page, 'images') and page.images:
+                        image_only_count += 1
+            if image_only_count > 0:
+                self.image_only_pages[doc_type] = image_only_count
+            clean_text = plumber_text.strip()
+            if len(clean_text) > 100 and "Please wait" not in clean_text[:200]:
+                self._pdf_text_cache[pdf_path] = plumber_text
+                return plumber_text
+            # pdfplumber gave more than PyPDF2 but still < 100 chars — prefer it.
+            if len(clean_text) > len(text.strip()):
+                text = plumber_text
+        except ImportError:
+            pass
         except Exception as e:
-            self._document_read_failure(doc_type, pdf_path, str(e))
-            return ""
+            print(f"  ⚠️  pdfplumber failed on {pdf_path.name} ({e})")
+
+        # Both backends came up minimal. For drawings, this is the normal
+        # case (image-only PDF) — don't waste 30+s running OCR; the drawings
+        # checks degrade gracefully.
+        if doc_type == 'Drawings':
+            self._pdf_text_cache[pdf_path] = text
+            return text
+
+        # OCR fallback for non-drawings image-based PDFs.
+        if OCR_AVAILABLE:
+            print(f"  ℹ️  {doc_type} appears to be image-based, attempting OCR...")
+            try:
+                images = convert_from_path(pdf_path)
+                ocr_text = ""
+                for image in images:
+                    ocr_text += pytesseract.image_to_string(image) + "\n"
+                if len(ocr_text.strip()) > 100:
+                    print(f"  ✅ OCR successful for {doc_type}")
+                    self._pdf_text_cache[pdf_path] = ocr_text
+                    return ocr_text
+                self._document_read_failure(doc_type, pdf_path, "OCR returned minimal text")
+                return ""
+            except Exception as ocr_error:
+                self._document_read_failure(doc_type, pdf_path, f"OCR failed: {str(ocr_error)}")
+                return ""
+        self._document_read_failure(doc_type, pdf_path,
+            "Image-based PDF detected but OCR not available. "
+            "Install pytesseract and pdf2image: pip install pytesseract pdf2image")
+        return ""
 
     def _document_read_failure(self, doc_type: str, pdf_path: Path, reason: str):
         """Handle document read failure with helpful error message"""
@@ -585,29 +597,41 @@ class PatentFilingQC:
     def _quick_extract_text(self, pdf_path: Path, max_pages: int = 999) -> str:
         """Text extraction used for content-based classification. Reads ALL
         pages by default — many key spec markers (CLAIMS preamble, ABSTRACT)
-        appear at the END of a long spec, not the first few pages. Reading
-        only the first 3 pages produced asymmetric classification confidence
-        between .pdf (only first pages seen) and .docx (full doc seen) for
-        the same content.
-        Uses pdfplumber when available (much better for PDFs with custom font
-        encodings — e.g., USPTO declarations whose body text PyPDF2 can't decode
-        but pdfplumber can). Falls back to PyPDF2 if pdfplumber is unavailable."""
-        try:
-            import pdfplumber
-            with pdfplumber.open(pdf_path) as pdf:
-                pages = pdf.pages[:max_pages]
-                return "\n".join((p.extract_text() or "") for p in pages)
-        except ImportError:
-            pass
-        except Exception:
-            pass
+        appear at the END of a long spec, not the first few pages.
+
+        Tries PyPDF2 first (much faster), falls back to pdfplumber for PDFs
+        with custom font encodings PyPDF2 can't decode (e.g., some USPTO
+        declarations). Caches successful results so extract_pdf_text — called
+        later by load_documents — doesn't re-read the same file."""
+        cached = self._pdf_text_cache.get(pdf_path)
+        if cached is not None and len(cached.strip()) > 100:
+            return cached
+
         try:
             with open(pdf_path, 'rb') as f:
                 reader = PyPDF2.PdfReader(f)
                 pages = reader.pages[:max_pages]
-                return "\n".join((p.extract_text() or "") for p in pages)
+                text = "\n".join((p.extract_text() or "") for p in pages)
+            if len(text.strip()) > 100:
+                self._pdf_text_cache[pdf_path] = text
+                return text
         except Exception:
-            return ""
+            text = ""
+
+        try:
+            import pdfplumber
+            with pdfplumber.open(pdf_path) as pdf:
+                pages = pdf.pages[:max_pages]
+                plumber_text = "\n".join((p.extract_text() or "") for p in pages)
+            if len(plumber_text.strip()) > 100:
+                self._pdf_text_cache[pdf_path] = plumber_text
+                return plumber_text
+            # Both backends came up minimal — return the longer of the two.
+            return plumber_text if len(plumber_text) > len(text) else text
+        except ImportError:
+            return text
+        except Exception:
+            return text
 
     def _extract_docx_text(self, docx_path: Path) -> str:
         """Extract all visible text from a .docx file. Lazy-imports python-docx
@@ -638,47 +662,6 @@ class PatentFilingQC:
         if suffix == '.docx':
             return self._extract_docx_text(path)
         return self.extract_pdf_text(path, doc_type)
-
-    def _extract_acroform_fields(self, pdf_path: Path) -> Dict[str, str]:
-        """Read AcroForm field values from a non-XFA PDF. Returns a dict
-        {field_name: value_str}. Buttons (checkboxes / radios) come back as
-        the chosen value ("/Yes", "/Off", an export-name, etc.). Returns an
-        empty dict if the PDF has no AcroForm or PyPDF2 can't read it."""
-        try:
-            with open(pdf_path, 'rb') as f:
-                reader = PyPDF2.PdfReader(f)
-                fields = reader.get_fields() or {}
-                out = {}
-                for name, info in fields.items():
-                    v = info.get('/V', '')
-                    if v is None:
-                        v = ''
-                    if hasattr(v, 'get_object'):
-                        v = v.get_object()
-                    out[name] = str(v)
-                return out
-        except Exception:
-            return {}
-
-    def _extract_ids_text(self, ids_path: Path, doc_type: str) -> str:
-        """IDS-aware text extraction. The USPTO SB/08 IDS form is an XFA
-        (web-fillable) PDF — the rendered page is just a 'Please wait...'
-        placeholder. When the form is XFA, return the XFA XML so the form
-        labels, field names, and any datasets-stream values are all
-        searchable by downstream checks. Otherwise (flattened or scanned
-        IDS, written-assertion forms with embedded text, etc.), fall back
-        to standard PDF text extraction."""
-        if self._is_xfa_form(ids_path):
-            if doc_type == 'IDS':
-                self.ids_is_xfa = True
-            elif doc_type == 'IDS Written Assertion':
-                self.ids_assertion_is_xfa = True
-            print(f"  ℹ️  {doc_type} appears to be an XFA (web-fillable) form — reading XFA streams")
-            xml = self._extract_all_xfa_xml(ids_path)
-            if xml:
-                return xml
-            print(f"  ⚠️  Could not extract XFA streams from {doc_type}; falling back to text extraction")
-        return self.extract_pdf_text(ids_path, doc_type)
 
     def _extract_all_xfa_xml(self, pdf_path: Path) -> str:
         """Concatenate every XFA stream's text content. The 'template' stream
@@ -714,24 +697,20 @@ class PatentFilingQC:
         except Exception:
             return ""
 
-    def _classify_file(self, path: Path) -> List[Tuple[str, float]]:
+    def _classify_file(self, path: Path) -> Tuple[str, float]:
         """Identify what kind of filing document a file is by inspecting its
-        content (not its filename). Handles both PDF and DOCX. Returns a list
-        of (doc_type, confidence_score) tuples. Most files return a single-
-        item list. Combined documents (e.g., a 'Patent Assignment and
-        Declaration' that contains both the executed assignment AND the
-        §1.63 oath in one PDF) return two tuples so the file gets loaded
-        into both slots. doc_type is one of: 'ADS', 'Specification',
-        'Drawings', 'Declaration', 'Assignment', 'Power of Attorney',
-        'Unknown'.
+        content (not its filename). Handles both PDF and DOCX. Returns
+        (doc_type, confidence_score). doc_type is one of: 'ADS',
+        'Specification', 'Drawings', 'Declaration', 'Assignment',
+        'Power of Attorney', 'Unknown'.
         """
         # DOCX path: only the spec is ever .docx in practice. Extract text
         # and run it through the same scoring as a non-XFA PDF.
         if path.suffix.lower() == '.docx':
             text = self._extract_docx_text(path)
             if not text.strip():
-                return [('Unknown', 0.0)]
-            return self._classify_text(text)
+                return ('Unknown', 0.0)
+            return self._score_text(text)
 
         # PDF path. XFA forms: don't assume XFA == ADS. Multiple USPTO forms
         # ship as XFA (PTO/AIA/01 + /02 Declarations, /14 ADS, /82 POA, etc.).
@@ -757,24 +736,10 @@ class PatentFilingQC:
                     40 * ('power of attorney' in xl) +
                     20 * ('appoint' in xl and 'practitioner' in xl)
                 ),
-                'IDS': (
-                    100 * ('pto/sb/08a' in xl or 'pto/sb/08b' in xl) +
-                    50 * ('pto-sb-08' in xl) +
-                    30 * (xl.count('information disclosure') >= 3) +
-                    20 * ('cite-no' in xl or 'cite_no' in xl) +
-                    -50 * ('pto/sb/08c' in xl)
-                ),
-                'IDS Written Assertion': (
-                    100 * ('pto/sb/08c' in xl) +
-                    40 * ('ids size fee' in xl or 'ids.sizefee' in xl) +
-                    20 * ('written assertion' in xl and '1.98' in xl)
-                ),
             }
             best_xfa = max(xfa_scores, key=lambda k: xfa_scores[k])
             if xfa_scores[best_xfa] >= 30:
-                # USPTO XFA forms are single-purpose, so no combined-doc check
-                # here — return the one matching type.
-                return [(best_xfa, float(xfa_scores[best_xfa]))]
+                return (best_xfa, float(xfa_scores[best_xfa]))
             # Fall through to text-based classification using the XFA XML as the
             # source text (the rendered PDF would just say "Please wait...").
             text = xfa_xml
@@ -785,51 +750,11 @@ class PatentFilingQC:
             if len(text.strip()) < 200:
                 text = self.extract_pdf_text(path, '<classifying>')
 
-        return self._classify_text(text)
+        return self._score_text(text)
 
-    def _classify_text(self, text: str) -> List[Tuple[str, float]]:
-        """Score text and apply combined-document detection. Returns a list
-        of (doc_type, confidence) tuples — usually one, occasionally two for
-        combined Dec+Assignment filings."""
-        best_type, best_score, scores = self._score_text(text)
-        if best_type == 'Unknown':
-            return [('Unknown', best_score)]
-
-        results: List[Tuple[str, float]] = [(best_type, float(best_score))]
-
-        # Combined-doc detection: a single PDF containing both the executed
-        # assignment AND the §1.63 declaration is a common U.S. practice.
-        # The signed oath block typically lives on scanned image pages and
-        # extracts to little/no text — meaning the Declaration score loses
-        # to the (text-rich) Assignment score even though both are present.
-        # When the title page carries a combined-doc header, register the
-        # file under both slots so declaration-content checks can run.
-        tl = text.lower()
-        head = tl[:2500]
-        combined_markers = (
-            'assignment and declaration',
-            'declaration and assignment',
-            'assignment & declaration',
-            'declaration & assignment',
-        )
-        if any(m in head for m in combined_markers):
-            for other in ('Declaration', 'Assignment'):
-                if other == best_type:
-                    continue
-                # Threshold of 5 keeps this conservative — the runner-up
-                # needs at least one strong marker (e.g., the "37 CFR 1.63"
-                # header citation or a whole-word "assignor") before we
-                # promote it to a second classification.
-                other_score = scores.get(other, 0)
-                if other_score >= 5:
-                    results.append((other, float(other_score)))
-
-        return results
-
-    def _score_text(self, text: str) -> Tuple[str, float, Dict[str, float]]:
-        """Score raw text against doc-type signatures. Returns
-        (best_type, best_score, all_scores). The full scores dict lets
-        callers detect combined documents by inspecting the runner-up."""
+    def _score_text(self, text: str) -> Tuple[str, float]:
+        """Score raw text against doc-type signatures and return the best match.
+        Used by both PDF and DOCX classification paths."""
         tl = text.lower()
         head = tl[:1500]  # signatures that must appear near the top
 
@@ -877,30 +802,6 @@ class PatentFilingQC:
             2 * ('revoke' in tl and 'attorney' in tl)
         )
 
-        # IDS (main form: SB/08a US patents, SB/08b foreign/NPL, or combined).
-        # Negative weight on SB/08c keeps the size-fee assertion form from
-        # collapsing into this slot.
-        scores['IDS'] = (
-            8 * ('pto/sb/08a' in tl or 'pto/sb/08b' in tl) +
-            6 * ('information disclosure statement' in tl) +
-            5 * bool(re.search(r'\bcite\s+no\.?', tl)) +
-            4 * ('u.s. patent documents' in tl or 'foreign patent documents' in tl) +
-            3 * ('non patent literature' in tl or 'non-patent literature' in tl) +
-            -10 * ('pto/sb/08c' in tl) +              # exclude written assertion
-            -8 * bool(re.search(r'what\s+is\s+claimed', tl))  # exclude spec
-        )
-
-        # IDS Written Assertion (PTO/SB/08C — the §1.17(v) IDS size-fee
-        # certification, separate from the IDS itself).
-        scores['IDS Written Assertion'] = (
-            10 * ('pto/sb/08c' in tl) +
-            6 * ('ids size fee' in tl) +
-            5 * (('written assertion' in tl) and
-                 (('37 cfr 1.98' in tl) or ('§1.98' in tl) or
-                  ('37 cfr 1.17(v)' in tl) or ('§1.17(v)' in tl))) +
-            2 * ('ids.sizefee' in tl)
-        )
-
         # Drawings: defining traits are very little prose plus drawing-style
         # markers (FIG. labels, sheet-numbering, sparse 3-digit reference
         # numerals). Many drawings PDFs are image-only with the only
@@ -929,8 +830,8 @@ class PatentFilingQC:
         best_type = max(scores, key=lambda k: scores[k])
         best_score = scores[best_type]
         if best_score < 3:
-            return ('Unknown', best_score, scores)
-        return (best_type, float(best_score), scores)
+            return ('Unknown', best_score)
+        return (best_type, float(best_score))
     
     def load_documents(self):
         """Locate and load all filing documents by classifying every PDF in the
@@ -941,8 +842,7 @@ class PatentFilingQC:
         # Initialize all six slots so the report's "Documents Found" list shows
         # which kinds were not detected.
         slots = ['Specification', 'Drawings', 'ADS',
-                 'Declaration', 'Assignment', 'Power of Attorney',
-                 'IDS', 'IDS Written Assertion']
+                 'Declaration', 'Assignment', 'Power of Attorney']
         for s in slots:
             self.report.files_found[s] = None
 
@@ -962,24 +862,16 @@ class PatentFilingQC:
             and not p.name.startswith('~$')
         ]
 
-        # Classify every file. _classify_file returns a list because a single
-        # combined Dec+Assignment PDF can register under both slots.
+        # Classify every file
         candidates_by_type: Dict[str, List[Tuple[Path, float]]] = {}
         for path in all_files:
-            classifications = self._classify_file(path)
-            real = [(t, c) for t, c in classifications if t != 'Unknown']
-            if not real:
+            doc_type, confidence = self._classify_file(path)
+            if doc_type == 'Unknown':
                 self.unrecognized_files.append(path)
                 print(f"  ❓ Unrecognized file (low confidence): {path.name}")
                 continue
-            for doc_type, confidence in real:
-                candidates_by_type.setdefault(doc_type, []).append((path, confidence))
-            if len(real) == 1:
-                t, c = real[0]
-                print(f"  📄 {path.name} → {t} (confidence {c:.0f})")
-            else:
-                summary = ", ".join(f"{t} ({c:.0f})" for t, c in real)
-                print(f"  📄 {path.name} → combined doc: {summary}")
+            candidates_by_type.setdefault(doc_type, []).append((path, confidence))
+            print(f"  📄 {path.name} → {doc_type} (confidence {confidence:.0f})")
 
         # For each slot, pick a candidate and warn if there are duplicates.
         # Spec-specific tie-breaker: when both a .pdf and .docx are present,
@@ -1051,10 +943,6 @@ class PatentFilingQC:
                 self.assignment_text = self._extract_text_any(best_path, 'Assignment')
             elif doc_type == 'Power of Attorney':
                 self.poa_text = self._extract_text_any(best_path, 'Power of Attorney')
-            elif doc_type == 'IDS':
-                self.ids_text = self._extract_ids_text(best_path, 'IDS')
-            elif doc_type == 'IDS Written Assertion':
-                self.ids_assertion_text = self._extract_ids_text(best_path, 'IDS Written Assertion')
 
         # Optional: authoritative inventor list (inventors.json/txt or *.eml)
         self._load_authoritative_inventors()
@@ -1097,7 +985,7 @@ class PatentFilingQC:
         # Optional trailing suffix token (Jr., Sr., II, III, IV).
         suffix_pattern = (
             r'Suffix\s*\n?\s*'
-            r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,}'
+            r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,}(?:\s+[A-Z]{2,}(?:\s+[A-Z]{2,}(?:\s+[A-Z]{2,})*)*)*'
             r'(?:\s+(?:Jr\.?|Sr\.?|II|III|IV))?)\s*\n'
         )
         matches = re.findall(suffix_pattern, text)
@@ -1117,7 +1005,7 @@ class PatentFilingQC:
         if assignor_section:
             section_text = assignor_section.group(1)
             # Find names in format "First LAST" or "First Middle LAST" at start of lines
-            name_pattern = r'^\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,})\s*$'
+            name_pattern = r'^\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,}(?:\s+[A-Z]{2,}(?:\s+[A-Z]{2,}(?:\s+[A-Z]{2,})*)*)*)\s*$'
             matches = re.findall(name_pattern, section_text, re.MULTILINE)
             for match in matches:
                 name = ' '.join(match.split())
@@ -1127,7 +1015,7 @@ class PatentFilingQC:
 
         # Pattern 3: Direct "First LAST" pattern in text (for various document formats)
         # Be more targeted - look for names followed by address or "c/o"
-        name_with_address = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,})\s*\n\s*c/o'
+        name_with_address = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,}(?:\s+[A-Z]{2,}(?:\s+[A-Z]{2,}(?:\s+[A-Z]{2,})*)*)*)\s*\n\s*c/o'
         matches = re.findall(name_with_address, text)
         for match in matches:
             name = ' '.join(match.split())
@@ -1155,15 +1043,11 @@ class PatentFilingQC:
         image-only (typical for sheets exported from CAD/Visio without text
         overlays) — in which case checks that look for FIG.-N labels will
         produce false positives.
-        Heuristic: needs at least 2 distinct FIG. references in extracted text.
-        Counts both normal ("FIG. N") and reversed ("N.GIF" — landscape pages
-        rotated to portrait) orientations so rotated drawings aren't classified
-        as image-only."""
+        Heuristic: needs at least 2 distinct FIG. references in extracted text."""
         if not self.drawings_text:
             return False
-        normal = set(re.findall(r'fig\.\s*(\d+)', self.drawings_text, re.IGNORECASE))
-        reversed_ = set(re.findall(r'(\d+)\s*\.\s*GIF\b', self.drawings_text))
-        return len(normal | reversed_) >= 2
+        fig_count = len(set(re.findall(r'fig\.\s*(\d+)', self.drawings_text, re.IGNORECASE)))
+        return fig_count >= 2
 
     def _extract_claims_section(self) -> str:
         """Pull just the CLAIMS section text from the specification. Many
@@ -1547,22 +1431,6 @@ class PatentFilingQC:
             if 10 <= num <= 20:
                 fig_nums.add(num)
 
-        # Pattern 6: Reversed FIG label from rotated landscape pages.
-        # When a drawings page has /Rotate=90 or 270 (common for landscape
-        # figures bound into a portrait filing), text extractors return the
-        # characters in reverse reading order, so "FIG. 1" comes out as
-        # "1\n.GIF" or "1.GIF". Match uppercase GIF preceded by a digit and a
-        # literal dot — narrow enough to avoid matching the .gif image-format
-        # extension, which would normally be lowercase.
-        for match in re.finditer(r'(\d{1,2})\s*\.\s*GIF\b', text):
-            # Reverse the captured digits — the whole substring extracts
-            # backwards, so "FIG. 10" comes out as "01.GIF" and "01" must
-            # flip back to "10" before parsing. (Single-digit numbers are
-            # palindromic and unaffected.)
-            num = int(match.group(1)[::-1])
-            if 1 <= num <= 20:
-                fig_nums.add(num)
-
         return sorted(fig_nums)
 
     def _extract_reference_numerals(self, text: str) -> dict:
@@ -1668,42 +1536,18 @@ class PatentFilingQC:
     def _extract_reference_numerals_from_drawings(self, text: str) -> set:
         """
         Extract reference numerals from drawings text.
-
-        Landscape drawing pages are routinely rotated to portrait for filing
-        (/Rotate=90 or 270). On those pages, text extractors return digits in
-        reversed reading order — so a reference numeral "124" comes out as
-        "421". To avoid polluting the cross-check with reversed numerals, we
-        re-extract per-page from the source PDF, detect rotation, and reverse
-        digit tokens on rotated pages before collecting. Falls back to the
-        plain-text extractor's output when the source PDF isn't available.
+        Drawings often have limited text, so this extracts what's available.
         """
+        if not text:
+            return set()
+
         refs = set()
-        pdf_path = self.documents.get('Drawings') if hasattr(self, 'documents') else None
-
-        per_page = []  # list of (page_text, rotation)
-        if pdf_path and Path(pdf_path).suffix.lower() == '.pdf':
-            try:
-                import pdfplumber
-                with pdfplumber.open(pdf_path) as pdf:
-                    for page in pdf.pages:
-                        page_text = page.extract_text() or ""
-                        rotation = getattr(page, 'rotation', 0) or 0
-                        per_page.append((page_text, rotation))
-            except Exception:
-                per_page = []
-
-        if not per_page and text:
-            per_page = [(text, 0)]
-
-        for page_text, rotation in per_page:
-            if not page_text:
-                continue
-            for match in re.finditer(r'\b(\d{3})\b', page_text):
-                num = match.group(1)
-                if rotation in (90, 270):
-                    num = num[::-1]
-                if 100 <= int(num) <= 999:
-                    refs.add(num)
+        # Look for 3-digit numbers that are likely reference numerals
+        pattern = r'\b(\d{3})\b'
+        for match in re.finditer(pattern, text):
+            num = match.group(1)
+            if 100 <= int(num) <= 999:
+                refs.add(num)
 
         return refs
 
@@ -1718,8 +1562,6 @@ class PatentFilingQC:
         self.check_declaration()
         self.check_assignment()
         self.check_poa()
-        self.check_ids()
-        self.check_formatting()
         self.check_common_errors()
         self.check_file_quality()
         self.check_cross_references()
@@ -1738,10 +1580,9 @@ class PatentFilingQC:
                 Severity.WARNING,
                 f"{len(names)} file(s) in the folder did not classify as any "
                 f"of the recognized document types (Specification, Drawings, "
-                f"ADS, Declaration, Assignment, Power of Attorney, IDS, "
-                f"IDS Written Assertion). They may be unrelated, may have "
-                f"unreadable content, or may be a document type the tool "
-                f"doesn't yet support.",
+                f"ADS, Declaration, Assignment, Power of Attorney). They may "
+                f"be unrelated, may have unreadable content, or may be a "
+                f"document type the tool doesn't yet support.",
                 "\n".join(f"  • {n}" for n in names)
             )
 
@@ -1778,13 +1619,15 @@ class PatentFilingQC:
                 "SKIPPED — could not extract inventor names from ADS to use as reference"
             )
         else:
-            # Drawings deliberately excluded: USPTO drawings carry a docket/title
-            # header, not inventor names (37 CFR §1.84 doesn't require them), so
-            # checking for inventor names there produces false positives.
             other_docs = [
                 ('Declaration', self.declaration_text),
                 ('Assignment', self.assignment_text),
             ]
+            # Drawings: include only if text is extractable. Image-only
+            # drawings PDFs don't contain inventor names as text, so checking
+            # for them would always produce a false-positive "all missing."
+            if self._drawings_text_extractable():
+                other_docs.append(('Drawings', self.drawings_text))
             present_docs = [(n, t) for n, t in other_docs if t and len(t.strip()) > 100]
 
             if not present_docs:
@@ -1843,15 +1686,15 @@ class PatentFilingQC:
         # If the user dropped an inventors.txt / inventors.json / .eml in the folder,
         # treat that list as ground truth and flag any document that disagrees.
         if self.authoritative_inventors:
-            # Build per-doc inventor sets from ADS XFA + extract from other docs.
-            # Drawings deliberately excluded — they carry a docket header, not
-            # inventor names, so cross-checking would produce false positives.
+            # Build per-doc inventor sets from ADS XFA + extract from other docs
             decl_inventors = self.extract_inventors(self.declaration_text) if self.declaration_text else []
             assign_inventors = self.extract_inventors(self.assignment_text) if self.assignment_text else []
+            drawings_inventors = self.extract_inventors(self.drawings_text) if self.drawings_text else []
             all_inventor_sets = [
                 ("ADS", set(self._normalize_for_compare(i) for i in ads_inventors)),
                 ("Declaration", set(self._normalize_for_compare(i) for i in decl_inventors)),
                 ("Assignment", set(self._normalize_for_compare(i) for i in assign_inventors)),
+                ("Drawings", set(self._normalize_for_compare(i) for i in drawings_inventors))
             ]
             self._check_inventors_against_authoritative(all_inventor_sets)
         
@@ -2400,13 +2243,12 @@ class PatentFilingQC:
             )
     
     def check_specification(self):
-        """Checks 13-27: Specification-specific checks"""
-        
+        """Checks 13-15, 21: Specification-specific checks (filing-identity only;
+        drafting-quality checks 16-20 removed — by filing time the spec is
+        assumed correct)."""
+
         if not self.spec_text:
-            # Specification checks are 13-21 only. Drawings own 22-25, ADS owns
-            # 27 onward. The previous range(13, 28) inflated the report with
-            # five fictitious "Check 22..27 — Specification not found" entries.
-            for i in range(13, 22):
+            for i in [13, 14, 15, 21]:
                 self.report.add_issue(
                     i, "Specification", f"Check {i}",
                     Severity.CRITICAL, "Specification not found"
@@ -2632,264 +2474,11 @@ class PatentFilingQC:
                 Severity.WARNING, "Unable to detect figure references in specification"
             )
         
-        # Check 16: Reference numeral consistency
-        spec_refs = self._extract_reference_numerals(self.spec_text)
-        drawings_refs = self._extract_reference_numerals_from_drawings(self.drawings_text) if self.drawings_text else set()
+        # Checks 16-20 (reference numeral consistency, abstract length,
+        # background/BDoD/detailed-description presence) removed: drafting-
+        # quality checks of the spec. By filing time the spec is assumed
+        # correct; these don't help verify file identity.
 
-        if spec_refs:
-            issues = []
-            warnings = []
-
-            # Check 1: Consistency - each reference numeral should have consistent description
-            for num, data in spec_refs.items():
-                descs = data['descriptions']
-
-                if len(descs) > 1:
-                    # Normalize descriptions to find the core element name
-                    # Remove modifiers like "target", "source", "primary", etc.
-                    # and extract the core noun phrase
-
-                    def get_core_name(desc):
-                        """Extract core element name from description"""
-                        # Remove common modifiers
-                        modifiers = ['target', 'source', 'primary', 'secondary', 'main', 'new', 'old',
-                                    'current', 'next', 'previous', 'updated', 'original', 'modified',
-                                    'first', 'second', 'third', 'specific', 'particular', 'given',
-                                    'respective', 'corresponding', 'associated', 'related']
-                        words = desc.lower().split()
-                        core_words = [w for w in words if w not in modifiers]
-
-                        # If we stripped everything, keep the last word
-                        if not core_words and words:
-                            core_words = [words[-1]]
-
-                        return ' '.join(core_words)
-
-                    # Also check if one description contains another (subset relationship)
-                    def is_same_element(desc1, desc2):
-                        """Check if two descriptions refer to the same element"""
-                        core1 = get_core_name(desc1)
-                        core2 = get_core_name(desc2)
-
-                        # Exact match after normalization
-                        if core1 == core2:
-                            return True
-
-                        # One contains the other (e.g., "computing platform" vs "platform")
-                        if core1 in core2 or core2 in core1:
-                            return True
-
-                        # Last word matches (usually the main noun)
-                        if core1.split()[-1] == core2.split()[-1]:
-                            return True
-
-                        # Acronym match: one is the initials of the other
-                        # (e.g. "gnn" vs "graph neural network")
-                        def is_acronym_of(short, long):
-                            short = short.replace(' ', '').lower()
-                            words = long.split()
-                            if len(short) == len(words) and len(words) >= 2:
-                                initials = ''.join(w[0].lower() for w in words if w)
-                                return initials == short
-                            return False
-                        if is_acronym_of(core1, core2) or is_acronym_of(core2, core1):
-                            return True
-
-                        # Whitespace-artifact match: pdfplumber sometimes drops
-                        # spaces between word and trailing single-letter variable
-                        # (e.g. "embedding Z" → "embeddingZ"). Strip all spaces
-                        # and compare.
-                        if re.sub(r'\s', '', core1.lower()) == re.sub(r'\s', '', core2.lower()):
-                            return True
-
-                        return False
-
-                    # Group descriptions that refer to the same element
-                    desc_list = list(descs)
-                    distinct_groups = []
-                    used = set()
-
-                    for i, d1 in enumerate(desc_list):
-                        if i in used:
-                            continue
-                        group = [d1]
-                        used.add(i)
-                        for j, d2 in enumerate(desc_list):
-                            if j not in used and is_same_element(d1, d2):
-                                group.append(d2)
-                                used.add(j)
-                        distinct_groups.append(group)
-
-                    # Only warn if there are truly distinct element names
-                    if len(distinct_groups) > 1:
-                        # Get representative from each group
-                        representatives = [g[0] for g in distinct_groups]
-                        warnings.append(f"Ref {num} may have inconsistent descriptions: {representatives[:3]}")
-
-            # Check 2: Figure series organization
-            # Reference numerals typically follow patterns: 100-series for FIG. 1, 200-series for FIG. 2, etc.
-            series = {}
-            for num in spec_refs.keys():
-                series_num = int(num) // 100
-                if series_num not in series:
-                    series[series_num] = []
-                series[series_num].append(int(num))
-
-            # Check for gaps in numbering within each series
-            for series_num, nums in series.items():
-                sorted_nums = sorted(nums)
-                if len(sorted_nums) > 2:
-                    # Check for large gaps (more than 10)
-                    for i in range(1, len(sorted_nums)):
-                        gap = sorted_nums[i] - sorted_nums[i-1]
-                        if gap > 10 and gap != 100:  # 100 gap might be intentional series change
-                            pass  # Don't report gaps as they may be intentional
-
-            # Check 3: Cross-reference with drawings (if text extractable)
-            if drawings_refs:
-                # spec_refs only contains numerals that match the canonical
-                # "the X NUM" element-naming pattern. To verify a drawings
-                # numeral truly isn't in the spec, fall back to a bare-token
-                # search of the spec text — practitioners often reference
-                # numerals in prose that doesn't match the strict regex
-                # (e.g., "as shown at 800", "process 800", figure captions).
-                spec_ref_nums = set(spec_refs.keys())
-                truly_missing = []
-                for n in sorted(drawings_refs - spec_ref_nums):
-                    if not re.search(rf'\b{re.escape(n)}\b', self.spec_text):
-                        truly_missing.append(n)
-
-                if truly_missing:
-                    # Drawings refs are hard to extract reliably — warn, don't critical.
-                    warnings.append(f"Reference numerals in drawings may need verification: {truly_missing}")
-
-            # Check 4: Verify all reference numerals are properly introduced
-            # (This is a simplified check - full antecedent basis check is complex)
-
-            # Generate report
-            total_refs = len(spec_refs)
-            total_occurrences = sum(d['count'] for d in spec_refs.values())
-
-            if issues:
-                self.report.add_issue(
-                    16, "Specification", "Reference Numeral Consistency",
-                    Severity.CRITICAL,
-                    f"Reference numeral issues found: {'; '.join(issues[:3])}",
-                    f"Total reference numerals: {total_refs}, Total occurrences: {total_occurrences}"
-                )
-            elif warnings:
-                # Limit warnings shown
-                warning_summary = "; ".join(warnings[:3])
-                if len(warnings) > 3:
-                    warning_summary += f" (and {len(warnings) - 3} more)"
-                self.report.add_issue(
-                    16, "Specification", "Reference Numeral Consistency",
-                    Severity.WARNING,
-                    f"Potential inconsistencies: {warning_summary}",
-                    f"Total reference numerals: {total_refs}. Manual review recommended."
-                )
-            else:
-                self.report.add_issue(
-                    16, "Specification", "Reference Numeral Consistency",
-                    Severity.PASS,
-                    f"Reference numerals appear consistent ({total_refs} unique numerals, {total_occurrences} total occurrences)"
-                )
-        else:
-            self.report.add_issue(
-                16, "Specification", "Reference Numeral Consistency",
-                Severity.INFO,
-                "Unable to extract reference numerals - manual review recommended"
-            )
-        
-        # Check 17: Abstract present and length compliant (≤150 words, 37 CFR 1.72(b))
-        # The previous version overcounted by capturing PDF page-footer noise
-        # (page numbers, "Page X of Y", repeated headers, etc.) along with the
-        # abstract proper. Now: capture the abstract chunk, then strip common
-        # PDF-extraction noise before counting.
-        abstract_match = re.search(
-            r'\bABSTRACT\b\s*(?:OF\s+THE\s+(?:DISCLOSURE|INVENTION))?\s*[:\n]+'
-            r'(.{20,2500}?)'
-            r'(?='
-            r'\n\s*(?:BACKGROUND|FIELD|BRIEF|DETAILED|CLAIMS|WHAT\s+IS\s+CLAIMED|'
-            r'I\s+HEREBY\s+DECLARE|FIG\.|Sheet\s+\d+\s*(?:of|/)\s*\d+)'
-            r'|\Z)',
-            self.spec_text, re.IGNORECASE | re.DOTALL
-        )
-        if abstract_match:
-            raw = abstract_match.group(1)
-            # Strip common page-footer / page-header artifacts that PDF text
-            # extraction frequently splices into nearby content
-            cleaned = raw
-            cleaned = re.sub(r'\bPage\s+\d+(?:\s+of\s+\d+)?\b', ' ', cleaned, flags=re.IGNORECASE)
-            cleaned = re.sub(r'(?m)^\s*\d{1,3}\s*$', ' ', cleaned)            # bare page numbers
-            cleaned = re.sub(r'(?m)^\s*\d+\s*/\s*\d+\s*$', ' ', cleaned)      # "52 / 52" footers
-            cleaned = re.sub(r'\bPatent\s+Application\s+Publication\b', ' ', cleaned, flags=re.IGNORECASE)
-            cleaned = re.sub(r'\b(?:US|U\.S\.)\s*\d{4}/\d+\s*A\d?\b', ' ', cleaned)  # pub-no headers
-            cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-            word_count = len(cleaned.split())
-            if word_count == 0:
-                self.report.add_issue(
-                    17, "Specification", "Abstract Present and Length Compliant",
-                    Severity.WARNING, "Abstract heading found but body could not be extracted"
-                )
-            elif word_count <= 150:
-                self.report.add_issue(
-                    17, "Specification", "Abstract Present and Length Compliant",
-                    Severity.PASS, f"Abstract found ({word_count} words, limit is 150)"
-                )
-            else:
-                # Borderline counts (151-160) are usually PDF extraction noise;
-                # show the user what was actually counted so they can verify.
-                preview = (cleaned[:240] + '…') if len(cleaned) > 240 else cleaned
-                self.report.add_issue(
-                    17, "Specification", "Abstract Present and Length Compliant",
-                    Severity.WARNING,
-                    f"Abstract may be too long ({word_count} words, limit is 150)",
-                    f"Extracted text used for the count (verify against the source .docx, "
-                    f"as PDF text extraction can splice in page-header/footer artifacts):\n\n{preview}"
-                )
-        else:
-            self.report.add_issue(
-                17, "Specification", "Abstract Present and Length Compliant",
-                Severity.CRITICAL, "Abstract section not found"
-            )
-        
-        # Check 18: Background section present
-        if re.search(r'BACKGROUND|FIELD OF (?:THE )?INVENTION', self.spec_text, re.IGNORECASE):
-            self.report.add_issue(
-                18, "Specification", "Background Section Present",
-                Severity.PASS, "Background/Field section found"
-            )
-        else:
-            self.report.add_issue(
-                18, "Specification", "Background Section Present",
-                Severity.WARNING, "Background/Field section not clearly identified"
-            )
-        
-        # Check 19: Brief Description of Drawings present
-        if re.search(r'BRIEF DESCRIPTION OF (?:THE )?DRAWINGS', self.spec_text, re.IGNORECASE):
-            self.report.add_issue(
-                19, "Specification", "Brief Description of Drawings Present",
-                Severity.PASS, "Brief Description of Drawings section found"
-            )
-        else:
-            self.report.add_issue(
-                19, "Specification", "Brief Description of Drawings Present",
-                Severity.WARNING, "Brief Description of Drawings section not clearly identified"
-            )
-        
-        # Check 20: Detailed Description present
-        if re.search(r'DETAILED DESCRIPTION', self.spec_text, re.IGNORECASE):
-            self.report.add_issue(
-                20, "Specification", "Detailed Description Present",
-                Severity.PASS, "Detailed Description section found"
-            )
-        else:
-            self.report.add_issue(
-                20, "Specification", "Detailed Description Present",
-                Severity.CRITICAL, "Detailed Description section not clearly identified"
-            )
-        
         # Check 21: Claims section present
         # Look for various claim section indicators
         # Note: PyPDF2 often doesn't preserve newlines, so we use flexible patterns
@@ -2929,10 +2518,11 @@ class PatentFilingQC:
             )
     
     def check_drawings(self):
-        """Checks 22-25: Drawings-specific checks"""
+        """Checks 22, 23: Drawings-specific checks (sheet numbering and color
+        compliance — checks 24/25 — removed)."""
 
         if not self.drawings_text:
-            for i in [22, 23, 24, 25]:
+            for i in [22, 23]:
                 self.report.add_issue(
                     i, "Drawings", f"Check {i}",
                     Severity.CRITICAL, "Drawings not found"
@@ -3040,81 +2630,9 @@ class PatentFilingQC:
                 Severity.WARNING, "; ".join(issues_23)
             )
         
-        # Check 24: Sheet numbering present
-        # Accept various formats: "Sheet 1 of 9", "Page 1 of 9", "1/9", etc.
-        sheet_patterns = [
-            r'Sheet\s+\d+\s+of\s+\d+',
-            r'Page\s+\d+\s+of\s+\d+',
-            r'\d+\s*/\s*\d+',  # "1/9" format
-        ]
-        sheet_found = any(re.search(p, self.drawings_text, re.IGNORECASE) for p in sheet_patterns)
-        if sheet_found:
-            self.report.add_issue(
-                24, "Drawings", "Sheet Numbering Present",
-                Severity.PASS, "Sheet/page numbering detected"
-            )
-        else:
-            self.report.add_issue(
-                24, "Drawings", "Sheet Numbering Present",
-                Severity.WARNING, "Sheet numbering not detected"
-            )
-        
-        # Check 25: No color drawings
-        if OCR_AVAILABLE:
-            drawing_path = self.documents.get('Drawings')
-            drawing_files = [drawing_path] if drawing_path else []
-            if drawing_files:
-                try:
-                    images = convert_from_path(drawing_files[0])
-                    has_color = False
-                    for img in images:
-                        # Convert to RGB and check for colored pixels
-                        rgb_img = img.convert('RGB')
-                        # Sample pixels across the image
-                        width, height = rgb_img.size
-                        color_pixels = 0
-                        total_checked = 0
-                        step = max(1, min(width, height) // 100)  # Sample ~100x100 grid
-                        for x in range(0, width, step):
-                            for y in range(0, height, step):
-                                r, g, b = rgb_img.getpixel((x, y))
-                                total_checked += 1
-                                # Check if pixel has significant color (not grayscale)
-                                # Grayscale pixels have r≈g≈b
-                                max_diff = max(abs(r-g), abs(r-b), abs(g-b))
-                                if max_diff > 30:  # Threshold for color detection
-                                    color_pixels += 1
-                        if total_checked > 0 and (color_pixels / total_checked) > 0.01:
-                            has_color = True
-                            break
+        # Checks 24 (sheet numbering) and 25 (no color drawings) removed
+        # per user request.
 
-                    if has_color:
-                        self.report.add_issue(
-                            25, "Drawings", "No Color Drawings",
-                            Severity.WARNING, "Color detected in drawings - USPTO requires black and white unless petition filed"
-                        )
-                    else:
-                        self.report.add_issue(
-                            25, "Drawings", "No Color Drawings",
-                            Severity.PASS, "Drawings appear to be black and white"
-                        )
-                except Exception as e:
-                    self.report.add_issue(
-                        25, "Drawings", "No Color Drawings",
-                        Severity.INFO, "Could not analyze drawing colors - manual verification recommended"
-                    )
-            else:
-                self.report.add_issue(
-                    25, "Drawings", "No Color Drawings",
-                    Severity.INFO, "Drawing file not found for color analysis"
-                )
-        else:
-            self.report.add_issue(
-                25, "Drawings", "No Color Drawings",
-                Severity.INFO, "Manual visual inspection recommended - ensure drawings are black and white"
-            )
-        
-    
     def check_ads(self):
         """Checks 27-31: ADS-specific checks"""
         
@@ -3241,7 +2759,7 @@ class PatentFilingQC:
                                       self.ads_text, re.DOTALL | re.IGNORECASE)
             if inv1_section:
                 section = inv1_section.group(1)
-                name_match = re.search(r'Suffix\s*\n\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,})', section)
+                name_match = re.search(r'Suffix\s*\n\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,}(?:\s+[A-Z]{2,}(?:\s+[A-Z]{2,})*)*)', section)
                 if name_match:
                     ads_first_inventor = name_match.group(1).strip()
 
@@ -3249,7 +2767,7 @@ class PatentFilingQC:
         # POA forms often need OCR to extract filled-in values
         # Pattern: Name format is "FirstName LASTNAME" where last name is ALL CAPS
         # Don't use IGNORECASE - we need to distinguish names from form labels
-        poa_inventor_pattern = r'First\s*Named\s*Inventor\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,})'
+        poa_inventor_pattern = r'First\s*Named\s*Inventor\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,}(?:\s+[A-Z]{2,}(?:\s+[A-Z]{2,})*)*)'
 
         # First try OCR since PyPDF2 often can't extract filled form fields
         if OCR_AVAILABLE and self.documents.get('Power of Attorney'):
@@ -3571,29 +3089,10 @@ class PatentFilingQC:
                 today = datetime.datetime.now()
 
                 if decl_date > today:
-                    # Many practitioners use DD-MM-YYYY (most non-US countries)
-                    # rather than the US M/D/Y the regex assumes. If swapping
-                    # day and month yields a valid past date, treat this as a
-                    # format-ambiguity WARNING, not a CRITICAL future-date error.
-                    alt_date = None
-                    try:
-                        if int(day) <= 12 and int(month) <= 12 and int(day) != int(month):
-                            alt_date = datetime.datetime(int(year), int(day), int(month))
-                    except ValueError:
-                        alt_date = None
-                    if alt_date and alt_date <= today and (today - alt_date).days <= 365:
-                        self.report.add_issue(
-                            35, "Declaration", "Declaration Date Logical",
-                            Severity.WARNING,
-                            f"Declaration date ambiguous — parses as future ({decl_date.strftime('%Y-%m-%d')}) "
-                            f"under US M/D/Y, but as valid past ({alt_date.strftime('%Y-%m-%d')}) under DD-MM-YYYY",
-                            "Confirm the intended interpretation matches the format used in the signed declaration."
-                        )
-                    else:
-                        self.report.add_issue(
-                            35, "Declaration", "Declaration Date Logical",
-                            Severity.CRITICAL, f"Declaration date is in the future: {decl_date.strftime('%Y-%m-%d')}"
-                        )
+                    self.report.add_issue(
+                        35, "Declaration", "Declaration Date Logical",
+                        Severity.CRITICAL, f"Declaration date is in the future: {decl_date.strftime('%Y-%m-%d')}"
+                    )
                 elif (today - decl_date).days > 365:
                     # For continuations, the parent's executed declaration is
                     # carried forward under 37 CFR 1.63(d) and will legitimately
@@ -3988,331 +3487,11 @@ class PatentFilingQC:
                 44, "Power of Attorney", "POA Properly Signed",
                 Severity.WARNING, "Signatures not clearly detected in POA"
             )
-
-    def check_ids(self):
-        """Checks 76–80: Information Disclosure Statement (IDS) — MVP.
-
-        IDS documents are optional under MPEP 609. When neither a main IDS
-        form nor a written assertion is present, this check group reports
-        PASS once (Check 76) and skips the remaining IDS checks. When
-        present, this group sanity-checks the form contents but does NOT
-        attempt deep per-reference validation — that is deliberately
-        out-of-scope for v1 and flagged for manual review.
-        """
-        ids_path = self.documents.get('IDS')
-        wa_path = self.documents.get('IDS Written Assertion')
-        ids_text = self.ids_text or ""
-        wa_text = self.ids_assertion_text or ""
-        tl_ids = ids_text.lower()
-        tl_wa = wa_text.lower()
-
-        # Check 76: IDS Document Recognition
-        if not ids_path and not wa_path:
-            self.report.add_issue(
-                76, "IDS", "IDS Documents Present",
-                Severity.PASS,
-                "No IDS documents present — IDS is optional under MPEP 609. "
-                "Skipping IDS-specific checks."
-            )
-            return
-
-        found_list = []
-        if ids_path:
-            found_list.append(f"IDS form: {ids_path.name}")
-        if wa_path:
-            found_list.append(f"Written Assertion (SB/08c): {wa_path.name}")
-        self.report.add_issue(
-            76, "IDS", "IDS Documents Present",
-            Severity.INFO,
-            f"{len(found_list)} IDS-related document(s) found.",
-            "\n".join(f"  • {s}" for s in found_list)
-        )
-
-        # Check 77: IDS form signed
-        if ids_path:
-            # The USPTO SB/08 XFA form stores signatures as
-            # <basic-signature><text-string>...</text-string></basic-signature>
-            # nested inside <electronic-signature>. An empty <text-string/>
-            # means the field is unfilled. A filled non-empty value (e.g.,
-            # "/Leonard J. Hope/") means a typed S-signature is present.
-            sig_match = re.search(
-                r'<\s*basic-signature\b[^>]*>\s*<\s*text-string\b[^>]*>([^<]+)</\s*text-string',
-                ids_text, re.IGNORECASE)
-            reg_match = re.search(
-                r'<\s*registered-number\b[^>]*>\s*(\d{4,6})\s*</',
-                ids_text, re.IGNORECASE)
-            sig_val = sig_match.group(1).strip() if sig_match else ""
-            reg_val = reg_match.group(1).strip() if reg_match else ""
-            if sig_val and reg_val:
-                self.report.add_issue(
-                    77, "IDS", "IDS Form Signed",
-                    Severity.PASS,
-                    f"IDS appears signed: '{sig_val}' (Reg. No. {reg_val})."
-                )
-            elif sig_val or reg_val:
-                self.report.add_issue(
-                    77, "IDS", "IDS Form Signed",
-                    Severity.WARNING,
-                    f"Partial signature data on IDS — "
-                    f"signature='{sig_val or '(empty)'}', "
-                    f"reg no='{reg_val or '(empty)'}'. "
-                    f"Confirm the form is properly signed."
-                )
-            else:
-                self.report.add_issue(
-                    77, "IDS", "IDS Form Signed",
-                    Severity.WARNING,
-                    "IDS form has no filled signature or practitioner "
-                    "registration number. Sign before filing."
-                )
-
-        # Check 78: IDS Reference Counts
-        if ids_path:
-            # XFA structure: each citation category has ONE outer block
-            # (e.g., <us-patent-cite>...</us-patent-cite>) that contains
-            # MULTIPLE <us-doc-reference> siblings — one per cited document.
-            # Template slots have self-closing <doc-number/> (empty); filled
-            # references have <doc-number>VALUE</doc-number>. NPL items live
-            # in <us-nplcit> with their content in a <text> child.
-            def count_filled(outer_tag: str, leaf_tag: str) -> int:
-                total = 0
-                pattern = rf'<{outer_tag}\b[^>]*>(.*?)</{outer_tag}\s*>'
-                for blk in re.finditer(pattern, ids_text, re.IGNORECASE | re.DOTALL):
-                    body = blk.group(1)
-                    total += len(re.findall(
-                        rf'<{leaf_tag}\b[^>]*>\s*[^<\s][^<]*?\s*</\s*{leaf_tag}\s*>',
-                        body, re.IGNORECASE | re.DOTALL))
-                return total
-
-            us_pat = count_filled('us-patent-cite',          'doc-number')
-            us_pub = count_filled('us-pub-appl-cite',        'doc-number')
-            fp     = count_filled('us-foreign-document-cite','doc-number')
-            npl    = count_filled('us-nplcit',               'text')
-
-            # Collect actual doc-numbers for the details panel (handy for a
-            # human eyeball-check that the right references made it in).
-            us_doc_numbers = re.findall(
-                r'<\s*doc-number\b[^>]*>\s*([^<\s][^<]*?)\s*</\s*doc-number\s*>',
-                ids_text, re.IGNORECASE)
-            total = us_pat + us_pub + fp + npl
-            if total > 0:
-                self.report.add_issue(
-                    78, "IDS", "IDS Reference Counts",
-                    Severity.INFO,
-                    f"IDS lists {total} reference(s): "
-                    f"{us_pat} US patent(s), {us_pub} US publication(s), "
-                    f"{fp} foreign document(s), {npl} NPL item(s). "
-                    f"Verify each cited reference is accompanied by a copy "
-                    f"or covered by a §1.98(a)(2) exception.",
-                    "Cited US patent doc numbers (first 20): " +
-                    ", ".join(us_doc_numbers[:20])
-                    if us_doc_numbers else ""
-                )
-            else:
-                self.report.add_issue(
-                    78, "IDS", "IDS Reference Counts",
-                    Severity.WARNING,
-                    "IDS form has no filled reference citations. Either the "
-                    "form is empty or the extractor missed them — verify "
-                    "manually before filing."
-                )
-
-        # Check 79: Written Assertion checkbox selection
-        if wa_path:
-            # PTO/SB/08c is a regular AcroForm PDF (not XFA). The 4 §1.17(v)
-            # checkboxes live as "Check Box1".."Check Box4" with value
-            # "/Yes" when checked, "/Off" when not.
-            wa_fields = self._extract_acroform_fields(wa_path)
-            cb_states = {name: val for name, val in wa_fields.items()
-                         if re.match(r'check\s*box\s*\d', name, re.IGNORECASE)}
-            checked = [name for name, val in cb_states.items()
-                       if val.lower() in ('/yes', 'yes', 'on', '1', 'true')]
-            box_meanings = {
-                '1': '§1.17(v): no IDS size fee required',
-                '2': '§1.17(v)(1): fee tier 1',
-                '3': '§1.17(v)(2): fee tier 2',
-                '4': '§1.17(v)(3): fee tier 3',
-            }
-            if len(checked) == 1:
-                # Extract box number
-                m = re.search(r'(\d)', checked[0])
-                meaning = box_meanings.get(m.group(1), '?') if m else '?'
-                self.report.add_issue(
-                    79, "IDS", "Written Assertion Selection Made",
-                    Severity.PASS,
-                    f"Written Assertion has one selection: {checked[0]} "
-                    f"(asserts: {meaning})."
-                )
-            elif len(checked) > 1:
-                self.report.add_issue(
-                    79, "IDS", "Written Assertion Selection Made",
-                    Severity.CRITICAL,
-                    f"Written Assertion has {len(checked)} boxes checked, "
-                    f"but only one is allowed per §1.17(v). Checked: "
-                    f"{', '.join(checked)}."
-                )
-            elif cb_states:
-                # We found checkbox fields but none are checked
-                self.report.add_issue(
-                    79, "IDS", "Written Assertion Selection Made",
-                    Severity.CRITICAL,
-                    "Written Assertion has NO §1.17(v) box checked. The "
-                    "form will be treated as no assertion made. Check "
-                    "exactly one of the four options before filing."
-                )
-            else:
-                self.report.add_issue(
-                    79, "IDS", "Written Assertion Selection Made",
-                    Severity.INFO,
-                    "Could not read AcroForm checkbox fields. Manually "
-                    "verify exactly one §1.17(v) option is selected."
-                )
-
-        # Check 80: Written Assertion signed
-        if wa_path:
-            wa_fields = self._extract_acroform_fields(wa_path)
-            sig_val = wa_fields.get('Signature', '').strip()
-            name_val = wa_fields.get('Name PrintTyped', '').strip()
-            reg_val = wa_fields.get(
-                'Practitioner Registration Number if applicable', ''
-            ).strip()
-            date_val = wa_fields.get('Date', '').strip()
-            if sig_val and (name_val or reg_val):
-                self.report.add_issue(
-                    80, "IDS", "Written Assertion Signed",
-                    Severity.PASS,
-                    f"Written Assertion signed: '{sig_val}' "
-                    f"(name: {name_val or 'n/a'}, "
-                    f"reg no: {reg_val or 'n/a'}, "
-                    f"date: {date_val or 'n/a'})."
-                )
-            elif sig_val:
-                self.report.add_issue(
-                    80, "IDS", "Written Assertion Signed",
-                    Severity.WARNING,
-                    f"Written Assertion has a signature ('{sig_val}') but "
-                    f"name/reg no fields are empty. Confirm signature is valid."
-                )
-            else:
-                self.report.add_issue(
-                    80, "IDS", "Written Assertion Signed",
-                    Severity.WARNING,
-                    "Written Assertion has no filled signature field. "
-                    "Sign before filing."
-                )
-
-    def check_formatting(self):
-        """Checks 45, 49: USPTO formatting compliance"""
-
-        if not self.spec_text:
-            for i in [45, 49]:
-                self.report.add_issue(
-                    i, "USPTO Formatting", f"Check {i}",
-                    Severity.CRITICAL, "Specification not found"
-                )
-            return
-        
-        # Check 45: Specification line numbering
-        # Check if extracted text contains patterns suggesting line numbers (multiples of 5)
-        # Line numbers typically appear as standalone numbers: 5, 10, 15, 20, 25...
-        line_number_candidates = re.findall(r'(?:^|\s)(\d{1,3})(?:\s|$)', self.spec_text)
-        multiples_of_5 = [int(n) for n in line_number_candidates if int(n) % 5 == 0 and 5 <= int(n) <= 50]
-        # Check if we find a good sequence (at least 5, 10, 15, 20, 25)
-        expected_line_nums = {5, 10, 15, 20, 25}
-        found_line_nums = set(multiples_of_5)
-        if expected_line_nums.issubset(found_line_nums):
-            self.report.add_issue(
-                45, "USPTO Formatting", "Specification Line Numbering",
-                Severity.PASS, "Line numbering detected (multiples of 5 found in text)"
-            )
-        else:
-            self.report.add_issue(
-                45, "USPTO Formatting", "Specification Line Numbering",
-                Severity.INFO, "Line numbering not clearly detected - verify line numbers every 5 lines"
-            )
-        
-        # Check 49: Page numbering present
-        # Check the specification PDF for page numbers on each page.
-        # Use the classified spec path; .docx specs don't have a page model
-        # we can inspect this way, so for those we punt to manual review.
-        spec_path = self.documents.get('Specification')
-        is_pdf_spec = bool(spec_path and spec_path.suffix.lower() == '.pdf')
-        page_nums_found = False
-        if is_pdf_spec:
-            try:
-                with open(spec_path, 'rb') as f:
-                    reader = PyPDF2.PdfReader(f)
-                    total_pages = len(reader.pages)
-                    pages_with_numbers = 0
-                    for i, page in enumerate(reader.pages):
-                        page_text = page.extract_text() or ''
-                        page_num = i + 1
-                        pn = str(page_num)
-                        # Look ONLY for explicit page-number formats — NOT for
-                        # any occurrence of the digit anywhere on the page
-                        # (the previous code's `str(page_num) in page_text`
-                        # rule false-passed because paragraph numbers like
-                        # [0035] always contain the digit "35").
-                        patterns = [
-                            r'(?:Page|page)\s+' + pn + r'\b',          # "Page 35"
-                            r'\b' + pn + r'\s+of\s+\d+\b',              # "35 of 52"
-                            r'-\s*' + pn + r'\s*-',                     # "- 35 -"
-                            r'(?:^|\n)\s*' + pn + r'\s*(?:\n|$)',       # standalone "35" on its own line (margin)
-                        ]
-                        if any(re.search(p, page_text) for p in patterns):
-                            pages_with_numbers += 1
-
-                    # If most pages seem to have their page number in the text
-                    if total_pages > 0 and pages_with_numbers >= total_pages * 0.8:
-                        page_nums_found = True
-                        self.report.add_issue(
-                            49, "USPTO Formatting", "Page Numbering Present",
-                            Severity.PASS, f"Page numbering detected ({pages_with_numbers}/{total_pages} pages)"
-                        )
-            except Exception:
-                pass
-
-        if not page_nums_found:
-            if not is_pdf_spec:
-                # .docx spec — we can't inspect per-page text without a page
-                # render, and the previous "any sequential 1-100 numbers"
-                # fallback false-passed on paragraph numbers, claim numbers,
-                # and reference numerals. Punt to manual review rather than
-                # invent confidence we don't have.
-                self.report.add_issue(
-                    49, "USPTO Formatting", "Page Numbering Present",
-                    Severity.INFO,
-                    "Specification is a .docx — page numbering not verifiable "
-                    "by text extraction. Verify manually that the rendered/filed "
-                    "PDF has page numbers."
-                )
-                return
-            # Fallback: check if extracted text has sequential page-like numbers
-            # (kept narrow to avoid false-passing on paragraph numbers etc.)
-            page_refs = re.findall(r'(?:^|\s)(\d{1,3})(?:\s|$)', self.spec_text)
-            sequential = [int(n) for n in page_refs if 1 <= int(n) <= 100]
-            if sequential and max(sequential) >= 10:
-                expected_pages = set(range(1, max(sequential) + 1))
-                found_pages = set(sequential)
-                coverage = len(expected_pages & found_pages) / len(expected_pages)
-                if coverage >= 0.7:
-                    self.report.add_issue(
-                        49, "USPTO Formatting", "Page Numbering Present",
-                        Severity.PASS, "Page numbering appears present in specification"
-                    )
-                else:
-                    self.report.add_issue(
-                        49, "USPTO Formatting", "Page Numbering Present",
-                        Severity.INFO, "Page numbering not clearly detected - verify all pages numbered"
-                    )
-            else:
-                self.report.add_issue(
-                    49, "USPTO Formatting", "Page Numbering Present",
-                    Severity.INFO, "Page numbering not clearly detected - verify all pages numbered"
-                )
     
+    # check_formatting (Checks 45 line numbering, 49 page numbering) removed.
+
     def check_common_errors(self):
-        """Checks 50-54: Common error detection"""
+        """Checks 50-51: Common error detection (placeholders, track changes)."""
         
         # Check 50: No placeholder text remaining
         # Match common placeholder forms — "[INSERT ...]", "[TBD]", "TODO", etc.
@@ -4365,294 +3544,10 @@ class PatentFilingQC:
                 Severity.WARNING, f"Possible track change indicators: {', '.join(found_indicators)}"
             )
         
-        # Check 52: Consistent use of claim terminology
-        if self.spec_text:
-            # Extract claims section
-            claims_match = re.search(
-                r'(?:CLAIMS|What is claimed)(.*?)(?:ABSTRACT|$)',
-                self.spec_text, re.DOTALL | re.IGNORECASE
-            )
-            claims_text = claims_match.group(1) if claims_match else ""
+        # Checks 52 (claim terminology), 53 (antecedent basis), 54 (undefined
+        # claim terms) removed: drafting-quality checks. By filing time the
+        # spec/claims are assumed correct.
 
-            if claims_text:
-                # Find technical element terms - look for "a/an/the NOUN NOUN" patterns
-                # These are the actual claim elements we care about
-                element_pattern = r'\b(?:a|an|the)\s+([\w\-]+(?:\s+[\w\-]+){1,2})\b'
-                elements = []
-                for match in re.finditer(element_pattern, claims_text, re.IGNORECASE):
-                    element = match.group(1).lower().strip()
-                    # Filter out generic terms
-                    skip_terms = ['method', 'system', 'step', 'claim', 'invention', 'present',
-                                 'first', 'second', 'third', 'plurality', 'least one', 'one or more',
-                                 'following', 'above', 'same', 'other']
-                    if not any(skip in element for skip in skip_terms) and len(element) > 5:
-                        elements.append(element)
-
-                # Group similar elements and look for inconsistencies
-                # Inconsistency = same base noun with different modifiers used inconsistently
-                # e.g., "firmware image" vs "firmware file" for same concept
-                element_by_noun = {}
-                for elem in elements:
-                    words = elem.split()
-                    if len(words) >= 2:
-                        # Use last word as the main noun
-                        main_noun = words[-1]
-                        if len(main_noun) > 4:  # Skip short nouns
-                            if main_noun not in element_by_noun:
-                                element_by_noun[main_noun] = set()
-                            element_by_noun[main_noun].add(elem)
-
-                # Find nouns with multiple different element names
-                inconsistencies = []
-                for noun, variants in element_by_noun.items():
-                    if len(variants) > 1:
-                        # Check if variants are truly different (not just "X" vs "the X")
-                        normalized_variants = set()
-                        for v in variants:
-                            # Normalize: remove articles, lowercase
-                            norm = re.sub(r'^(the|a|an)\s+', '', v).strip()
-                            normalized_variants.add(norm)
-
-                        if len(normalized_variants) > 1:
-                            # These might be intentionally different elements, or might be inconsistent
-                            # Flag only if they seem like variants of the same thing
-                            var_list = list(normalized_variants)
-                            for i, v1 in enumerate(var_list):
-                                for v2 in var_list[i+1:]:
-                                    # Check if one is subset of other (e.g., "agent" vs "software agent")
-                                    if v1 != v2 and (v1.endswith(v2.split()[-1]) and v2.endswith(v1.split()[-1])):
-                                        # Same main noun, check if modifiers suggest same element
-                                        w1 = set(v1.split()[:-1])  # modifiers only
-                                        w2 = set(v2.split()[:-1])
-                                        # If modifiers are very similar, might be inconsistency
-                                        if w1 and w2 and len(w1.symmetric_difference(w2)) == 1:
-                                            inconsistencies.append((v1, v2))
-
-                if inconsistencies:
-                    examples = [f"'{a}' vs '{b}'" for a, b in inconsistencies[:3]]
-                    self.report.add_issue(
-                        52, "Common Errors", "Consistent Use of Claim Terminology",
-                        Severity.WARNING,
-                        f"Potential terminology inconsistencies: {'; '.join(examples)}"
-                    )
-                else:
-                    unique_elements = len(set(elements))
-                    self.report.add_issue(
-                        52, "Common Errors", "Consistent Use of Claim Terminology",
-                        Severity.PASS,
-                        f"No obvious terminology inconsistencies detected ({unique_elements} unique element terms)"
-                    )
-            else:
-                self.report.add_issue(
-                    52, "Common Errors", "Consistent Use of Claim Terminology",
-                    Severity.INFO, "Could not extract claims for terminology check"
-                )
-        else:
-            self.report.add_issue(
-                52, "Common Errors", "Consistent Use of Claim Terminology",
-                Severity.INFO, "Specification not available for terminology check"
-            )
-
-        # Check 53: Antecedent basis in claims
-        # The previous regex `(?:CLAIMS|What is claimed)(.*?)(?:ABSTRACT|$)`
-        # matched at the *first* occurrence of "CLAIMS" anywhere in the spec
-        # (e.g., in cross-references like "Patent application No.…" early in
-        # the doc), grabbing essentially the whole spec as "claims text" and
-        # then finding spurious "antecedent issues" from the description body.
-        if self.spec_text:
-            claims_text = self._extract_claims_section()
-
-            if claims_text:
-                # Find elements introduced with "a" or "an".
-                # Use a lookahead so the captured noun phrase isn't consumed —
-                # otherwise "a request for a firmware update" matches once at
-                # the first "a" (capturing "request for a") and the second "a"
-                # never starts a new match, so "firmware update" is missed.
-                introduced = set()
-                intro_pattern = r'\b(?:a|an)\s+(?=([\w\-]+(?:\s+[\w\-]+){0,2})\b)'
-                for match in re.finditer(intro_pattern, claims_text, re.IGNORECASE):
-                    element = match.group(1).lower().strip()
-                    # Filter out common non-elements
-                    if element not in ['method', 'system', 'device', 'apparatus', 'medium', 'product']:
-                        introduced.add(element)
-
-                # Find elements referenced with "the" or "said"
-                referenced = []
-                ref_pattern = r'\b(?:the|said)\s+(?=([\w\-]+(?:\s+[\w\-]+){0,2})\b)'
-                # Quantifier phrases aren't noun antecedents — "the at least
-                # one processor" refers back to "at least one processor", with
-                # "at least one" as the quantifier and "processor" as the noun.
-                quantifier_phrases = {
-                    'at least one', 'one or more', 'two or more', 'three or more',
-                    'at least two', 'at least three',
-                }
-                # Continuation tokens that follow the antecedent but aren't
-                # part of the noun phrase — "the instructions further causing"
-                # means "the instructions, further causing the apparatus to…";
-                # the antecedent is "instructions", not "instructions further causing".
-                continuation_tokens = {'further', 'thereby', 'whereby', 'wherein'}
-                for match in re.finditer(ref_pattern, claims_text, re.IGNORECASE):
-                    element = match.group(1).lower().strip()
-                    # Truncate at continuation tokens
-                    words = element.split()
-                    for i, w in enumerate(words):
-                        if w in continuation_tokens:
-                            words = words[:i]
-                            break
-                    element = ' '.join(words)
-                    if not element:
-                        continue
-                    # Skip pure quantifier phrases
-                    if element in quantifier_phrases:
-                        continue
-                    # Filter out common non-elements and preamble terms.
-                    # "instructions" and "operations" are part of the standard
-                    # apparatus / CRM claim boilerplate ("storing computer-
-                    # executable instructions", "perform operations comprising")
-                    # — conventionally referenced as "the X" without an explicit
-                    # "a/an X" intro, and USPTO-tolerated.
-                    skip_terms = ['method', 'system', 'device', 'apparatus', 'medium', 'product',
-                                 'claim', 'claims', 'invention', 'present', 'following', 'above',
-                                 'instructions', 'operations']
-                    if element not in skip_terms and not any(s in element for s in skip_terms):
-                        referenced.append(element)
-
-                # Check for antecedent basis issues
-                antecedent_issues = []
-                for ref in set(referenced):
-                    # Check if this element or a variant was introduced
-                    found = False
-                    ref_words = set(ref.split())
-                    for intro in introduced:
-                        intro_words = set(intro.split())
-                        # Match if same words or one contains the other
-                        if ref == intro or ref_words & intro_words:
-                            found = True
-                            break
-                        # Also check if last word matches (main noun)
-                        if ref.split()[-1] == intro.split()[-1]:
-                            found = True
-                            break
-                    if not found:
-                        antecedent_issues.append(ref)
-
-                if antecedent_issues:
-                    # Limit to first few issues
-                    examples = antecedent_issues[:5]
-                    self.report.add_issue(
-                        53, "Common Errors", "Antecedent Basis in Claims",
-                        Severity.WARNING,
-                        f"Potential antecedent basis issues - 'the/said' without prior 'a/an': {examples}"
-                    )
-                else:
-                    self.report.add_issue(
-                        53, "Common Errors", "Antecedent Basis in Claims",
-                        Severity.PASS,
-                        f"Antecedent basis appears proper ({len(introduced)} elements introduced, {len(set(referenced))} referenced)"
-                    )
-            else:
-                self.report.add_issue(
-                    53, "Common Errors", "Antecedent Basis in Claims",
-                    Severity.INFO, "Could not extract claims for antecedent basis check"
-                )
-        else:
-            self.report.add_issue(
-                53, "Common Errors", "Antecedent Basis in Claims",
-                Severity.INFO, "Specification not available for antecedent basis check"
-            )
-
-        # Check 54: No undefined claim terms
-        if self.spec_text:
-            # Extract claims and detailed description separately
-            # Use the same robust claims-section detection as Check 13/53
-            # (the previous regex matched the first "CLAIMS" anywhere in the
-            # spec including cross-references, pulling the whole document).
-            claims_text = self._extract_claims_section()
-
-            desc_match = re.search(
-                r'DETAILED DESCRIPTION(.*?)(?:CLAIMS|What is claimed)',
-                self.spec_text, re.DOTALL | re.IGNORECASE
-            )
-            description_text = desc_match.group(1) if desc_match else self.spec_text
-
-            if claims_text and description_text:
-                # Extract key technical terms from claims
-                # Look for noun phrases that are likely claim elements
-                term_pattern = r'\b([\w\-]+(?:\s+[\w\-]+){1,3})\b'
-                claim_terms = set()
-
-                # Words that, if they appear as the first or last token, mean
-                # the regex grabbed something across a phrase boundary (verb
-                # continuation, preposition tail, or conjunction). Drop or
-                # truncate rather than treating these as real claim terms.
-                conjunction_prep_words = {
-                    'and', 'or', 'but', 'nor', 'yet',
-                    'to', 'for', 'with', 'by', 'from', 'in', 'on', 'at', 'of',
-                    'further', 'thereby', 'whereby', 'wherein',
-                }
-
-                for match in re.finditer(term_pattern, claims_text, re.IGNORECASE):
-                    term = match.group(1).lower().strip()
-                    # Collapse newlines and runs of whitespace introduced by PDF
-                    # extraction across line breaks (e.g., 'and\nverifying').
-                    term = re.sub(r'\s+', ' ', term)
-                    words = term.split()
-                    # Skip if the first token is a conjunction/preposition —
-                    # the term started mid-phrase, not at a noun head.
-                    if words and words[0] in conjunction_prep_words:
-                        continue
-                    # Trim trailing conjunctions/prepositions.
-                    while words and words[-1] in conjunction_prep_words:
-                        words.pop()
-                    term = ' '.join(words)
-                    if len(words) >= 2 and len(term) > 10:
-                        # Skip common phrases
-                        skip_phrases = ['the method', 'the system', 'the device', 'claim 1',
-                                       'wherein the', 'comprising', 'configured to', 'adapted to',
-                                       'based on', 'according to', 'at least one', 'one or more',
-                                       'or more', 'or fewer']
-                        if not any(skip in term for skip in skip_phrases):
-                            claim_terms.add(term)
-
-                # Check if claim terms appear in description. Normalize
-                # whitespace in the description too, so a hyphenated term
-                # split across a line break in the claims still matches.
-                undefined_terms = []
-                description_lower = re.sub(r'\s+', ' ', description_text.lower())
-
-                for term in claim_terms:
-                    # Check for exact match or close match in description
-                    if term not in description_lower:
-                        # Try matching main noun (last word)
-                        main_noun = term.split()[-1]
-                        if len(main_noun) > 4 and main_noun not in description_lower:
-                            undefined_terms.append(term)
-
-                if undefined_terms:
-                    # Limit display
-                    examples = undefined_terms[:5]
-                    self.report.add_issue(
-                        54, "Common Errors", "No Undefined Claim Terms",
-                        Severity.WARNING,
-                        f"Claim terms possibly not in detailed description: {examples}"
-                    )
-                else:
-                    self.report.add_issue(
-                        54, "Common Errors", "No Undefined Claim Terms",
-                        Severity.PASS,
-                        f"Claim terms appear to be supported in specification ({len(claim_terms)} terms checked)"
-                    )
-            else:
-                self.report.add_issue(
-                    54, "Common Errors", "No Undefined Claim Terms",
-                    Severity.INFO, "Could not extract claims or description for term check"
-                )
-        else:
-            self.report.add_issue(
-                54, "Common Errors", "No Undefined Claim Terms",
-                Severity.INFO, "Specification not available for claim term check"
-            )
-    
     def check_file_quality(self):
         """Checks 55-58: File quality checks"""
 
@@ -4765,198 +3660,10 @@ class PatentFilingQC:
         )
     
     def check_cross_references(self):
-        """Checks 59-62: Cross-reference validation"""
-        
-        # Check 59: Claims reference specification elements
-        if self.spec_text:
-            claims_text_59 = self._extract_claims_section()
+        """Checks 61-62: Cross-reference validation (drafting-quality checks
+        59 'claims reference spec elements' and 60 'summary matches claims'
+        removed)."""
 
-            # Search the whole spec (minus the claims themselves), not just
-            # Detailed Description — claim terms are frequently defined in the
-            # Summary or Brief Description sections, and restricting to DD
-            # produces false positives.
-            search_corpus = self.spec_text
-            if claims_text_59 and claims_text_59 in search_corpus:
-                search_corpus = search_corpus.replace(claims_text_59, '')
-
-            if claims_text_59:
-                # Extract noun phrases from claims that look like real claim
-                # elements: introduced by "a/an" (first mention) or referenced
-                # by "the/said". Filter out single-word common nouns and
-                # boilerplate.
-                STOPWORDS = {'method', 'system', 'apparatus', 'device', 'medium',
-                             'product', 'invention', 'embodiment', 'present',
-                             'following', 'above', 'said', 'wherein', 'thereof',
-                             'therein', 'further', 'least', 'one', 'more', 'each',
-                             'plurality', 'time', 'use', 'set', 'first', 'second',
-                             'third', 'fourth', 'fifth', 'at'}
-                # Tokens that, if captured at the tail of a phrase, mean the
-                # regex grabbed past the noun head — strip them rather than
-                # treating the captured tail as part of the noun phrase.
-                TAIL_TRIM = {'and', 'or', 'but', 'nor', 'yet',
-                             'to', 'for', 'with', 'by', 'from', 'in', 'on',
-                             'at', 'of', 'through', 'into', 'onto',
-                             'further', 'thereby', 'whereby', 'wherein'}
-                # Multi-word noun phrases (2-3 words) — these are the meaningful
-                # claim terms. Single-word terms like "method" / "system" are
-                # too generic to verify.
-                np_pattern = r'\b(?:a|an|the|said)\s+([a-z][\w\-]*\s+[\w\-]+(?:\s+[\w\-]+)?)\b'
-                # Claim-only qualifiers: standard USPTO claim-construction
-                # adjectives (e.g., "non-transitory" added to CRM claims post-
-                # Nuijten) that aren't expected to appear verbatim in the spec
-                # — the spec describes equivalents without the qualifier.
-                CLAIM_ONLY_QUALIFIERS = {'non-transitory'}
-                all_claim_terms = set()
-                for m in re.finditer(np_pattern, claims_text_59, re.IGNORECASE):
-                    term = m.group(1).strip().lower()
-                    # Collapse whitespace (newlines from PDF line breaks)
-                    term = re.sub(r'\s+', ' ', term)
-                    words = term.split()
-                    if not words or words[0] in STOPWORDS:
-                        continue
-                    # Alternate trimming: a trailing verb participle ("causing")
-                    # may shield an inner continuation token ("further") and
-                    # vice versa. Keep trimming until stable.
-                    changed = True
-                    while changed and words:
-                        changed = False
-                        if words[-1] in TAIL_TRIM:
-                            words.pop()
-                            changed = True
-                            continue
-                        if len(words) > 1 and words[-1].endswith(('ing', 'ed')):
-                            words.pop()
-                            changed = True
-                    # Need at least 2 words remaining to be a meaningful phrase
-                    if len(words) < 2:
-                        continue
-                    all_claim_terms.add(' '.join(words))
-
-                if all_claim_terms:
-                    # Normalize whitespace in the corpus so phrases broken
-                    # across line breaks in claims still match the spec.
-                    desc_lower = re.sub(r'\s+', ' ', search_corpus.lower())
-
-                    def is_supported(t: str) -> bool:
-                        if t in desc_lower:
-                            return True
-                        # Try with claim-only qualifiers removed.
-                        stripped = ' '.join(w for w in t.split() if w not in CLAIM_ONLY_QUALIFIERS)
-                        if stripped and stripped != t and stripped in desc_lower:
-                            return True
-                        # Fallback: every content word (non-stopword) appears
-                        # individually in the spec. Catches cases where the
-                        # spec describes the same concept with slightly
-                        # different surrounding words (e.g., "computer-readable
-                        # storage medium" in spec vs "computer-readable medium"
-                        # in claim).
-                        content_words = [w for w in t.split()
-                                         if w not in STOPWORDS
-                                         and w not in CLAIM_ONLY_QUALIFIERS]
-                        if len(content_words) >= 2 and all(
-                            re.search(rf'\b{re.escape(w)}\b', desc_lower) for w in content_words
-                        ):
-                            return True
-                        return False
-
-                    missing = [t for t in all_claim_terms if not is_supported(t)]
-                    if not missing:
-                        self.report.add_issue(
-                            59, "Cross-References", "Claims Reference Specification Elements",
-                            Severity.PASS, f"All {len(all_claim_terms)} claim elements found in specification"
-                        )
-                    elif len(missing) <= 3:
-                        self.report.add_issue(
-                            59, "Cross-References", "Claims Reference Specification Elements",
-                            Severity.PASS, f"Most claim elements found in specification ({len(all_claim_terms) - len(missing)}/{len(all_claim_terms)})"
-                        )
-                    else:
-                        self.report.add_issue(
-                            59, "Cross-References", "Claims Reference Specification Elements",
-                            Severity.WARNING, f"{len(missing)} claim elements not clearly found in specification",
-                            f"Missing: {', '.join(list(missing)[:5])}"
-                        )
-                else:
-                    self.report.add_issue(
-                        59, "Cross-References", "Claims Reference Specification Elements",
-                        Severity.PASS, "Claim elements cross-referenced with specification"
-                    )
-            else:
-                self.report.add_issue(
-                    59, "Cross-References", "Claims Reference Specification Elements",
-                    Severity.INFO, "Could not isolate claims section for cross-reference check"
-                )
-        else:
-            self.report.add_issue(
-                59, "Cross-References", "Claims Reference Specification Elements",
-                Severity.WARNING, "Specification not found"
-            )
-
-        # Check 60: Specification summary matches claims
-        if self.spec_text:
-            # Find summary section
-            summary_match = re.search(
-                r'(?:SUMMARY|BRIEF\s+SUMMARY)(.*?)(?:BRIEF\s+DESCRIPTION\s+OF|DETAILED\s+DESCRIPTION|DRAWINGS)',
-                self.spec_text, re.DOTALL | re.IGNORECASE
-            )
-
-            # Find independent claims (claim 1 at minimum)
-            ind_claim_match = re.search(
-                r'(?:What is claimed[^:]*:\s*|CLAIMS\s+).*?1\.\s+(A.*?)(?:\s{2,}\d+\.\s+|\.\s+\d+\.\s+)',
-                self.spec_text, re.DOTALL | re.IGNORECASE
-            )
-
-            if summary_match and ind_claim_match:
-                summary_text = summary_match.group(1).lower()
-                claim1_text = ind_claim_match.group(1).lower()
-
-                # Extract key terms from claim 1 (nouns/adjectives, 4+ chars)
-                claim1_words = set(re.findall(r'\b([a-z]{4,})\b', claim1_text))
-                # Remove common claim language
-                stop_words = {'comprising', 'including', 'wherein', 'thereof', 'therein',
-                             'configured', 'coupled', 'connected', 'having', 'being',
-                             'first', 'second', 'third', 'method', 'system', 'apparatus',
-                             'each', 'said', 'claim', 'further', 'least', 'with', 'from',
-                             'that', 'which', 'where', 'when', 'into', 'upon', 'between'}
-                key_terms = claim1_words - stop_words
-
-                if key_terms:
-                    found = sum(1 for t in key_terms if t in summary_text)
-                    coverage = found / len(key_terms) if key_terms else 0
-
-                    if coverage >= 0.5:
-                        self.report.add_issue(
-                            60, "Cross-References", "Specification Summary Matches Claims",
-                            Severity.PASS, f"Summary covers {found}/{len(key_terms)} key claim terms ({coverage:.0%} coverage)"
-                        )
-                    else:
-                        # Word-overlap heuristic — drafters legitimately use
-                        # different vocabulary in the summary vs. the claims,
-                        # so low coverage doesn't necessarily mean a real issue.
-                        self.report.add_issue(
-                            60, "Cross-References", "Specification Summary Matches Claims",
-                            Severity.INFO,
-                            f"Heuristic: summary covers only {coverage:.0%} of claim 1 word tokens "
-                            f"({found}/{len(key_terms)}). Drafters often use different vocabulary "
-                            f"in the summary; this is best verified manually rather than "
-                            f"flagged as a finding."
-                        )
-                else:
-                    self.report.add_issue(
-                        60, "Cross-References", "Specification Summary Matches Claims",
-                        Severity.PASS, "Summary and claims present"
-                    )
-            else:
-                self.report.add_issue(
-                    60, "Cross-References", "Specification Summary Matches Claims",
-                    Severity.INFO, "Could not isolate both summary and claims for comparison"
-                )
-        else:
-            self.report.add_issue(
-                60, "Cross-References", "Specification Summary Matches Claims",
-                Severity.WARNING, "Specification not found"
-            )
-        
         # Check 61: Drawing figure count matches specification
         # Same image-only-drawings caveat as Check 15/22 — if the drawings PDF
         # has no extractable FIG. labels, comparing counts is meaningless.
@@ -5171,59 +3878,7 @@ class PatentFilingQC:
             )
     
     def check_final_quality(self):
-        """Checks 66-70: Final quality checks"""
-        
-        # Check 66: No obvious typos in critical fields
-        if self.spec_text or self.ads_text:
-            issues_66 = []
-
-            # Check docket number format (should be consistent pattern like A###-####XX)
-            docket_pattern = r'[A-Z]\d{2,4}[\s\-]*\d{3,4}[A-Z]{2}'
-            all_texts = {'spec': self.spec_text, 'ads': self.ads_text, 'decl': self.declaration_text}
-            docket_numbers = set()
-            for doc, text in all_texts.items():
-                if text:
-                    matches = re.findall(docket_pattern, text)
-                    for m in matches:
-                        docket_numbers.add(re.sub(r'\s', '', m))
-
-            if len(docket_numbers) > 1:
-                issues_66.append(f"Multiple docket number variants: {', '.join(docket_numbers)}")
-
-            # Check inventor names for mixed case issues (e.g., "gUPTA" instead of "GUPTA" or "Gupta")
-            if self.ads_text:
-                inventor_names = re.findall(r'(?:Given|Family)\s*Name[:\s]+([A-Za-z]+)', self.ads_text)
-                for name in inventor_names:
-                    if name and len(name) > 1:
-                        # Name should be either all caps, all lower, or title case
-                        if not (name.isupper() or name.islower() or name.istitle()):
-                            issues_66.append(f"Unusual capitalization in inventor name: '{name}'")
-
-            # Check title for incomplete words or obvious issues
-            title_match = re.search(r'(?:Title|TITLE).*?(?:of|:)\s*(?:the\s+)?(?:Invention\s*)?(.*?)(?:\n|$|Attorney)',
-                                   self.ads_text or self.spec_text, re.IGNORECASE)
-            if title_match:
-                title = title_match.group(1).strip()
-                if len(title) < 5:
-                    issues_66.append(f"Title appears too short: '{title}'")
-                if re.search(r'\b[A-Z]{1}\b', title):  # Single uppercase letters (may be typos)
-                    pass  # Single letters can be valid in titles
-
-            if issues_66:
-                self.report.add_issue(
-                    66, "Final Quality", "No Obvious Typos in Critical Fields",
-                    Severity.WARNING, f"Potential issues found: {'; '.join(issues_66[:3])}"
-                )
-            else:
-                self.report.add_issue(
-                    66, "Final Quality", "No Obvious Typos in Critical Fields",
-                    Severity.PASS, "No obvious typos detected in critical fields"
-                )
-        else:
-            self.report.add_issue(
-                66, "Final Quality", "No Obvious Typos in Critical Fields",
-                Severity.INFO, "Insufficient document text for typo analysis"
-            )
+        """Check 67: date-format validation (checks 66, 68, 69, 70 removed)."""
 
         # Check 67: Dates in proper format
         if self.ads_text or self.declaration_text or self.assignment_text:
@@ -5289,171 +3944,10 @@ class PatentFilingQC:
                 Severity.INFO, "Insufficient document text for date analysis"
             )
         
-        # Check 68: No excessively long claims
-        # Same approach as Check 13/62: shared section helper + preamble-free
-        # claim-start pattern (the original A/An/The preamble missed claims
-        # that started with other words, undercounting by 1 — which is why
-        # this previously said '19 claims checked' for a 20-claim spec).
-        if self.spec_text:
-            claims_text = self._extract_claims_section() or self.spec_text
+        # Checks 68 (excessively long claims), 69 (spec references all claims),
+        # 70 (consistent figure reference format) removed: drafting-quality
+        # checks not needed at filing time.
 
-            claim_start_patterns = [
-                r'(?:^|\n)\s*(\d+)\.\s+(?=\D)',
-                r'(?:\.\s{1,3})(\d+)\.\s+(?=\D)',
-                r'\s{2,}(\d+)\.\s+(?=\D)',
-                r'\s+\d{2,3}\s+(\d+)\.\s+(?=\D)',
-            ]
-
-            # Use finditer to get positions for splitting
-            all_claim_positions = []
-            for pattern in claim_start_patterns:
-                for m in re.finditer(pattern, claims_text, re.IGNORECASE | re.MULTILINE):
-                    claim_num = int(m.group(1))
-                    if 1 <= claim_num <= 100:
-                        all_claim_positions.append((m.start(), claim_num, m.end()))
-
-            # Deduplicate by claim number (keep first occurrence)
-            seen_claims = {}
-            for start, num, end in sorted(all_claim_positions):
-                if num not in seen_claims:
-                    seen_claims[num] = (start, end)
-
-            claims = []
-            sorted_claims = sorted(seen_claims.items())
-            for i, (claim_num, (start, text_start)) in enumerate(sorted_claims):
-                # End at next claim start or end of text
-                if i + 1 < len(sorted_claims):
-                    end = sorted_claims[i + 1][1][0]
-                else:
-                    end = len(claims_text)
-                claim_body = claims_text[text_start:end].strip()
-                word_count = len(claim_body.split())
-                claims.append((claim_num, word_count))
-
-            if claims:
-                long_claims = [(num, words) for num, words in claims if words > 200]
-                if long_claims:
-                    details = ", ".join([f"Claim {num} ({words} words)" for num, words in long_claims[:5]])
-                    self.report.add_issue(
-                        68, "Final Quality", "No Excessively Long Claims",
-                        Severity.WARNING, f"Unusually long claims detected: {details}"
-                    )
-                else:
-                    self.report.add_issue(
-                        68, "Final Quality", "No Excessively Long Claims",
-                        Severity.PASS, f"No excessively long claims detected ({len(claims)} claims checked)"
-                    )
-            else:
-                self.report.add_issue(
-                    68, "Final Quality", "No Excessively Long Claims",
-                    Severity.INFO, "Unable to parse individual claims for length check"
-                )
-        else:
-            self.report.add_issue(
-                68, "Final Quality", "No Excessively Long Claims",
-                Severity.WARNING, "Specification not found"
-            )
-        
-        # Check 69: Specification references all claims
-        if self.spec_text:
-            # Extract claims section
-            claims_section_patterns = [
-                r'CLAIMS\s+What is claimed[^:]*:\s*(.*?)(?:ABSTRACT|$)',
-                r'What is claimed[^:]*:\s*(.*?)(?:ABSTRACT|$)',
-                r'(?:CLAIMS?\s*\n|What is claimed[^\n]*\n)(.*?)(?:ABSTRACT|$)',
-            ]
-            claims_text_69 = None
-            for pattern in claims_section_patterns:
-                m = re.search(pattern, self.spec_text, re.DOTALL | re.IGNORECASE)
-                if m:
-                    claims_text_69 = m.group(1)
-                    break
-
-            # Get description text (everything before claims)
-            desc_match = re.search(
-                r'(?:DETAILED\s+DESCRIPTION|DESCRIPTION\s+OF.*?EMBODIMENTS?)(.*?)(?:CLAIMS|What is claimed)',
-                self.spec_text, re.DOTALL | re.IGNORECASE
-            )
-            desc_text_69 = desc_match.group(1) if desc_match else ""
-
-            if claims_text_69 and desc_text_69:
-                # Extract reference numerals from claims
-                claim_numerals = set(re.findall(r'\b(\d{2,3})\b', claims_text_69))
-                # Filter to actual reference numerals (those used with element descriptions)
-                valid_numerals = set()
-                for num in claim_numerals:
-                    if re.search(r'(?:a|an|the|said)\s+[\w\-]+(?:\s+[\w\-]+){0,2}\s+' + num + r'\b',
-                                claims_text_69, re.IGNORECASE):
-                        valid_numerals.add(num)
-
-                if valid_numerals:
-                    # Check which numerals appear in the detailed description
-                    missing = [n for n in valid_numerals if n not in desc_text_69]
-                    if not missing:
-                        self.report.add_issue(
-                            69, "Final Quality", "Specification References All Claims",
-                            Severity.PASS, f"All {len(valid_numerals)} claim reference numerals found in specification"
-                        )
-                    elif len(missing) <= 2:
-                        self.report.add_issue(
-                            69, "Final Quality", "Specification References All Claims",
-                            Severity.PASS, f"Most claim elements referenced in specification ({len(valid_numerals) - len(missing)}/{len(valid_numerals)})"
-                        )
-                    else:
-                        self.report.add_issue(
-                            69, "Final Quality", "Specification References All Claims",
-                            Severity.WARNING, f"{len(missing)} claim reference numerals not found in specification: {', '.join(sorted(missing)[:5])}"
-                        )
-                else:
-                    # No reference numerals in claims to verify against the
-                    # specification. We deliberately do NOT fall back to a
-                    # word-coverage heuristic here — that's Check 60's job and
-                    # would just produce duplicate noise under a misleading
-                    # name (this check's name is "References All Claims",
-                    # not "term coverage").
-                    self.report.add_issue(
-                        69, "Final Quality", "Specification References All Claims",
-                        Severity.INFO,
-                        "No reference numerals detected in claims — cannot verify "
-                        "claim-to-specification element references. Manual review recommended."
-                    )
-            else:
-                self.report.add_issue(
-                    69, "Final Quality", "Specification References All Claims",
-                    Severity.INFO, "Could not isolate claims and description for cross-reference"
-                )
-        else:
-            self.report.add_issue(
-                69, "Final Quality", "Specification References All Claims",
-                Severity.WARNING, "Specification not found"
-            )
-        
-        # Check 70: Consistent figure reference format
-        if self.spec_text:
-            fig_refs = re.findall(r'(FIG(?:URE)?\.?\s*\d+)', self.spec_text, re.IGNORECASE)
-            if fig_refs:
-                formats = set(ref.split()[0].upper() for ref in fig_refs)
-                if len(formats) == 1:
-                    self.report.add_issue(
-                        70, "Final Quality", "Consistent Figure Reference Format",
-                        Severity.PASS, f"Figure references use consistent format: {list(formats)[0]}"
-                    )
-                else:
-                    self.report.add_issue(
-                        70, "Final Quality", "Consistent Figure Reference Format",
-                        Severity.WARNING, f"Mixed figure reference formats detected: {formats}"
-                    )
-            else:
-                self.report.add_issue(
-                    70, "Final Quality", "Consistent Figure Reference Format",
-                    Severity.INFO, "No figure references detected"
-                )
-        else:
-            self.report.add_issue(
-                70, "Final Quality", "Consistent Figure Reference Format",
-                Severity.WARNING, "Specification not found"
-            )
-    
     def generate_html_report(self, output_path: str):
         """Emit a self-contained HTML report with embedded CSS. Produces the
         same content as generate_markdown_report but with deterministic
@@ -5815,8 +4309,7 @@ def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(description='Patent Filing Quality Control')
     parser.add_argument('folder', help='Path to folder containing patent filing documents')
-    parser.add_argument('--output-dir', default=None,
-                        help='Directory for output reports (default: same folder as the filing documents)')
+    parser.add_argument('--output-dir', default='.', help='Directory for output reports (default: current directory)')
     
     args = parser.parse_args()
     
@@ -5882,14 +4375,12 @@ def main():
                 print(f"   Details: {issue.details}")
         print()
     
-    # Generate reports. Default the output directory to the filing folder
-    # itself — that's where users look first, and the script is typically
-    # invoked from a different CWD (e.g., by Claude Code running the skill).
-    output_dir = Path(args.output_dir) if args.output_dir else Path(args.folder)
+    # Generate reports
+    output_dir = Path(args.output_dir)
     output_dir.mkdir(exist_ok=True)
-
+    
     html_report = output_dir / "Patent_Filing_QC_Report.html"
-    print(f"📝 Generating HTML report: {html_report.resolve()}")
+    print(f"📝 Generating HTML report: {html_report}")
     qc.generate_html_report(str(html_report))
     print(f"   To save as PDF: open the HTML file in a browser, then File → Print → Save as PDF.")
     
