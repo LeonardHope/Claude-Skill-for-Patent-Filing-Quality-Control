@@ -168,6 +168,11 @@ class PatentFilingQC:
             if len(clean_text) > 100 and "Please wait" not in clean_text[:200]:
                 return text
 
+            # Drawings are almost always image-only; the figure-label checks
+            # degrade gracefully. Don't waste 30+ s running OCR.
+            if doc_type == 'Drawings':
+                return text
+
             # Text extraction failed or returned minimal content - try OCR
             if OCR_AVAILABLE:
                 print(f"  ℹ️  {doc_type} appears to be image-based, attempting OCR...")
@@ -1064,9 +1069,10 @@ class PatentFilingQC:
 
     def _check_required_documents_readable(self):
         """Verify that required documents were successfully read"""
+        # Drawings are intentionally excluded: image-only drawings are normal
+        # and degrade gracefully to INFO in check_drawings().
         required_docs = {
             'Specification': self.spec_text,
-            'Drawings': self.drawings_text,
             'ADS': self.ads_text,
             'Declaration': self.declaration_text,
         }
@@ -2282,24 +2288,49 @@ class PatentFilingQC:
                 )
 
             if optional_missing:
-                # Declaration missing — emit a CRITICAL-with-question that Claude (per SKILL.md)
-                # will resolve with the user. If intentional, the filer should be reminded
-                # about the §1.16(f) surcharge and 2-month deadline.
+                # Declaration missing — but first check whether a file with
+                # "declar" in its name exists in the folder. A low-quality
+                # scan can't be classified by content, so the classifier
+                # misses it; the filename is the only available signal.
+                declar_candidates = [
+                    p.name for p in Path(self.folder_path).iterdir()
+                    if p.suffix.lower() == '.pdf'
+                    and 'declar' in p.stem.lower()
+                    and p.name != self.report.files_found.get('ADS', '')
+                ]
                 docs_str = ', '.join(optional_missing)
-                self.report.add_issue(
-                    9, "Document Completeness", "All Required Documents Present",
-                    Severity.CRITICAL,
-                    f"{docs_str} not found — confirm whether this is intentional",
-                    (
-                        "ACTION REQUIRED: Ask the filer whether this is an intentional "
-                        "missing-parts filing under 37 CFR §1.53(f).\n"
-                        "  • If YES (intentional): downgrade this to a WARNING and remind the filer that:\n"
-                        "      – A §1.16(f) surcharge fee is due at or after filing\n"
-                        "      – The missing parts (e.g., declaration) must be filed within 2 months\n"
-                        "        of the USPTO's Notice to File Missing Parts to avoid abandonment\n"
-                        "  • If NO (oversight): the missing document(s) must be added before filing"
+                if declar_candidates:
+                    self.report.add_issue(
+                        9, "Document Completeness", "All Required Documents Present",
+                        Severity.WARNING,
+                        f"Potential declaration found ({', '.join(declar_candidates)}) "
+                        f"but content could not be verified — likely a low-quality scan "
+                        f"that defeated OCR classification",
+                        (
+                            "The file name suggests this is the signed declaration, but text "
+                            "could not be extracted to confirm signatures, inventor names, or "
+                            "AIA compliance.\n"
+                            "  • Manually confirm the document is a signed AIA §1.63 declaration\n"
+                            "      (or oath) covering all listed inventors before filing.\n"
+                            "  • If it is NOT a declaration, add the correct declaration to the "
+                            "folder and re-run QC."
+                        )
                     )
-                )
+                else:
+                    self.report.add_issue(
+                        9, "Document Completeness", "All Required Documents Present",
+                        Severity.CRITICAL,
+                        f"{docs_str} not found — confirm whether this is intentional",
+                        (
+                            "ACTION REQUIRED: Ask the filer whether this is an intentional "
+                            "missing-parts filing under 37 CFR §1.53(f).\n"
+                            "  • If YES (intentional): downgrade this to a WARNING and remind the filer that:\n"
+                            "      – A §1.16(f) surcharge fee is due at or after filing\n"
+                            "      – The missing parts (e.g., declaration) must be filed within 2 months\n"
+                            "        of the USPTO's Notice to File Missing Parts to avoid abandonment\n"
+                            "  • If NO (oversight): the missing document(s) must be added before filing"
+                        )
+                    )
         
         # Check 10: ADS required fields complete
         if self.ads_text:
@@ -2363,9 +2394,19 @@ class PatentFilingQC:
                     "Form labels alone don't confirm a signed declaration."
                 )
         else:
+            _decl_scan_hint = any(
+                'declar' in p.stem.lower()
+                for p in Path(self.folder_path).iterdir()
+                if p.suffix.lower() == '.pdf'
+                and p.name != self.report.files_found.get('ADS', '')
+            )
             self.report.add_issue(
                 11, "Document Completeness", "Declaration Signatures Present",
-                Severity.WARNING, "Declaration not found - cannot check signatures"
+                Severity.WARNING,
+                "Declaration found by filename but content unreadable "
+                "(likely low-quality scan) — verify manually"
+                if _decl_scan_hint else
+                "Declaration not found - cannot check signatures"
             )
 
         # Check 12: Assignment signatures present (same approach as Check 11)
@@ -2462,6 +2503,20 @@ class PatentFilingQC:
 
         # Deduplicate
         claim_matches = list(set(claim_matches))
+
+        # Gap-fill: PDF page-footer text can merge with the first claim number
+        # on the following page when the extractor drops the inter-page newline.
+        # Example: footer "Docket: A.B.04" immediately followed by "13. The
+        # method" is extracted as "A.B.0413. The method" — the "13" is invisible
+        # to all whitespace-anchored patterns above. For each gap in the
+        # detected claim sequence, check whether that claim number appears
+        # directly after another digit (the footer-merge signature).
+        temp_nums = sorted(set(int(n) for n in claim_matches if 1 <= int(n) <= 100))
+        if temp_nums:
+            for g in set(range(1, max(temp_nums) + 1)) - set(temp_nums):
+                if re.search(rf'(?<=\d){g}\.\s+(?=\D)', claims_text):
+                    claim_matches.append(str(g))
+            claim_matches = list(set(claim_matches))
 
         if claim_matches:
             # Filter to reasonable claim numbers and deduplicate
@@ -2936,11 +2991,20 @@ class PatentFilingQC:
         """Checks 22-25: Drawings-specific checks"""
 
         if not self.drawings_text:
+            drawings_found = bool(self.report.files_found.get('Drawings'))
             for i in [22, 23, 24, 25]:
-                self.report.add_issue(
-                    i, "Drawings", f"Check {i}",
-                    Severity.CRITICAL, "Drawings not found"
-                )
+                if drawings_found:
+                    self.report.add_issue(
+                        i, "Drawings", f"Check {i}",
+                        Severity.INFO,
+                        "Drawings PDF is image-only — cannot verify by text extraction. "
+                        "Manually verify figure numbering and margin labels."
+                    )
+                else:
+                    self.report.add_issue(
+                        i, "Drawings", f"Check {i}",
+                        Severity.CRITICAL, "Drawings not found"
+                    )
             return
         
         # Check 22: Figure numbering sequential
@@ -3368,10 +3432,22 @@ class PatentFilingQC:
         """Checks 32-35: Declaration-specific checks"""
         
         if not self.declaration_text:
+            _decl_scan_hint = any(
+                'declar' in p.stem.lower()
+                for p in Path(self.folder_path).iterdir()
+                if p.suffix.lower() == '.pdf'
+                and p.name != self.report.files_found.get('ADS', '')
+            )
+            _decl_msg = (
+                "Declaration found by filename but content unreadable "
+                "(likely low-quality scan) — verify manually"
+                if _decl_scan_hint else
+                "Declaration not found"
+            )
             for i in range(32, 36):
                 self.report.add_issue(
                     i, "Declaration", f"Check {i}",
-                    Severity.WARNING, "Declaration not found"
+                    Severity.WARNING, _decl_msg
                 )
             return
         
@@ -5470,6 +5546,25 @@ class PatentFilingQC:
         def esc(s) -> str:
             return _html.escape("" if s is None else str(s))
 
+        def details_to_html(s) -> str:
+            """Escape details text and convert bare URLs to clickable links."""
+            if not s:
+                return ''
+            parts = re.split(r'(https?://\S+)', str(s))
+            out = []
+            for i, part in enumerate(parts):
+                if i % 2 == 1:
+                    url = part.rstrip('.,;:)')
+                    tail = part[len(url):]
+                    out.append(
+                        f'<a href="{_html.escape(url)}" target="_blank" rel="noopener">'
+                        f'{_html.escape(url)}</a>'
+                        f'{_html.escape(tail)}'
+                    )
+                else:
+                    out.append(_html.escape(part).replace('\n', '<br>\n'))
+            return ''.join(out)
+
         def severity_class(sev: 'Severity') -> str:
             return {
                 Severity.CRITICAL: 'critical',
@@ -5726,7 +5821,7 @@ class PatentFilingQC:
                                 f"</div>\n")
                         f.write(f"  <div class=\"issue-msg\">{esc(issue.message)}</div>\n")
                         if issue.details:
-                            f.write(f"  <div class=\"issue-details\">{esc(issue.details)}</div>\n")
+                            f.write(f"  <div class=\"issue-details\">{details_to_html(issue.details)}</div>\n")
                         f.write("</div>\n")
 
             write_issue_section("Critical Issues — Must Fix Before Filing", critical_issues, "sec-critical")
