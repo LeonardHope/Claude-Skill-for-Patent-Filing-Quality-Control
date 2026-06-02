@@ -7,10 +7,15 @@ Generates a self-contained HTML report with embedded CSS — open in any
 browser; use File → Print → Save as PDF for a paper copy.
 """
 
+import json
 import os
 import re
 import sys
+import time
 import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -32,6 +37,44 @@ except ImportError:
 
 # pdfplumber is also required for clean text extraction; we soft-check it
 # inside extract_pdf_text() so calls fall back to PyPDF2 without crashing.
+
+def _load_odp_api_key() -> str:
+    """Return USPTO ODP API key from env var or well-known key files.
+
+    Search order:
+      1. USPTO_ODP_API_KEY environment variable
+      2. ~/.patent_qc_api_key        (any platform, simple one-line file)
+      3. ~/.claude/patent_qc_api_key (Claude Code users)
+
+    Key files support two formats:
+      - Raw key value on a single line: yourkey123
+      - Env-var indirection:           env:MY_CUSTOM_VAR_NAME
+        Useful when the key is already stored under a different name.
+
+    To obtain a key: register at https://developer.uspto.gov/
+    (Create Account → API Keys). Free; no approval required.
+    """
+    key = os.environ.get('USPTO_ODP_API_KEY', '').strip()
+    if key:
+        return key
+    for candidate in [
+        Path.home() / '.patent_qc_api_key',
+        Path.home() / '.claude' / 'patent_qc_api_key',
+    ]:
+        try:
+            content = candidate.read_text(encoding='utf-8').strip()
+            if not content:
+                continue
+            if content.lower().startswith('env:'):
+                key = os.environ.get(content[4:].strip(), '').strip()
+            else:
+                key = content
+            if key:
+                return key
+        except (OSError, IOError):
+            pass
+    return ''
+
 
 # OCR support (optional)
 try:
@@ -5173,7 +5216,410 @@ class PatentFilingQC:
                 65, "Priority Claims", "Foreign Priority Documents",
                 Severity.PASS, "No foreign priority claims in ADS"
             )
-    
+
+        # ----- Check 81: Priority application number verification -----
+        #
+        # Branch A — USPTO_ODP_API_KEY is set:
+        #   81-A1: Each ADS domestic continuity application number verified
+        #          against USPTO ODP public records (existence + filing date).
+        #          CRITICAL on mismatch or number not found.
+        #   81-A2: Spec priority paragraph cross-checked against ADS.
+        #          WARNING on mismatch (ADS is already the authoritative source).
+        #   Verification links emitted only for entries ODP could not confirm
+        #   (PCT, provisional, pre-2001, API errors).
+        #
+        # Branch B — no key:
+        #   81-B:  Two-way spec ↔ ADS application-number consistency check.
+        #          CRITICAL on any mismatch (catches digit errors, dropped zeros).
+        #          Clickable Patent Center / Google Patents links for every ADS
+        #          entry so the reviewer can verify manually.
+        #
+        # Graceful degradation: Branch B provides genuine value without a key.
+        # Branch A adds automated existence + date verification on top.
+        #
+        # Note: depends on domestic_continuity_entries being fully populated,
+        # including patented parents (requires the sfDomesContinfoPatent fix).
+
+        def _norm81(s):
+            """Strip punctuation only; preserve all digits including leading zeros."""
+            return re.sub(r'[/,.\s\-]', '', (s or '').strip()).upper()
+
+        def _parse_year_from(raw_app, date_str):
+            """Best-effort year extraction from a date string or PCT number."""
+            if date_str:
+                m_yr = re.search(r'\b(19|20)\d{2}\b', date_str)
+                if m_yr:
+                    return int(m_yr.group(0))
+            m_pct = re.match(r'PCT/[A-Z]{2}(\d{2,4})/', raw_app or '', re.IGNORECASE)
+            if m_pct:
+                yr_str = m_pct.group(1)
+                if len(yr_str) == 2:
+                    yr = int(yr_str)
+                    return (2000 + yr) if yr < 50 else (1900 + yr)
+                return int(yr_str)
+            return None
+
+        def _to_iso_date(date_str):
+            """Normalise M/D/YYYY or YYYY-MM-DD to YYYY-MM-DD; None if unparseable."""
+            if not date_str:
+                return None
+            s = date_str.strip()
+            if re.match(r'^\d{4}-\d{2}-\d{2}$', s):
+                return s
+            m = re.match(r'^(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})$', s)
+            if m:
+                return f"{m.group(3)}-{m.group(1).zfill(2)}-{m.group(2).zfill(2)}"
+            return None
+
+        def _extract_spec_app_nums(text):
+            """Return {normalised: raw} for app numbers in a spec priority paragraph."""
+            found = {}
+            if not text:
+                return found
+            for pat in [
+                r'PCT/[A-Z]{2}\s?\d{2,4}/\d+',    # PCT/US2008/059500
+                r'\b\d{2}/\d{3},?\s?\d{3}\b',       # 12/407,367
+                r'\b6[0-2]/\d{3},?\s?\d{3}\b',       # 60/123,456 (provisional)
+                r'\b\d{8}\b',                         # 12407367 (plain 8-digit)
+            ]:
+                for m in re.finditer(pat, text, re.IGNORECASE):
+                    raw = re.sub(r'\s', '', m.group(0).strip())
+                    n = _norm81(raw)
+                    if n and n not in found:
+                        found[n] = raw
+            return found
+
+        def _verification_urls(raw_app):
+            """Return (patent_center_url, google_patents_url_or_None).
+            For PCT entries Google Patents is added; it resolves PCT numbers
+            to their publication records reliably.
+            """
+            clean = re.sub(r'[/,.\s\-]', '', raw_app)
+            if raw_app.upper().startswith('PCT'):
+                encoded = urllib.parse.quote(raw_app, safe='')
+                google = f"https://patents.google.com/?q={encoded}"
+                return f"https://patentcenter.uspto.gov/applications/{clean}", google
+            return f"https://patentcenter.uspto.gov/applications/{clean}", None
+
+        def _lookup_odp(raw_app, api_key):
+            """Call USPTO ODP API for a US application number.
+            Returns dict: {error, filing_date, status_desc, patent_number}.
+            PCT numbers are not indexable via this endpoint — callers skip them.
+            API endpoint: https://api.uspto.gov/api/v1/patent/applications/{appNum}/meta-data
+            Key registration: https://developer.uspto.gov/ (free, no approval required).
+            """
+            if raw_app.upper().startswith('PCT'):
+                return {'error': 'pct_not_supported', 'filing_date': '', 'status_desc': '', 'patent_number': ''}
+            clean = re.sub(r'[/,.\s\-]', '', raw_app)
+            base = os.environ.get('USPTO_ODP_BASE_URL', 'https://api.uspto.gov/api/v1')
+            url = f"{base}/patent/applications/{clean}/meta-data"
+            req = urllib.request.Request(
+                url,
+                headers={'Accept': 'application/json', 'X-API-KEY': api_key}
+            )
+            for _attempt in range(2):  # one retry on 429
+                try:
+                    with urllib.request.urlopen(req, timeout=12) as resp:
+                        data = json.loads(resp.read().decode('utf-8-sig'))
+                    break
+                except urllib.error.HTTPError as exc:
+                    if exc.code == 429:
+                        try:
+                            retry_after = int(exc.headers.get('Retry-After', '5'))
+                        except (ValueError, AttributeError):
+                            retry_after = 5
+                        time.sleep(min(retry_after, 30))
+                        if _attempt == 1:
+                            return {'error': 'rate_limited', 'filing_date': '', 'status_desc': '', 'patent_number': ''}
+                        continue
+                    if exc.code in (404, 410):
+                        return {'error': 'not_found', 'filing_date': '', 'status_desc': '', 'patent_number': ''}
+                    if exc.code == 403:
+                        return {'error': 'bad_key', 'filing_date': '', 'status_desc': '', 'patent_number': ''}
+                    return {'error': f'http_{exc.code}', 'filing_date': '', 'status_desc': '', 'patent_number': ''}
+                except Exception as exc:
+                    return {'error': str(exc), 'filing_date': '', 'status_desc': '', 'patent_number': ''}
+            else:
+                return {'error': 'rate_limited', 'filing_date': '', 'status_desc': '', 'patent_number': ''}
+            bag = data.get('patentFileWrapperDataBag') or []
+            meta = (bag[0].get('applicationMetaData') or {}) if bag else {}
+            return {
+                'error': None,
+                'filing_date': (meta.get('filingDate') or '').strip(),
+                'status_desc': (meta.get('applicationStatusDescriptionText') or '').strip(),
+                'patent_number': (meta.get('patentNumber') or '').strip(),
+            }
+
+        # Build ADS number map: norm → (raw, date_str, entry_idx)
+        ads_num_map = {}
+        for _idx, _entry in enumerate(ads_dom_entries):
+            _date = (_entry.get('date') or '').strip()
+            for _field in ('application_number', 'prior_application_number'):
+                _raw = (_entry.get(_field) or '').strip()
+                if _raw:
+                    _n = _norm81(_raw)
+                    if _n and _n not in ads_num_map:
+                        ads_num_map[_n] = (_raw, _date, _idx + 1)
+
+        # Extract spec priority paragraph and its application numbers
+        _spec_para = None
+        if self.spec_text:
+            _m = re.search(
+                r'(?:CROSS[-\s]*REFERENCE\s+(?:TO\s+)?RELATED\s+APPLICATIONS?'
+                r'|RELATED\s+APPLICATIONS?'
+                r'|PRIORITY\s+CLAIMS?'
+                r'|PRIORITY\s+TO\s+RELATED)',
+                self.spec_text, re.IGNORECASE
+            )
+            if _m:
+                _spec_para = self.spec_text[_m.start():_m.start() + 1500]
+            else:
+                _m2 = re.search(
+                    r'(?:claims?\s+(?:the\s+)?(?:benefit|priority)|'
+                    r'continuation(?:-in-part)?\s+of)',
+                    self.spec_text, re.IGNORECASE
+                )
+                if _m2:
+                    _spec_para = self.spec_text[_m2.start():_m2.start() + 1200]
+
+        spec_num_map = _extract_spec_app_nums(_spec_para)
+        odp_api_key = _load_odp_api_key()
+
+        if not ads_dom_entries:
+            self.report.add_issue(
+                81, "Priority Claims", "Priority Application Number Verification",
+                Severity.PASS, "No domestic continuity entries — check not applicable"
+            )
+
+        elif odp_api_key:
+            # ── Branch A: ODP key present — verify against USPTO public records ──
+
+            a1_issues, a1_pre2001, a1_errors = [], [], []
+            a1_passes = 0
+            a1_passed_norms: set = set()
+            bad_key = False
+
+            for _n, (_raw, _date, _eidx) in ads_num_map.items():
+                _is_provisional = bool(
+                    re.match(r'^6[01]/', _raw.strip()) or
+                    re.match(r'^6[01]\d{6}$', _n)
+                )
+                if _is_provisional:
+                    a1_pre2001.append(
+                        f"Entry {_eidx} ({_raw}): provisional — "
+                        f"not indexed in USPTO ODP; verify via link below"
+                    )
+                    continue
+                _yr = _parse_year_from(_raw, _date)
+                if _yr is not None and _yr < 2001:
+                    a1_pre2001.append(
+                        f"Entry {_eidx} ({_raw}, ~{_yr}): pre-2001 — "
+                        f"ODP does not cover applications filed before 2001"
+                    )
+                    continue
+                _r = _lookup_odp(_raw, odp_api_key)
+                time.sleep(1)  # respect USPTO ODP rate limit (~60 req/min)
+                if _r['error'] == 'pct_not_supported':
+                    a1_pre2001.append(
+                        f"Entry {_eidx} ({_raw}): PCT — ODP indexes by US "
+                        f"application number only; verify via link below"
+                    )
+                elif _r['error'] == 'rate_limited':
+                    a1_errors.append(
+                        f"Entry {_eidx} ({_raw}): USPTO ODP rate limit hit — re-run to retry"
+                    )
+                elif _r['error'] == 'bad_key':
+                    a1_errors.append(
+                        "USPTO ODP API key rejected (HTTP 403) — verify USPTO_ODP_API_KEY"
+                    )
+                    bad_key = True
+                    break
+                elif _r['error'] == 'not_found':
+                    a1_issues.append(
+                        f"Entry {_eidx} ({_raw}): not found in USPTO public records "
+                        f"— verify the application number is correct"
+                    )
+                elif _r['error']:
+                    a1_errors.append(f"Entry {_eidx} ({_raw}): API error — {_r['error']}")
+                else:
+                    _ads_iso = _to_iso_date(_date)
+                    _odp_iso = _to_iso_date(_r['filing_date'])
+                    if _ads_iso and _odp_iso and _ads_iso != _odp_iso:
+                        a1_issues.append(
+                            f"Entry {_eidx} ({_raw}): ADS date '{_date}' does not "
+                            f"match USPTO records '{_r['filing_date']}'"
+                            + (f" (status: {_r['status_desc']})" if _r['status_desc'] else "")
+                        )
+                    else:
+                        a1_passes += 1
+                        a1_passed_norms.add(_n)
+
+            _all_a1 = a1_issues + a1_pre2001 + a1_errors
+            if bad_key or (a1_errors and not a1_issues):
+                self.report.add_issue(
+                    81, "Priority Claims", "ADS vs. USPTO Public Records",
+                    Severity.WARNING,
+                    "USPTO ODP verification incomplete — " + '; '.join(a1_errors),
+                    '\n'.join(_all_a1) if _all_a1 else None
+                )
+            elif a1_issues:
+                self.report.add_issue(
+                    81, "Priority Claims", "ADS vs. USPTO Public Records",
+                    Severity.CRITICAL,
+                    f"{len(a1_issues)} application number/date mismatch(es) "
+                    f"against USPTO public records",
+                    '\n'.join(_all_a1)
+                )
+            else:
+                _skipped = len(a1_pre2001)
+                _skip_note = (
+                    f"; {_skipped} entry/entries skipped (PCT, provisional, or pre-2001"
+                    f" — verify via links below)" if _skipped else ""
+                )
+                self.report.add_issue(
+                    81, "Priority Claims", "ADS vs. USPTO Public Records",
+                    Severity.PASS if not _skipped else Severity.INFO,
+                    f"{a1_passes} application number(s) verified against USPTO "
+                    f"public records (existence + filing date){_skip_note}",
+                    '\n'.join(a1_pre2001) if a1_pre2001 else None
+                )
+
+            # Emit verification links for entries that could not be ODP-confirmed
+            _url_lines_a = []
+            for _n, (_raw, _date, _eidx) in sorted(ads_num_map.items(), key=lambda x: x[1][2]):
+                _is_pct = _raw.upper().startswith('PCT')
+                if not _is_pct and _n in a1_passed_norms:
+                    continue  # already verified — link adds no value
+                _pc_url, _alt_url = _verification_urls(_raw)
+                _line = f"Entry {_eidx}: {_raw}"
+                if _date:
+                    _line += f"  (ADS filing date: {_date})"
+                _line += f"\n  Patent Center: {_pc_url}"
+                if _alt_url:
+                    _line += f"\n  Google Patents: {_alt_url}"
+                _url_lines_a.append(_line)
+            if _url_lines_a:
+                self.report.add_issue(
+                    81, "Priority Claims", "Verification Links",
+                    Severity.INFO,
+                    "Links for entries requiring manual verification "
+                    "(ODP-confirmed US entries omitted):",
+                    '\n\n'.join(_url_lines_a)
+                )
+
+            # A2: Spec priority paragraph vs. ADS (secondary check)
+            if not _spec_para:
+                self.report.add_issue(
+                    81, "Priority Claims", "Spec Priority Paragraph vs. ADS",
+                    Severity.INFO,
+                    "No priority paragraph found in specification — "
+                    "spec/ADS comparison skipped"
+                )
+            elif not spec_num_map:
+                self.report.add_issue(
+                    81, "Priority Claims", "Spec Priority Paragraph vs. ADS",
+                    Severity.WARNING,
+                    "Priority paragraph found but no application numbers extracted — "
+                    "manual review recommended"
+                )
+            else:
+                a2_issues = []
+                for _n, _raw in spec_num_map.items():
+                    if _n not in ads_num_map:
+                        a2_issues.append(f"Spec has '{_raw}' — not in ADS continuity table")
+                for _n, (_raw, _, _eidx) in ads_num_map.items():
+                    if _n not in spec_num_map:
+                        a2_issues.append(f"'{_raw}' in ADS not found in spec priority paragraph")
+                if a2_issues:
+                    self.report.add_issue(
+                        81, "Priority Claims", "Spec Priority Paragraph vs. ADS",
+                        Severity.WARNING,
+                        f"{len(a2_issues)} inconsistency/inconsistencies between "
+                        f"spec priority paragraph and ADS",
+                        '\n'.join(a2_issues)
+                    )
+                else:
+                    self.report.add_issue(
+                        81, "Priority Claims", "Spec Priority Paragraph vs. ADS",
+                        Severity.PASS,
+                        f"All {len(spec_num_map)} application number(s) in the "
+                        f"spec priority paragraph match ADS entries (and vice versa)"
+                    )
+
+        else:
+            # ── Branch B: No key — spec ↔ ADS consistency + manual links ────────
+
+            if not _spec_para:
+                self.report.add_issue(
+                    81, "Priority Claims",
+                    "Priority Application Number Consistency (Spec ↔ ADS)",
+                    Severity.INFO,
+                    "No priority paragraph found in specification — "
+                    "spec/ADS consistency check skipped"
+                )
+            elif not spec_num_map:
+                self.report.add_issue(
+                    81, "Priority Claims",
+                    "Priority Application Number Consistency (Spec ↔ ADS)",
+                    Severity.WARNING,
+                    "Priority paragraph found but no application numbers extracted — "
+                    "manual review recommended"
+                )
+            else:
+                b_issues = []
+                for _n, _raw in spec_num_map.items():
+                    if _n not in ads_num_map:
+                        b_issues.append(
+                            f"Spec has '{_raw}' — no matching entry in ADS continuity table"
+                        )
+                for _n, (_raw, _, _eidx) in ads_num_map.items():
+                    if _n not in spec_num_map:
+                        b_issues.append(
+                            f"'{_raw}' in ADS not found in spec priority paragraph"
+                        )
+                if b_issues:
+                    self.report.add_issue(
+                        81, "Priority Claims",
+                        "Priority Application Number Consistency (Spec ↔ ADS)",
+                        Severity.CRITICAL,
+                        f"{len(b_issues)} inconsistency/inconsistencies between "
+                        f"spec priority paragraph and ADS — possible digit error "
+                        f"(e.g. dropped leading zero or transposed digits)",
+                        '\n'.join(b_issues)
+                    )
+                else:
+                    self.report.add_issue(
+                        81, "Priority Claims",
+                        "Priority Application Number Consistency (Spec ↔ ADS)",
+                        Severity.PASS,
+                        f"All {len(spec_num_map)} application number(s) in the spec "
+                        f"priority paragraph match ADS entries (and vice versa)"
+                    )
+
+            # Manual verification links — always emitted in Branch B
+            _url_lines = []
+            for _n, (_raw, _date, _eidx) in sorted(ads_num_map.items(), key=lambda x: x[1][2]):
+                _pc_url, _alt_url = _verification_urls(_raw)
+                _line = f"Entry {_eidx}: {_raw}"
+                if _date:
+                    _line += f"  (ADS filing date: {_date})"
+                _line += f"\n  Patent Center: {_pc_url}"
+                if _alt_url:
+                    _line += f"\n  Google Patents: {_alt_url}"
+                _url_lines.append(_line)
+
+            self.report.add_issue(
+                81, "Priority Claims", "USPTO Verification Links",
+                Severity.INFO,
+                (
+                    "Automated verification not active — set USPTO_ODP_API_KEY to enable.\n"
+                    "To obtain a free key: https://developer.uspto.gov/ "
+                    "(Create Account → API Keys, no approval required).\n"
+                    "Manual verification links:"
+                ),
+                '\n\n'.join(_url_lines) if _url_lines else None
+            )
+
     def check_final_quality(self):
         """Checks 66-70: Final quality checks"""
         
