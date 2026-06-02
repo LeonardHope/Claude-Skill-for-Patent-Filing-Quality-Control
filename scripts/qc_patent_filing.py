@@ -390,23 +390,46 @@ class PatentFilingQC:
             data['customer_number'] = data['attorney_customer_number']
 
         # Domestic continuity entries — check for any populated parent application info
+        # The ADS XFA form stores each continuity row in an sfDomesticContinuity
+        # block with TWO possible sub-elements depending on whether the parent is
+        # pending/expired (sfDomesContInfo) or patented (sfDomesContinfoPatent).
+        # The old code only read sfDomesContInfo, silently dropping all patented
+        # parents. Fix: read both sub-elements and merge, preferring non-empty.
         for cont in us_request.iter():
             if localname(cont) != 'sfDomesticContinuity':
                 continue
+            info_app, info_type, info_prior, info_date = '', '', '', ''
             for info in cont.iter():
-                if localname(info) != 'sfDomesContInfo':
-                    continue
-                app_num = text_of(info, 'domappNumber')
-                cont_type = text_of(info, 'domesContList')
-                prior_num = text_of(info, 'domPriorAppNum')
-                date_field = text_of(info, 'DateTimeField1')
-                if any([app_num, prior_num, cont_type, date_field]):
-                    data['domestic_continuity_entries'].append({
-                        'application_number': app_num,
-                        'continuation_type': cont_type,
-                        'prior_application_number': prior_num,
-                        'date': date_field,
-                    })
+                if localname(info) == 'sfDomesContInfo':
+                    info_app   = text_of(info, 'domappNumber')
+                    info_type  = text_of(info, 'domesContList')
+                    info_prior = text_of(info, 'domPriorAppNum')
+                    info_date  = text_of(info, 'DateTimeField1')
+                    break
+            pat_app, pat_type, pat_prior, pat_date = '', '', '', ''
+            pat_patent_num, pat_issue_date = '', ''
+            for pat in cont.iter():
+                if localname(pat) == 'sfDomesContinfoPatent':
+                    pat_app        = text_of(pat, 'patAppNum')
+                    pat_type       = text_of(pat, 'domesContList')
+                    pat_prior      = text_of(pat, 'patContType')
+                    pat_date       = text_of(pat, 'patprDate')
+                    pat_patent_num = text_of(pat, 'patPatNum')
+                    pat_issue_date = text_of(pat, 'patIsDate')
+                    break
+            app_num    = info_app   or pat_app
+            cont_type  = info_type  or pat_type
+            prior_num  = info_prior or pat_prior
+            date_field = info_date  or pat_date
+            if any([app_num, prior_num, cont_type, date_field]):
+                data['domestic_continuity_entries'].append({
+                    'application_number': app_num,
+                    'continuation_type': cont_type,
+                    'prior_application_number': prior_num,
+                    'date': date_field,
+                    'patent_number': pat_patent_num,
+                    'issue_date': pat_issue_date,
+                })
 
         # Foreign priority entries
         for fpr in us_request.iter():
