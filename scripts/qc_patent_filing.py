@@ -124,7 +124,20 @@ class PatentFilingQC:
     def extract_pdf_text(self, pdf_path: Path, doc_type: str = "Document") -> str:
         """Extract text from a PDF file. Tries pdfplumber first (preserves
         paragraph structure that the regex-based section/claim checks need),
-        then PyPDF2 as a fallback, then OCR for image-only PDFs."""
+        then PyPDF2 as a fallback, then OCR for image-only PDFs.
+
+        Declaration and Assignment PDFs are treated specially: OCR is always
+        attempted when available, regardless of how much text pdfplumber/PyPDF2
+        return. These documents are typically scanned signed forms where text
+        extractors recover the form template labels (thousands of chars) but
+        silently miss the filled-in inventor names. OCR reads each page as an
+        image and captures both template and filled content reliably."""
+        # Declaration and Assignment: always run OCR when available because
+        # text extractors return form labels but miss filled-in inventor names.
+        # Diagnostic testing: pdfplumber extracted 17k chars from a declaration
+        # yet found 0/7 inventors; OCR found 7/7 on the same file.
+        _always_ocr = doc_type in ('Declaration', 'Assignment') and OCR_AVAILABLE
+
         # First, try pdfplumber. It generally preserves newlines between
         # paragraphs and section headers that PyPDF2 strips, which is what
         # the spec-content checks (Abstract, Brief Description, Claims, etc.)
@@ -145,7 +158,8 @@ class PatentFilingQC:
             if image_only_count > 0:
                 self.image_only_pages[doc_type] = image_only_count
             clean_text = text.strip()
-            if len(clean_text) > 100 and "Please wait" not in clean_text[:200]:
+            if len(clean_text) > 100 and "Please wait" not in clean_text[:200] \
+                    and not _always_ocr:
                 return text
         except ImportError:
             # pdfplumber not installed; fall through to PyPDF2.
@@ -165,7 +179,8 @@ class PatentFilingQC:
 
             # Check if we got meaningful text (more than just whitespace/boilerplate)
             clean_text = text.strip()
-            if len(clean_text) > 100 and "Please wait" not in clean_text[:200]:
+            if len(clean_text) > 100 and "Please wait" not in clean_text[:200] \
+                    and not _always_ocr:
                 return text
 
             # Drawings are almost always image-only; the figure-label checks
@@ -173,9 +188,15 @@ class PatentFilingQC:
             if doc_type == 'Drawings':
                 return text
 
-            # Text extraction failed or returned minimal content - try OCR
-            if OCR_AVAILABLE:
-                print(f"  ℹ️  {doc_type} appears to be image-based, attempting OCR...")
+            # OCR pass for non-drawings PDFs. Runs unconditionally for Declaration
+            # and Assignment (_always_ocr) because those signed forms return form
+            # labels from text extractors but not filled-in inventor names. For all
+            # other doc types this is the normal image-only fallback.
+            if OCR_AVAILABLE and (not text.strip() or _always_ocr):
+                if _always_ocr:
+                    print(f"  ℹ️  {doc_type}: running OCR to capture filled-form values...")
+                else:
+                    print(f"  ℹ️  {doc_type} appears to be image-based, attempting OCR...")
                 try:
                     images = convert_from_path(pdf_path)
                     ocr_text = ""
@@ -192,11 +213,12 @@ class PatentFilingQC:
                 except Exception as ocr_error:
                     self._document_read_failure(doc_type, pdf_path, f"OCR failed: {str(ocr_error)}")
                     return ""
-            else:
+            elif not OCR_AVAILABLE and not text.strip():
                 self._document_read_failure(doc_type, pdf_path,
                     "Image-based PDF detected but OCR not available. "
                     "Install pytesseract and pdf2image: pip install pytesseract pdf2image")
                 return ""
+            return text
 
         except Exception as e:
             self._document_read_failure(doc_type, pdf_path, str(e))
