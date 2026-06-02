@@ -4669,6 +4669,8 @@ class PatentFilingQC:
         r'\boligonucleotide\b',
         r'\bpolypeptide\b',
         r'\bnucleic\s+acid\b',
+        r'\bDNA\b',
+        r'\bRNA\b',
     ]
 
     def _is_biological_application(self) -> bool:
@@ -5023,8 +5025,6 @@ class PatentFilingQC:
         # 3-letter amino acid codes (standard 20)
         _AA3 = (r'(?:Ala|Arg|Asn|Asp|Cys|Gln|Glu|Gly|His|Ile|'
                 r'Leu|Lys|Met|Phe|Pro|Ser|Thr|Trp|Tyr|Val)')
-        # Single-letter amino acid codes (20 standard, unambiguous set)
-        _AA1 = r'[ACDEFGHIKLMNPQRSTVWYacdefghiklmnpqrstvwy]'
         # Nucleotide bases (DNA/RNA)
         _NUC = r'[AGCTUagctu]'
 
@@ -5046,10 +5046,10 @@ class PatentFilingQC:
                 rf'{_AA3}(?:[-\s]{_AA3}){{1,2}}',
                 re.IGNORECASE),
              'amino acid (3-letter)', 2, 'residues', 'below'),
-            # Amino acids (1-letter): 4+ consecutive (above threshold)
-            # Only inside context windows to limit false positives
-            (re.compile(rf'{_AA1}{{4,}}'),
-             'amino acid (1-letter)', 4, 'residues', 'above'),
+            # 1-letter amino acid detection omitted: almost all English letters
+            # are valid AA codes (only B, J, O, U, X, Z are not), so any run of
+            # 4+ letters in a biological context window will match — producing
+            # thousands of false hits from words like "characteristics".
         ]
 
         # Build context windows around gate-term hits in the spec
