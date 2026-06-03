@@ -1,0 +1,31 @@
+name: tests
+
+# Runs the QC regression suite on every PR and on pushes to main. A stale
+# branch that deletes checks (e.g. the IDS checks) will fail the relevant
+# tests and block the merge.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  regression-suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        # PyPDF2 is a hard import in the script; pdfplumber is the primary text
+        # extractor. The OCR deps (pytesseract/pdf2image) are intentionally
+        # omitted — the suite stubs OCR, and leaving them out keeps OCR_AVAILABLE
+        # False for the default code paths.
+        run: |
+          python -m pip install --upgrade pip
+          pip install "PyPDF2>=3.0" "pdfplumber>=0.11"
+
+      - name: Run QC regression suite
+        run: python tests/test_qc_patent_filing.py
