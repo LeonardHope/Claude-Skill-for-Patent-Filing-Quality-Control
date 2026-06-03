@@ -110,10 +110,16 @@ class QCReport:
     folder_path: str
     files_found: Dict[str, Optional[str]] = field(default_factory=dict)
     issues: List[QCIssue] = field(default_factory=list)
-    
-    def add_issue(self, check_id: int, category: str, check_name: str, 
+    # Check IDs to suppress from the report (used by --lightweight mode to drop
+    # drafting-quality checks). add_issue() silently no-ops for these IDs, so the
+    # checks may still run but never surface — keeps one code path for both modes.
+    skip_check_ids: set = field(default_factory=set)
+
+    def add_issue(self, check_id: int, category: str, check_name: str,
                   severity: Severity, message: str, details: str = ""):
         """Add an issue to the report"""
+        if check_id in self.skip_check_ids:
+            return
         self.issues.append(QCIssue(check_id, category, check_name, severity, message, details))
     
     def get_critical_count(self) -> int:
@@ -124,6 +130,22 @@ class QCReport:
     
     def get_pass_count(self) -> int:
         return sum(1 for i in self.issues if i.severity == Severity.PASS)
+
+
+# Drafting-quality checks suppressed in --lightweight (filing-identity-only)
+# mode. These flag drafting issues (antecedent basis, terminology, abstract
+# length, optional USPTO formatting, etc.) that are typically resolved during
+# drafting and add noise at filing time. The file-identity checks that catch a
+# wrong/mismatched file (cross-document consistency, completeness, drawings
+# margin labels, figure/claim counts, placeholder text, dates) are retained.
+LIGHTWEIGHT_SKIP_IDS = {
+    16, 17, 18, 19, 20,   # spec drafting: numeral consistency, abstract length, section presence
+    24, 25,               # drawings: sheet numbering, no-color
+    45, 49,               # USPTO formatting: line numbering, page numbering
+    52, 53, 54,           # common errors: claim terminology, antecedent basis, undefined terms
+    59, 60,               # cross-references: claims↔spec elements, summary↔claims
+    66, 68, 69, 70,       # final quality: typos, long claims, spec-references-all-claims, figure-ref format
+}
 
 
 class PatentFilingQC:
@@ -6950,16 +6972,25 @@ def main():
     parser.add_argument('folder', help='Path to folder containing patent filing documents')
     parser.add_argument('--output-dir', default=None,
                         help='Directory for output reports (default: same folder as the filing documents)')
-    
+    parser.add_argument('--lightweight', '--filing-identity-only', dest='lightweight',
+                        action='store_true',
+                        help='Filing-identity-only mode: skip drafting-quality checks '
+                             '(antecedent basis, terminology, abstract length, optional USPTO '
+                             'formatting, etc.) and report only checks that catch a wrong or '
+                             'mismatched file at filing time.')
+
     args = parser.parse_args()
-    
+
     print("=" * 80)
-    print("PATENT FILING QUALITY CONTROL")
+    print("PATENT FILING QUALITY CONTROL"
+          + ("  (lightweight: filing-identity-only)" if args.lightweight else ""))
     print("=" * 80)
     print()
-    
+
     # Initialize QC engine
     qc = PatentFilingQC(args.folder)
+    if args.lightweight:
+        qc.report.skip_check_ids = set(LIGHTWEIGHT_SKIP_IDS)
     
     # Load documents
     print("📁 Loading documents...")

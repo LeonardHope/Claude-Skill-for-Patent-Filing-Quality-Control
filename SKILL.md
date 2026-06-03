@@ -66,6 +66,15 @@ Optional: Specify output directory for reports:
 python3 /path/to/skill/scripts/qc_patent_filing.py <folder-path> --output-dir <output-path>
 ```
 
+Optional: Lightweight (filing-identity-only) mode — skips drafting-quality
+checks (antecedent basis, terminology consistency, abstract length, optional
+USPTO formatting, etc.) and reports only the checks that catch a wrong or
+mismatched file at filing time. Use when the specification is already
+drafting-reviewed and the remaining risk is attaching the wrong file:
+```bash
+python3 /path/to/skill/scripts/qc_patent_filing.py <folder-path> --lightweight
+```
+
 The script will:
 1. Automatically detect all filing documents in the folder
 2. Extract text from PDFs

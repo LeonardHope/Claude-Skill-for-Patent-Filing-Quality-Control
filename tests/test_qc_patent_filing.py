@@ -20,7 +20,7 @@ from pathlib import Path
 # Resolve the script dir relative to this test file so the suite is portable.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "scripts"))
-from qc_patent_filing import PatentFilingQC, Severity
+from qc_patent_filing import PatentFilingQC, Severity, LIGHTWEIGHT_SKIP_IDS
 
 # Scratch working dir with placeholder PDFs. Several checks stat the files in
 # self.documents (e.g. Check 58 file-size), so the referenced paths must exist.
@@ -1157,6 +1157,77 @@ def t():
         print(f"  ❌ no verification-links issue emitted"); return False
     if 'patentcenter.uspto.gov' not in (links.details or ''):
         print(f"  ❌ Patent Center link missing from details"); return False
+    return True
+
+# ============================================================
+# 17. --lightweight (filing-identity-only) mode
+# ============================================================
+def _run_lightweight(**overrides):
+    qc = build_qc(**overrides)
+    qc.report.skip_check_ids = set(LIGHTWEIGHT_SKIP_IDS)
+    qc.run_all_checks()
+    return qc
+
+@test("LW17.1: lightweight mode drops ALL drafting-quality check IDs")
+def t():
+    qc = _run_lightweight()
+    present = {i.check_id for i in qc.report.issues}
+    leaked = present & LIGHTWEIGHT_SKIP_IDS
+    if leaked:
+        print(f"  ❌ skipped IDs leaked into report: {sorted(leaked)}"); return False
+    return True
+
+@test("LW17.2: full (default) mode DOES emit some of those drafting checks")
+def t():
+    qc = build_qc()
+    qc.run_all_checks()
+    present = {i.check_id for i in qc.report.issues}
+    drafting_in_full = present & LIGHTWEIGHT_SKIP_IDS
+    if not drafting_in_full:
+        print(f"  ❌ no drafting checks fired in full mode — test fixture can't "
+              f"distinguish the modes"); return False
+    return True
+
+@test("LW17.3: lightweight keeps file-identity checks (1, 13, 15)")
+def t():
+    qc = _run_lightweight()
+    present = {i.check_id for i in qc.report.issues}
+    for cid in (1, 13, 15):
+        if cid not in present:
+            print(f"  ❌ identity Check {cid} missing in lightweight mode"); return False
+    return True
+
+@test("LW17.4: lightweight still catches a file-identity CRITICAL")
+def t():
+    # Inventor missing from declaration → Check 1 CRITICAL (a kept identity check)
+    qc = _run_lightweight(decl=BASE_DECL.replace('Aditya Vikram MEHTA', '')
+                          .replace('/Aditya Vikram Mehta/', ''))
+    c1 = get_check(qc, 1)
+    if not c1 or c1.severity != Severity.CRITICAL:
+        print(f"  ❌ Check 1 = {c1.severity.value if c1 else 'absent'} (expected CRITICAL)")
+        return False
+    # ...and the drafting checks are still suppressed
+    if {i.check_id for i in qc.report.issues} & LIGHTWEIGHT_SKIP_IDS:
+        print(f"  ❌ drafting checks leaked"); return False
+    return True
+
+@test("LW17.5: lightweight report has fewer issues than full mode")
+def t():
+    full = build_qc(); full.run_all_checks()
+    lite = _run_lightweight()
+    if len(lite.report.issues) >= len(full.report.issues):
+        print(f"  ❌ lightweight={len(lite.report.issues)} not < full={len(full.report.issues)}")
+        return False
+    return True
+
+@test("LW17.6: skip set is exactly the documented 18 IDs")
+def t():
+    if len(LIGHTWEIGHT_SKIP_IDS) != 18:
+        print(f"  ❌ expected 18 skip IDs, got {len(LIGHTWEIGHT_SKIP_IDS)}: "
+              f"{sorted(LIGHTWEIGHT_SKIP_IDS)}"); return False
+    expected = {16,17,18,19,20,24,25,45,49,52,53,54,59,60,66,68,69,70}
+    if set(LIGHTWEIGHT_SKIP_IDS) != expected:
+        print(f"  ❌ skip set mismatch: {sorted(LIGHTWEIGHT_SKIP_IDS)}"); return False
     return True
 
 # ============================================================
