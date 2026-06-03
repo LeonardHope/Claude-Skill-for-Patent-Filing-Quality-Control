@@ -10,7 +10,7 @@ A comprehensive quality control tool for U.S. patent application filing document
 
 Patent applications involve multiple interconnected documents where a single inconsistency—a misspelled inventor name, a mismatched docket number, or an incorrect figure reference—can cause delays, rejections, or legal complications. This skill automates the tedious but critical task of cross-checking all filing documents.
 
-The skill performs **70+ automated checks** across all required and optional filing documents, generating a single self-contained HTML report. To save as PDF, open the HTML in any browser and use File → Print → Save as PDF.
+The skill performs **78 automated checks across 16 categories** on all required and optional filing documents, generating a single self-contained HTML report. (Check IDs run 1–85; a few numbers were retired during development, so there are gaps.) To save as PDF, open the HTML in any browser and use File → Print → Save as PDF.
 
 ### Reliability foundation
 
@@ -50,6 +50,12 @@ Most regex-based "70-check" patent QC tools produce noise on real filings becaus
 | **pdfplumber** | Always — primary text extractor for spec/declaration/assignment/POA. Preserves paragraph structure PyPDF2 strips, which the spec-content checks need to work correctly. | `pip install pdfplumber` |
 | **python-docx** *(optional, for Word specs)* | Only if a `.docx` file is in the folder. The USPTO accepts the specification in `.docx`; this lets the tool read it. | `pip install python-docx` |
 | **pytesseract + pdf2image** *(optional OCR)* | Only for scanned/image-based filing documents that aren't text-searchable. **Not needed for the USPTO XFA-based ADS** — that's handled by the built-in XFA reader. | `pip install pytesseract pdf2image` + `brew install tesseract poppler` |
+
+To install everything in one step, use the bundled requirements file:
+
+```bash
+pip install -r requirements.txt
+```
 
 The report is generated as a self-contained HTML file with embedded CSS — no external tooling (no pandoc, no LaTeX, no weasyprint) is required. To save the report as a PDF, open the HTML in any browser and use **File → Print → Save as PDF**. The output is identical on every operating system.
 
@@ -135,32 +141,38 @@ If you want a paper copy, open the HTML in a browser and use File → Print → 
 
 ## Quality Control Checks
 
+Each check produces CRITICAL / WARN / INFO / PASS. Checks marked **†** are
+*drafting-quality* checks that `--lightweight` (filing-identity-only) mode
+skips; everything else runs in both modes.
+
 ### 1. Cross-Document Consistency (8 checks + 1 conditional)
 
 Ensures information matches across all documents:
 
-| Check | Description |
-|-------|-------------|
-| Inventor Names | Names match exactly across ADS, declaration, assignment, and drawings. SKIPPED entries explicitly list which sources were excluded (missing, unreadable, or no names extractable). |
-| Application Title | Title is consistent across all documents |
-| Attorney Docket Number | Docket number matches across all documents |
-| Correspondence Address | Address aligns between ADS and other documents |
-| Assignee Name | Assignee name is consistent where referenced |
-| Filing Date Logic | Dates are logically consistent (no future dates, proper sequence) |
-| Inventor Count | Number of inventors matches across documents |
-| Citizenship/Residency | Inventor citizenship information is consistent |
-| **Inventor Names vs. Authoritative Source** *(conditional)* | If `inventors.txt`, `inventors.json`, or `*.eml` is present, all documents are cross-checked against that list. Diacritic-tolerant matching. |
+| # | Check | Description |
+|---|-------|-------------|
+| 1 | Inventor Names Consistency | Each ADS inventor's name (surname or full) appears in the declaration and assignment. SKIPPED entries list which sources were excluded; findings hedge to WARN when a document has image-only (scanned) pages. |
+| 2 | Application Title Consistency | ADS title appears in the specification |
+| 3 | Attorney Docket Number Consistency | Docket number matches across documents (Spec ↔ ADS for continuations) |
+| 4 | Correspondence Address Consistency | Address aligns between ADS and other documents |
+| 5 | Assignee Name Consistency | Assignee name is consistent where referenced |
+| 6 | Filing Date Consistency | Dates are logically consistent (no future dates, proper sequence) |
+| 7 | Number of Inventors Consistency | Inventor count matches across documents |
+| 8 | Inventor Citizenship/Residency Consistency | Residency populated for each inventor (XFA structured field) |
+| 71 | **Inventor Names vs. Authoritative Source** *(conditional)* | If `inventors.txt`, `inventors.json`, or `*.eml` is present, all documents are cross-checked against that list. Diacritic-tolerant matching. |
 
-### 2. Document Completeness (4 checks)
+### 2. Document Completeness (6 checks)
 
-Verifies all required components are present:
+Verifies all required components are present and the folder is clean:
 
-| Check | Description |
-|-------|-------------|
-| Required Documents Present | Specification, drawings, ADS, and declaration all exist |
-| ADS Required Fields | All mandatory ADS fields are completed |
-| Declaration Signatures | All inventors have signed the declaration |
-| Assignment Signatures | All assignors have signed (if assignment included) |
+| # | Check | Description |
+|---|-------|-------------|
+| 9 | All Required Documents Present | Specification, drawings, ADS, and declaration all exist (declaration eligible for missing-parts, below) |
+| 10 | ADS Required Fields Complete | All mandatory ADS fields are completed |
+| 11 | Declaration Signatures Present | Declaration carries inventor signatures (`/Name/` or `/s/`), not just form labels |
+| 12 | Assignment Signatures Present | Assignment carries assignor signatures |
+| 74 | Duplicate Files for Same Document Type | Warns when two files classify as the same document type |
+| 75 | Unrecognized Files in Folder | Surfaces files that didn't classify, so nothing is silently ignored |
 
 **Missing-Parts Filings (37 CFR §1.53(f)):** If the Declaration is the only thing missing, the tool flags it as a CRITICAL with `ACTION REQUIRED: confirm whether intentional`. Claude will ask you whether you're filing without the declaration on purpose. If yes, the issue is downgraded to a warning and you're reminded that:
 
@@ -169,52 +181,46 @@ Verifies all required components are present:
 
 Missing Specification, Drawings, or ADS are *not* eligible for missing-parts treatment and remain CRITICAL.
 
-### 3. Specification-Specific (15 checks)
+### 3. Specification-Specific (9 checks)
 
 Validates the patent specification document:
 
-| Check | Description |
-|-------|-------------|
-| Sequential Claim Numbering | Claims are numbered 1, 2, 3... without gaps |
-| Valid Claim Dependencies | Dependent claims reference existing claims |
-| Figure References Match | All FIG. references correspond to actual drawings |
-| Reference Numeral Consistency | Reference numbers used consistently throughout |
-| Abstract Present | Abstract section exists |
-| Abstract Length | Abstract is 150 words or fewer |
-| Background Section | Background of the invention is present |
-| Brief Description of Drawings | Brief description section exists |
-| Detailed Description | Detailed description section is present |
-| Claims Section | Claims are present and properly formatted |
-| Claim Antecedent Basis | "Said" and "the" terms have prior antecedent |
-| No Relative Terms | Avoids ambiguous terms like "about", "approximately" in claims |
-| Proper Claim Format | Claims follow proper USPTO format |
-| Independent Claim Structure | Independent claims are self-contained |
-| Dependent Claim Structure | Dependent claims properly reference and add limitations |
+| # | Check | Description |
+|---|-------|-------------|
+| 13 | Claim Numbering Sequential | Claims are numbered 1, 2, 3… without gaps (recovers numbers merged with page footers) |
+| 14 | Claim Dependency Validity | Dependent claims reference existing claims |
+| 15 | Figure Reference Validity | FIG. references in the spec resolve in the drawings |
+| 16 † | Reference Numeral Consistency | Reference numerals used consistently |
+| 17 † | Abstract Present and Length Compliant | Abstract exists and is ≤ 150 words |
+| 18 † | Background Section Present | Background section detected |
+| 19 † | Brief Description of Drawings Present | Brief-description section detected |
+| 20 † | Detailed Description Present | Detailed-description section detected |
+| 21 | Claims Section Present | Claims section is present |
 
-### 4. Drawings-Specific (5 checks)
+### 4. Drawings-Specific (4 checks)
 
 Validates the drawings/figures:
 
-| Check | Description |
-|-------|-------------|
-| Sequential Figure Numbering | Figures are numbered FIG. 1, FIG. 2... without gaps |
-| Figure Labels Present | All figures have proper labels |
-| Sheet Numbering | Sheets are numbered X/Y format |
-| Black and White Compliance | Drawings are black and white (or color petition noted) |
-| Legibility | Text and lines are clear and readable |
+| # | Check | Description |
+|---|-------|-------------|
+| 22 | Figure Numbering Sequential | Figures are numbered FIG. 1, FIG. 2… without gaps |
+| 23 | Drawing Margin Labels | Drawings carry the **title and docket number** in the margin — the strongest single "wrong file attached" identity check |
+| 24 † | Sheet Numbering Present | Sheets carry X/Y numbering |
+| 25 † | No Color Drawings | Flags color drawings (which need a petition) |
 
-### 5. ADS-Specific (5 + 1 conditional check)
+Image-only (scanned) drawings degrade gracefully to INFO rather than firing false CRITICALs.
+
+### 5. ADS-Specific (4 checks + 1 conditional)
 
 Validates the Application Data Sheet:
 
-| Check | Description |
-|-------|-------------|
-| Complete Inventor Addresses | Full mailing address for each inventor |
-| First Named Inventor | First inventor is clearly identified |
-| Entity Status | Small/micro/large entity status is specified |
-| Correspondence Address | Complete correspondence address provided |
-| Attorney/Agent Registration | Valid registration numbers for practitioners |
-| **Attorney vs. Correspondence Customer Number** *(XFA only)* | The two customer-number fields in the ADS (correspondence and attorney/agent) usually match. Warns on mismatch. |
+| # | Check | Description |
+|---|-------|-------------|
+| 27 | Inventor Addresses Complete | Full mailing address for each inventor |
+| 28 | First Named Inventor Identified | First inventor matches between ADS and POA |
+| 29 | Entity Status Specified | Small/micro/large entity status is specified |
+| 31 | Attorney/Agent Information | Registration numbers / customer number present |
+| 73 | **Attorney vs. Correspondence Customer Number** *(XFA only)* | The two customer-number fields in the ADS usually match; warns on mismatch |
 
 When the ADS is read via XFA, the report also includes an **"ADS Data Summary (Extracted from XFA)"** table near the end showing all extracted fields (title, docket #, entity status, both customer numbers, assignee + address, drawing sheet count, representative figure, domestic continuity, foreign priority, non-publication request, AIA transition statement, signer, registration number, signature date, form pages) plus an inventor table with name / residency / city / country / citizenship.
 
@@ -222,103 +228,121 @@ When the ADS is read via XFA, the report also includes an **"ADS Data Summary (E
 
 Validates the inventor declaration:
 
-| Check | Description |
-|-------|-------------|
-| All Inventors Named | Every inventor from ADS is on declaration |
-| Oath vs Declaration Format | Proper format is used consistently |
-| Application Reference | Declaration references correct application |
-| Execution Date | Date is logical (not future, not too old) |
+| # | Check | Description |
+|---|-------|-------------|
+| 32 | All Inventors Named in Declaration | Every ADS inventor appears on the declaration |
+| 33 | Oath vs Declaration Format | Recognized declaration/oath format |
+| 34 | Declaration References Correct Application | References the correct application/docket |
+| 35 | Declaration Date Logical | Execution date is logical (not future; continuation-aware) |
 
 ### 7. Assignment-Specific (5 checks)
 
 Validates the assignment document (if present):
 
-| Check | Description |
-|-------|-------------|
-| All Assignors Identified | All inventors listed as assignors |
-| Assignee Named | Assignee entity is clearly identified |
-| Application Reference | References correct application/docket number |
-| Execution Date | Date is logical and properly formatted |
-| Rights Transfer Language | Proper legal language for assignment |
+| # | Check | Description |
+|---|-------|-------------|
+| 36 | Assignment Identifies All Assignors | All inventors listed as assignors |
+| 37 | Assignment Identifies Assignee | Assignee entity is clearly identified |
+| 38 | Assignment References Correct Application | References correct application/docket number |
+| 39 | Assignment Execution Date Logical | Date is logical and properly formatted |
+| 40 | Assignment Covers Correct Rights | Proper rights-transfer language present |
 
-### 8. Power of Attorney-Specific (4 checks)
+### 8. Power of Attorney-Specific (3 checks)
 
 Validates the POA document (if present):
 
-| Check | Description |
-|-------|-------------|
-| Practitioners Listed | All attorneys/agents are named |
-| Registration Numbers | USPTO registration numbers included |
-| Address Match | Address matches ADS correspondence address |
-| Proper Signatures | Required signatures are present |
+| # | Check | Description |
+|---|-------|-------------|
+| 41 | POA Names All Practitioners | Practitioners / customer number identified |
+| 42 | POA Includes Registration Numbers | USPTO registration numbers present |
+| 44 | POA Properly Signed | Signature present (`/Name/` or `/s/`), hedged for image-only pages |
 
-### 9. USPTO Formatting Compliance (5 checks)
+### 9. USPTO Formatting Compliance (2 checks)
 
-Validates formatting requirements:
-
-| Check | Description |
-|-------|-------------|
-| Line Numbering | Lines numbered every 5 lines in specification |
-| Margin Compliance | Margins meet USPTO requirements (top: 2cm, left: 2.5cm, right: 2cm, bottom: 2cm) |
-| Font Size | Text is at least 12 point |
-| Double Spacing | Specification is double-spaced |
-| Page Numbering | Pages are numbered consecutively |
+| # | Check | Description |
+|---|-------|-------------|
+| 45 † | Specification Line Numbering | Notes presence/absence of line numbering (informational) |
+| 49 † | Page Numbering Present | Notes presence/absence of page numbering (INFO for `.docx` specs) |
 
 ### 10. Common Error Detection (5 checks)
 
 Catches frequent mistakes:
 
-| Check | Description |
-|-------|-------------|
-| No Placeholder Text | No [INSERT], TODO, XXX, TBD, or similar placeholders |
-| No Track Changes | No visible revision marks or comments |
-| Consistent Terminology | Same terms used consistently in claims |
-| Antecedent Basis | All claim terms have proper antecedent basis |
-| Terms Defined | Technical terms in claims are defined in specification |
+| # | Check | Description |
+|---|-------|-------------|
+| 50 | No Placeholder Text Remaining | No [INSERT], TODO, XXX, TBD, or similar placeholders |
+| 51 | No Track Changes or Comments Visible | No visible revision marks or comments |
+| 52 † | Consistent Use of Claim Terminology | Same terms used consistently in claims |
+| 53 † | Antecedent Basis in Claims | "Said"/"the" terms have a prior antecedent |
+| 54 † | No Undefined Claim Terms | Claim terms appear in the specification |
 
 ### 11. File Quality (4 checks)
 
 Validates PDF file properties:
 
-| Check | Description |
-|-------|-------------|
-| Text-Searchable | PDFs contain extractable text (not just images) |
-| Logical File Naming | Files have descriptive, consistent names |
-| No Password Protection | PDFs are not password protected |
-| Reasonable File Size | Files are not suspiciously large or small |
+| # | Check | Description |
+|---|-------|-------------|
+| 55 | PDF Text-Searchable | PDFs contain extractable text (not just images) |
+| 56 | File Naming Conventions | Notes file-naming consistency (informational) |
+| 57 | No Password Protection | PDFs are not password protected |
+| 58 | File Size Reasonable | Files are not zero-byte or suspiciously large/small |
 
 ### 12. Cross-Reference Validation (4 checks)
 
 Ensures internal references are valid:
 
-| Check | Description |
-|-------|-------------|
-| Claims Reference Specification | Claim elements appear in specification |
-| Summary Matches Claims | Summary scope aligns with claims |
-| Figure Count Consistency | Number of figures matches references |
-| Claim Count Verification | Claim count matches across documents |
+| # | Check | Description |
+|---|-------|-------------|
+| 59 † | Claims Reference Specification Elements | Claim elements appear in specification |
+| 60 † | Specification Summary Matches Claims | Summary scope aligns with claims |
+| 61 | Drawing Figure Count Matches Specification | Number of figures matches references |
+| 62 | Claim Count Verification | Claim count matches across documents |
 
-### 13. Priority/Related Applications (3 checks)
+### 13. Priority / Related Applications (4 checks)
 
 Validates priority claims:
 
-| Check | Description |
-|-------|-------------|
-| Priority Claim Consistency | Priority info matches across documents |
-| Related Application References | Related apps referenced consistently |
-| Foreign Priority Documentation | Foreign priority properly documented |
+| # | Check | Description |
+|---|-------|-------------|
+| 63 | Priority Claim Consistency | Priority info matches between spec and ADS |
+| 64 | Related Application References | Related apps referenced consistently |
+| 65 | Foreign Priority Documents | Foreign priority documented |
+| 81 | Priority Application Number Verification | Spec ↔ ADS application-number consistency (catches digit errors). When `USPTO_ODP_API_KEY` is set, additionally verifies each number's existence and filing date against USPTO public records; otherwise emits manual Patent Center / Google Patents verification links |
 
 ### 14. Final Quality (5 checks)
 
 Final review checks:
 
-| Check | Description |
-|-------|-------------|
-| No Obvious Typos | Critical fields free of typos |
-| Dates Properly Formatted | All dates in correct format |
-| Claim Length | No excessively long claims (readability) |
-| Specification Support | All claim limitations supported in spec |
-| Figure Reference Format | Consistent FIG. vs Figure usage |
+| # | Check | Description |
+|---|-------|-------------|
+| 66 † | No Obvious Typos in Critical Fields | Critical fields free of obvious typos |
+| 67 | Dates in Proper Format | All dates in a recognized format |
+| 68 † | No Excessively Long Claims | Flags very long claims (readability) |
+| 69 † | Specification References All Claims | Claim subject matter is supported in the spec |
+| 70 † | Consistent Figure Reference Format | Consistent FIG. vs Figure usage |
+
+### 15. Information Disclosure Statement / IDS (5 checks)
+
+IDS is optional under MPEP 609; this group emits a single PASS when no IDS is present, and otherwise sanity-checks the form:
+
+| # | Check | Description |
+|---|-------|-------------|
+| 76 | IDS Documents Present | Recognizes an IDS form and/or PTO/SB/08c written assertion |
+| 77 | IDS Form Signed | Practitioner signature and registration number present |
+| 78 | IDS Reference Counts | Counts cited US patents / publications / foreign documents / NPL |
+| 79 | Written Assertion Selection Made | Exactly one §1.17(v) checkbox is selected (CRITICAL if zero or more than one) |
+| 80 | Written Assertion Signed | Written assertion carries a signature |
+
+### 16. Sequence Listing (4 checks)
+
+Gated to biological applications — emits a single PASS for everything else:
+
+| # | Check | Description |
+|---|-------|-------------|
+| 82 | Sequence Listing Present | CRITICAL when the spec uses "SEQ ID NO" but no listing file is in the folder |
+| 83 | Sequence Listing Format | Requires WIPO ST.26 XML; CRITICAL for legacy ST.25 `.txt` or malformed XML |
+| 84 | Sequence Listing Internal Consistency | ST.26 title / docket / declared-vs-actual sequence count vs the filing package |
+| 85 | Biological Sequence Detection | Flags inline sequences at/above the listing threshold that lack a "SEQ ID NO" label |
 
 ## Report Severity Levels
 
@@ -367,14 +391,39 @@ When the script detects an XFA-based ADS, the console will show `✅ XFA extract
 5. **Archive the report** - Save the HTML report (or its print-to-PDF rendering) with the filing records
 6. **Human review is essential** - Automated checks supplement but don't replace attorney review
 
+## Development
+
+The repository ships a self-contained regression suite that drives the checks
+against in-memory fixtures (no real PDFs, no network), plus continuous
+integration that runs it on every pull request.
+
+```bash
+python3 tests/test_qc_patent_filing.py
+```
+
+The suite is location-independent and exits non-zero on any failure. CI
+(`.github/workflows/tests.yml`) runs it on every PR and on pushes to `main`, so
+a change that breaks or deletes a check is caught before merge. See
+`tests/README.md` for what's covered.
+
 ## File Structure
 
 ```
 patent-filing-qc/
-├── SKILL.md              # Claude Code skill definition
-├── README.md             # This file
-└── scripts/
-    └── qc_patent_filing.py   # Main QC script
+├── SKILL.md                      # Claude Code skill definition
+├── README.md                     # This file
+├── LICENSE                       # MIT
+├── requirements.txt              # Python dependencies
+├── docs/
+│   └── example-report.png        # Screenshot used in this README
+├── scripts/
+│   └── qc_patent_filing.py       # Main QC script
+├── tests/
+│   ├── test_qc_patent_filing.py  # Regression suite
+│   └── README.md                 # What the suite covers
+└── .github/
+    └── workflows/
+        └── tests.yml             # CI: runs the suite on every PR
 ```
 
 ## License
