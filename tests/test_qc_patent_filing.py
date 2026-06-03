@@ -743,6 +743,177 @@ def t():
     return True
 
 # ============================================================
+# 13. Conditional OCR name-recovery for signed forms (Declaration/Assignment)
+#     Replaces PR #11's "always OCR" with: OCR only when the ADS inventor
+#     names are missing from the extracted text, and REPLACE (not union).
+# ============================================================
+import qc_patent_filing as _qcmod
+
+# A pdfplumber-style boilerplate decl that captured the form template but NOT
+# the filled-in inventor names. Contains a token unique to this source so the
+# anti-union test can prove the result isn't a concatenation.
+_PDFPLUMBER_NONAMES = (
+    "DECLARATION (37 CFR 1.63)  UNIQUE_PDFPLUMBER_TOKEN\n"
+    "I hereby declare that I am an original inventor.\n"
+    "Legal name of inventor: ____________________\n"
+    "I hereby declare that I am an original inventor.\n"
+    "Legal name of inventor: ____________________\n"
+)
+# An OCR-style text that recovered both inventor names (CHEN, MEHTA from BASE_ADS).
+_OCR_WITHNAMES = (
+    "DECLARATION (37 CFR 1.63)\n"
+    "I hereby declare that I am an original inventor.\n"
+    "Sarah J. CHEN   /Sarah J. Chen/  2026-05-09\n"
+    "I hereby declare that I am an original inventor.\n"
+    "Aditya Vikram MEHTA   /Aditya Vikram Mehta/  2026-05-09\n"
+)
+
+def _with_ocr(qc, ocr_return, calls=None):
+    """Patch the module OCR flag on and stub _ocr_pdf_text to return a fixed
+    string (recording calls). Returns a restore() callable."""
+    prev = _qcmod.OCR_AVAILABLE
+    _qcmod.OCR_AVAILABLE = True
+    def stub(pdf_path, doc_type):
+        if calls is not None:
+            calls.append(doc_type)
+        return ocr_return
+    qc._ocr_pdf_text = stub
+    return lambda: setattr(_qcmod, 'OCR_AVAILABLE', prev)
+
+@test("CR13.1: native PDF with all names present → no OCR, text unchanged")
+def t():
+    qc = build_qc()
+    calls = []
+    restore = _with_ocr(qc, _OCR_WITHNAMES, calls)
+    try:
+        text_in = "Decl body Sarah J. CHEN ... Aditya Vikram MEHTA ... signed"
+        out = qc._maybe_ocr_for_names(WORK / "Decl.pdf", "Declaration", text_in)
+    finally:
+        restore()
+    if calls:
+        print(f"  ❌ OCR was called despite names present: {calls}"); return False
+    if out != text_in:
+        print(f"  ❌ text changed unexpectedly"); return False
+    return True
+
+@test("CR13.2: scanned, names missing, OCR recovers them → returns OCR text")
+def t():
+    qc = build_qc()
+    restore = _with_ocr(qc, _OCR_WITHNAMES)
+    try:
+        out = qc._maybe_ocr_for_names(WORK / "Decl.pdf", "Declaration", _PDFPLUMBER_NONAMES)
+    finally:
+        restore()
+    if out != _OCR_WITHNAMES:
+        print(f"  ❌ expected OCR text to replace boilerplate; got len={len(out)}"); return False
+    return True
+
+@test("CR13.3: names missing but OCR also misses → keep cleaner original")
+def t():
+    qc = build_qc()
+    restore = _with_ocr(qc, "OCR garbage with no inventor names at all\n")
+    try:
+        out = qc._maybe_ocr_for_names(WORK / "Decl.pdf", "Declaration", _PDFPLUMBER_NONAMES)
+    finally:
+        restore()
+    if out != _PDFPLUMBER_NONAMES:
+        print(f"  ❌ should have kept original when OCR didn't help"); return False
+    return True
+
+@test("CR13.4: non-signed doc type (Specification) never triggers OCR")
+def t():
+    qc = build_qc()
+    calls = []
+    restore = _with_ocr(qc, _OCR_WITHNAMES, calls)
+    try:
+        out = qc._maybe_ocr_for_names(WORK / "Spec.pdf", "Specification", _PDFPLUMBER_NONAMES)
+    finally:
+        restore()
+    if calls or out != _PDFPLUMBER_NONAMES:
+        print(f"  ❌ Specification should not OCR (calls={calls})"); return False
+    return True
+
+@test("CR13.5: no ADS data → no trigger, text unchanged")
+def t():
+    qc = build_qc(ads_data=None, ads_text="")
+    calls = []
+    restore = _with_ocr(qc, _OCR_WITHNAMES, calls)
+    try:
+        out = qc._maybe_ocr_for_names(WORK / "Decl.pdf", "Declaration", _PDFPLUMBER_NONAMES)
+    finally:
+        restore()
+    if calls or out != _PDFPLUMBER_NONAMES:
+        print(f"  ❌ no-ADS should not OCR (calls={calls})"); return False
+    return True
+
+@test("CR13.6: OCR unavailable → text unchanged even if names missing")
+def t():
+    qc = build_qc()
+    prev = _qcmod.OCR_AVAILABLE
+    _qcmod.OCR_AVAILABLE = False
+    try:
+        out = qc._maybe_ocr_for_names(WORK / "Decl.pdf", "Declaration", _PDFPLUMBER_NONAMES)
+    finally:
+        _qcmod.OCR_AVAILABLE = prev
+    if out != _PDFPLUMBER_NONAMES:
+        print(f"  ❌ should be unchanged when OCR unavailable"); return False
+    return True
+
+@test("CR13.7: ANTI-UNION — result is a single source, not a concatenation")
+def t():
+    qc = build_qc()
+    restore = _with_ocr(qc, _OCR_WITHNAMES)
+    try:
+        out = qc._maybe_ocr_for_names(WORK / "Decl.pdf", "Declaration", _PDFPLUMBER_NONAMES)
+    finally:
+        restore()
+    # The pdfplumber-only token must be ABSENT (proves it's a replace, not union)
+    if "UNIQUE_PDFPLUMBER_TOKEN" in out:
+        print(f"  ❌ result contains both sources (union!)"); return False
+    # Count-based checks must not double: "I hereby declare" appears 2x (OCR),
+    # never 4x (would happen under union).
+    n = len(re.findall(r'I hereby declare', out))
+    if n != 2:
+        print(f"  ❌ 'I hereby declare' count = {n}, expected 2 (union would give 4)"); return False
+    return True
+
+@test("CR13.8: partial — text has 1/2 names, OCR has 2/2 → OCR wins")
+def t():
+    qc = build_qc()
+    text_1of2 = "Decl body Sarah J. CHEN present but co-inventor missing\n"
+    restore = _with_ocr(qc, _OCR_WITHNAMES)
+    try:
+        out = qc._maybe_ocr_for_names(WORK / "Decl.pdf", "Declaration", text_1of2)
+    finally:
+        restore()
+    if out != _OCR_WITHNAMES:
+        print(f"  ❌ OCR (2/2) should replace text (1/2)"); return False
+    return True
+
+@test("CR13.9: _count_ads_inventors_present counts surnames correctly")
+def t():
+    qc = build_qc()
+    if qc._count_ads_inventors_present(_OCR_WITHNAMES) != 2:
+        print(f"  ❌ expected 2 in OCR text"); return False
+    if qc._count_ads_inventors_present(_PDFPLUMBER_NONAMES) != 0:
+        print(f"  ❌ expected 0 in boilerplate"); return False
+    if qc._count_ads_inventors_present("only Sarah CHEN here") != 1:
+        print(f"  ❌ expected 1 partial"); return False
+    return True
+
+@test("CR13.10: full pipeline still PASSES Check 1/7 on a clean baseline (no regression)")
+def t():
+    # Sanity: conditional-replace must not disturb the all-good baseline.
+    qc = build_qc()
+    qc.run_all_checks()
+    c1 = get_check(qc, 1); c7 = get_check(qc, 7)
+    if c1.severity not in (Severity.PASS, Severity.INFO):
+        print(f"  ❌ Check 1 = {c1.severity.value}"); return False
+    if c7.severity == Severity.CRITICAL:
+        print(f"  ❌ Check 7 unexpectedly CRITICAL: {c7.message[:80]}"); return False
+    return True
+
+# ============================================================
 # Run
 # ============================================================
 print("="*80); print(f"COMPREHENSIVE TEST SUITE — {len(TESTS)} tests"); print("="*80)

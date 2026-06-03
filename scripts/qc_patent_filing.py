@@ -146,7 +146,7 @@ class PatentFilingQC:
                 self.image_only_pages[doc_type] = image_only_count
             clean_text = text.strip()
             if len(clean_text) > 100 and "Please wait" not in clean_text[:200]:
-                return text
+                return self._maybe_ocr_for_names(pdf_path, doc_type, text)
         except ImportError:
             # pdfplumber not installed; fall through to PyPDF2.
             pass
@@ -166,7 +166,7 @@ class PatentFilingQC:
             # Check if we got meaningful text (more than just whitespace/boilerplate)
             clean_text = text.strip()
             if len(clean_text) > 100 and "Please wait" not in clean_text[:200]:
-                return text
+                return self._maybe_ocr_for_names(pdf_path, doc_type, text)
 
             # Drawings are almost always image-only; the figure-label checks
             # degrade gracefully. Don't waste 30+ s running OCR.
@@ -176,22 +176,14 @@ class PatentFilingQC:
             # Text extraction failed or returned minimal content - try OCR
             if OCR_AVAILABLE:
                 print(f"  ℹ️  {doc_type} appears to be image-based, attempting OCR...")
-                try:
-                    images = convert_from_path(pdf_path)
-                    ocr_text = ""
-                    for i, image in enumerate(images):
-                        page_text = pytesseract.image_to_string(image)
-                        ocr_text += page_text + "\n"
-
-                    if len(ocr_text.strip()) > 100:
-                        print(f"  ✅ OCR successful for {doc_type}")
-                        return ocr_text
-                    else:
-                        self._document_read_failure(doc_type, pdf_path, "OCR returned minimal text")
-                        return ""
-                except Exception as ocr_error:
-                    self._document_read_failure(doc_type, pdf_path, f"OCR failed: {str(ocr_error)}")
-                    return ""
+                ocr_text = self._ocr_pdf_text(pdf_path, doc_type)
+                if ocr_text is None:
+                    return ""  # failure already reported
+                if len(ocr_text.strip()) > 100:
+                    print(f"  ✅ OCR successful for {doc_type}")
+                    return ocr_text
+                self._document_read_failure(doc_type, pdf_path, "OCR returned minimal text")
+                return ""
             else:
                 self._document_read_failure(doc_type, pdf_path,
                     "Image-based PDF detected but OCR not available. "
@@ -201,6 +193,66 @@ class PatentFilingQC:
         except Exception as e:
             self._document_read_failure(doc_type, pdf_path, str(e))
             return ""
+
+    def _ocr_pdf_text(self, pdf_path: Path, doc_type: str) -> Optional[str]:
+        """OCR every page of a PDF into a single text string. Returns the OCR
+        text, or None on error (the failure is reported before returning).
+        Shared by the image-only fallback and the signed-form inventor-name
+        recovery path (_maybe_ocr_for_names)."""
+        try:
+            images = convert_from_path(pdf_path)
+            ocr_text = ""
+            for image in images:
+                ocr_text += pytesseract.image_to_string(image) + "\n"
+            return ocr_text
+        except Exception as ocr_error:
+            self._document_read_failure(doc_type, pdf_path, f"OCR failed: {str(ocr_error)}")
+            return None
+
+    def _count_ads_inventors_present(self, text: str) -> int:
+        """How many ADS inventors are findable in `text`, using the same
+        surname-or-full-name substring test as Check 1. Returns 0 when the ADS
+        inventor list isn't available."""
+        if not (self.ads_data and self.ads_data.get('inventors')):
+            return 0
+        norm = self._normalize_for_compare(text)
+        found = 0
+        for inv in self.ads_data['inventors']:
+            surname = self._normalize_for_compare(self._xfa_surname(inv))
+            full = self._normalize_for_compare(self._format_xfa_inventor(inv))
+            if (surname and surname in norm) or (full and full in norm):
+                found += 1
+        return found
+
+    def _maybe_ocr_for_names(self, pdf_path: Path, doc_type: str, text: str) -> str:
+        """Recover inventor names that text extractors drop from signed forms.
+
+        Signed Declaration/Assignment PDFs frequently extract as form-template
+        boilerplate with the filled-in inventor names missing — pdfplumber can
+        return thousands of chars yet zero inventor names. When the ADS gives us
+        the authoritative inventor list and the extracted text is missing one or
+        more of those names, re-extract the document via OCR.
+
+        If OCR recovers MORE of the names, REPLACE the text with the OCR
+        version. This is a deliberate replace, not a union: concatenating both
+        texts would double count-based checks (e.g. Check 7's "I hereby declare"
+        / signature tally) and let OCR noise spoof signature/date matches.
+        When OCR doesn't help, the cleaner original text is kept."""
+        if doc_type not in ('Declaration', 'Assignment') or not OCR_AVAILABLE:
+            return text
+        if not (self.ads_data and self.ads_data.get('inventors')):
+            return text  # no authoritative names to test against
+        total = len(self.ads_data['inventors'])
+        have = self._count_ads_inventors_present(text)
+        if have >= total:
+            return text  # extraction already captured every inventor name
+        print(f"  ℹ️  {doc_type}: only {have}/{total} inventor name(s) found in "
+              f"extracted text; running OCR to recover the rest...")
+        ocr_text = self._ocr_pdf_text(pdf_path, doc_type)
+        if ocr_text and self._count_ads_inventors_present(ocr_text) > have:
+            print(f"  ✅ OCR recovered additional inventor name(s) in {doc_type}")
+            return ocr_text
+        return text
 
     def _document_read_failure(self, doc_type: str, pdf_path: Path, reason: str):
         """Handle document read failure with helpful error message"""
@@ -1014,7 +1066,14 @@ class PatentFilingQC:
         # prefer the .pdf since that's what gets filed at the USPTO. (We keep
         # .docx support for the case where there's only a .docx.) For all other
         # slots, sort purely by confidence.
-        for doc_type, candidates in candidates_by_type.items():
+        # Parse the ADS before the Declaration/Assignment so its authoritative
+        # inventor list is available when those signed forms are extracted —
+        # _maybe_ocr_for_names() uses the ADS surnames to decide whether text
+        # extraction dropped the inventor names and OCR is needed.
+        for doc_type, candidates in sorted(
+            candidates_by_type.items(),
+            key=lambda kv: 0 if kv[0] == 'ADS' else 1,
+        ):
             if doc_type == 'Specification':
                 # PDF first, then by descending confidence
                 candidates.sort(key=lambda x: (
