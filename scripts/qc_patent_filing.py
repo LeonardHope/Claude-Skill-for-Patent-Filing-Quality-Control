@@ -1099,9 +1099,15 @@ class PatentFilingQC:
         # group so multi-word ALL-CAPS surnames like "JINGLEHEIMER SCHMIT" are
         # captured in full instead of being truncated at the first all-caps
         # token. Issue #7.
+        # The middle group accepts up to two tokens, each a full word
+        # ("Vikram") OR an initial-with-dot ("J."), so common forms like
+        # "Sarah J. CHEN" are captured. Without this, a middle-initial
+        # inventor is dropped while a full-middle co-inventor is kept,
+        # which can falsely flag the dropped name as missing from a
+        # document in the authoritative-source cross-check (Check 71).
         suffix_pattern = (
             r'Suffix\s*\n?\s*'
-            r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,}(?:\s+[A-Z]{2,})*'
+            r'([A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|[A-Z]\.)){0,2}\s+[A-Z]{2,}(?:\s+[A-Z]{2,})*'
             r'(?:\s+(?:Jr\.?|Sr\.?|II|III|IV))?)\s*\n'
         )
         matches = re.findall(suffix_pattern, text)
@@ -1121,7 +1127,7 @@ class PatentFilingQC:
         if assignor_section:
             section_text = assignor_section.group(1)
             # Find names in format "First LAST" or "First Middle LAST" at start of lines
-            name_pattern = r'^\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,}(?:\s+[A-Z]{2,})*)\s*$'
+            name_pattern = r'^\s*([A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|[A-Z]\.)){0,2}\s+[A-Z]{2,}(?:\s+[A-Z]{2,})*)\s*$'
             matches = re.findall(name_pattern, section_text, re.MULTILINE)
             for match in matches:
                 name = ' '.join(match.split())
@@ -1131,7 +1137,7 @@ class PatentFilingQC:
 
         # Pattern 3: Direct "First LAST" pattern in text (for various document formats)
         # Be more targeted - look for names followed by address or "c/o"
-        name_with_address = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,}(?:\s+[A-Z]{2,})*)\s*\n\s*c/o'
+        name_with_address = r'([A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|[A-Z]\.)){0,2}\s+[A-Z]{2,}(?:\s+[A-Z]{2,})*)\s*\n\s*c/o'
         matches = re.findall(name_with_address, text)
         for match in matches:
             name = ' '.join(match.split())
@@ -3245,7 +3251,7 @@ class PatentFilingQC:
                                       self.ads_text, re.DOTALL | re.IGNORECASE)
             if inv1_section:
                 section = inv1_section.group(1)
-                name_match = re.search(r'Suffix\s*\n\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,}(?:\s+[A-Z]{2,})*)', section)
+                name_match = re.search(r'Suffix\s*\n\s*([A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|[A-Z]\.)){0,2}\s+[A-Z]{2,}(?:\s+[A-Z]{2,})*)', section)
                 if name_match:
                     ads_first_inventor = name_match.group(1).strip()
 
@@ -3253,7 +3259,7 @@ class PatentFilingQC:
         # POA forms often need OCR to extract filled-in values
         # Pattern: Name format is "FirstName LASTNAME" where last name is ALL CAPS
         # Don't use IGNORECASE - we need to distinguish names from form labels
-        poa_inventor_pattern = r'First\s*Named\s*Inventor\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z]{2,}(?:\s+[A-Z]{2,})*)'
+        poa_inventor_pattern = r'First\s*Named\s*Inventor\s+([A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|[A-Z]\.)){0,2}\s+[A-Z]{2,}(?:\s+[A-Z]{2,})*)'
 
         # First try OCR since PyPDF2 often can't extract filled form fields
         if OCR_AVAILABLE and self.documents.get('Power of Attorney'):
