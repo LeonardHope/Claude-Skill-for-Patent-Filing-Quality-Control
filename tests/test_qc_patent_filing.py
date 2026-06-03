@@ -997,6 +997,101 @@ def t():
     return True
 
 # ============================================================
+# 15. Sequence-listing checks 82-85 (reapplied from PR #13, renumbered)
+# ============================================================
+def _seq_file(name, content):
+    p = WORK / name
+    p.write_text(content, encoding='utf-8')
+    return p
+
+_ST26_OK = ('<ST26SequenceListing>'
+            '<SequenceTotalQuantity>1</SequenceTotalQuantity>'
+            '<SequenceData sequenceIDNumber="1">ACGTACGTACGT</SequenceData>'
+            '</ST26SequenceListing>')
+_ST26_COUNT_MISMATCH = ('<ST26SequenceListing>'
+            '<SequenceTotalQuantity>3</SequenceTotalQuantity>'
+            '<SequenceData sequenceIDNumber="1">ACGT</SequenceData>'
+            '</ST26SequenceListing>')
+
+@test("SL15.1: non-biological filing → single Check 82 PASS, no 83/84/85")
+def t():
+    qc = build_qc()  # LLM patent — no biological terms
+    qc.run_all_checks()
+    c82 = get_check(qc, 82)
+    if not c82 or c82.severity != Severity.PASS:
+        print(f"  ❌ Check 82 = {c82.severity.value if c82 else 'absent'} (expected PASS gate)")
+        return False
+    if get_check(qc, 83) or get_check(qc, 84) or get_check(qc, 85):
+        print(f"  ❌ downstream seq checks fired on a non-biological filing")
+        return False
+    return True
+
+@test("SL15.2: SEQ ID NO in spec but no listing file → Check 82 CRITICAL")
+def t():
+    qc = build_qc(spec=BASE_SPEC + "\nThe polypeptide of SEQ ID NO: 1 is disclosed.\n")
+    qc.sequence_listing_files = []
+    qc.run_all_checks()
+    c82 = get_check(qc, 82)
+    if not c82 or c82.severity != Severity.CRITICAL:
+        print(f"  ❌ Check 82 = {c82.severity.value if c82 else 'absent'} (expected CRITICAL)")
+        return False
+    return True
+
+@test("SL15.3: .txt sequence listing only → Check 83 CRITICAL (ST.25 not accepted)")
+def t():
+    txt = _seq_file("seqlist.txt", "ST.25 plain text sequence listing\nSEQ ID NO 1\n")
+    qc = build_qc(spec=BASE_SPEC + "\nThe polypeptide of SEQ ID NO: 1.\n")
+    qc.sequence_listing_files = [txt]
+    qc.run_all_checks()
+    c83 = get_check(qc, 83)
+    if not c83 or c83.severity != Severity.CRITICAL:
+        print(f"  ❌ Check 83 = {c83.severity.value if c83 else 'absent'} (expected CRITICAL)")
+        return False
+    return True
+
+@test("SL15.4: valid ST.26 XML → Check 82 PASS (present) + Check 83 PASS (format)")
+def t():
+    xml = _seq_file("seqlist.xml", _ST26_OK)
+    qc = build_qc(spec=BASE_SPEC + "\nThe polypeptide of SEQ ID NO: 1.\n")
+    qc.sequence_listing_files = [xml]
+    qc.run_all_checks()
+    c82, c83 = get_check(qc, 82), get_check(qc, 83)
+    if not c82 or c82.severity != Severity.PASS:
+        print(f"  ❌ Check 82 = {c82.severity.value if c82 else 'absent'} (expected PASS)")
+        return False
+    if not c83 or c83.severity != Severity.PASS:
+        print(f"  ❌ Check 83 = {c83.severity.value if c83 else 'absent'} (expected PASS)")
+        return False
+    return True
+
+@test("SL15.5: above-threshold sequence, no SEQ ID NO → Check 85 WARNING")
+def t():
+    spec = (BASE_SPEC + "\nThe polynucleotide construct comprises the sequence "
+            "ACGTACGTACGTACGTACGT used in the assay.\n")  # 20 bases, no 'SEQ ID NO'
+    qc = build_qc(spec=spec)
+    qc.sequence_listing_files = []
+    qc.run_all_checks()
+    c85 = get_check(qc, 85)
+    if not c85 or c85.severity != Severity.WARNING:
+        print(f"  ❌ Check 85 = {c85.severity.value if c85 else 'absent'} (expected WARNING); "
+              f"{c85.message[:80] if c85 else ''}")
+        return False
+    return True
+
+@test("SL15.6: ST.26 XML count mismatch → Check 84 WARNING")
+def t():
+    xml = _seq_file("seqmismatch.xml", _ST26_COUNT_MISMATCH)
+    qc = build_qc(spec=BASE_SPEC + "\nThe polypeptide of SEQ ID NO: 1.\n")
+    qc.sequence_listing_files = [xml]
+    qc.run_all_checks()
+    c84 = get_check(qc, 84)
+    if not c84 or c84.severity != Severity.WARNING:
+        print(f"  ❌ Check 84 = {c84.severity.value if c84 else 'absent'} (expected WARNING); "
+              f"{c84.message[:80] if c84 else ''}")
+        return False
+    return True
+
+# ============================================================
 # Run
 # ============================================================
 print("="*80); print(f"COMPREHENSIVE TEST SUITE — {len(TESTS)} tests"); print("="*80)
