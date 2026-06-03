@@ -1092,6 +1092,74 @@ def t():
     return True
 
 # ============================================================
+# 16. Check 81 — priority application number verification (offline Branch B)
+# ============================================================
+# Force the offline branch (no ODP key) so these tests never hit the network.
+os.environ.pop('USPTO_ODP_API_KEY', None)
+
+def _ads_with_continuity(app_num='12/407,367'):
+    ads = copy.deepcopy(BASE_ADS)
+    ads['domestic_continuity_entries'] = [{
+        'application_number': app_num, 'continuation_type': 'CON',
+        'prior_application_number': '', 'date': '2009-03-19',
+        'patent_number': '', 'issue_date': '',
+    }]
+    return ads
+
+_SPEC_PRIORITY = (BASE_SPEC + "\nCROSS-REFERENCE TO RELATED APPLICATIONS\n"
+                  "This application claims the benefit of U.S. Application No. 12/407,367.\n")
+
+@test("PRI16.1: Check 81 PASS when spec priority app number matches ADS")
+def t():
+    qc = build_qc(ads_data=_ads_with_continuity('12/407,367'), spec=_SPEC_PRIORITY)
+    qc.run_all_checks()
+    c81 = [i for i in get_checks(qc, 81)]
+    consistency = next((i for i in c81 if 'Consistency' in (i.check_name or '')), None)
+    if not consistency or consistency.severity != Severity.PASS:
+        print(f"  ❌ Check 81 consistency = "
+              f"{consistency.severity.value if consistency else 'absent'} (expected PASS)")
+        return False
+    return True
+
+@test("PRI16.2: Check 81 CRITICAL on a digit error (spec vs ADS mismatch)")
+def t():
+    # ADS says 12/407,367; spec says 12/407,368 (transposed/changed digit)
+    spec_bad = _SPEC_PRIORITY.replace('12/407,367', '12/407,368')
+    qc = build_qc(ads_data=_ads_with_continuity('12/407,367'), spec=spec_bad)
+    qc.run_all_checks()
+    consistency = next((i for i in get_checks(qc, 81)
+                        if 'Consistency' in (i.check_name or '')), None)
+    if not consistency or consistency.severity != Severity.CRITICAL:
+        print(f"  ❌ Check 81 consistency = "
+              f"{consistency.severity.value if consistency else 'absent'} (expected CRITICAL)")
+        return False
+    return True
+
+@test("PRI16.3: Check 81 PASS/NA when no domestic continuity entries")
+def t():
+    qc = build_qc()  # BASE_ADS has empty domestic_continuity_entries
+    qc.run_all_checks()
+    c81 = get_checks(qc, 81)
+    if not c81:
+        print(f"  ❌ Check 81 did not fire at all"); return False
+    if any(i.severity == Severity.CRITICAL for i in c81):
+        print(f"  ❌ Check 81 unexpectedly CRITICAL with no continuity entries")
+        return False
+    return True
+
+@test("PRI16.4: Check 81 emits manual verification links (Branch B, no key)")
+def t():
+    qc = build_qc(ads_data=_ads_with_continuity('12/407,367'), spec=_SPEC_PRIORITY)
+    qc.run_all_checks()
+    links = next((i for i in get_checks(qc, 81)
+                  if 'Link' in (i.check_name or '')), None)
+    if not links:
+        print(f"  ❌ no verification-links issue emitted"); return False
+    if 'patentcenter.uspto.gov' not in (links.details or ''):
+        print(f"  ❌ Patent Center link missing from details"); return False
+    return True
+
+# ============================================================
 # Run
 # ============================================================
 print("="*80); print(f"COMPREHENSIVE TEST SUITE — {len(TESTS)} tests"); print("="*80)
