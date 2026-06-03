@@ -914,6 +914,89 @@ def t():
     return True
 
 # ============================================================
+# 14. PR #14 fixes: Check 13 footer-merge lookbehind, Check 28 POA regex
+# ============================================================
+# Spec with claims 1-4 where claim 3 is footer-merged against a docket that
+# ENDS IN A LETTER ("...US3."). The "3" is preceded by 'S', not a digit, so the
+# old (?<=\d) gap-fill missed it; (?<=\S) recovers it. Claim 3 must be interior
+# (claim 4 present) because gap-fill only fills gaps below max(detected).
+_SPEC_LETTER_MERGE = """LUM-0142US
+MEMORY-EFFICIENT INFERENCE FOR LARGE LANGUAGE MODELS
+BACKGROUND
+[0001] Body.
+BRIEF DESCRIPTION OF THE DRAWINGS
+[0020] FIG. 1 is a diagram of a system 100.
+[0021] FIG. 2 shows a controller 102.
+DETAILED DESCRIPTION
+[0030] FIG. 1 depicts a system 100 with controller 102.
+CLAIMS
+What is claimed is:
+1. A method comprising measuring sensitivity and selecting precision.
+2. The method of claim 1, wherein the measuring uses Hessian saliency.
+LUM-0142US3. The method of claim 2, further comprising offloading cache entries.
+4. The method of claim 3, wherein the offloading is dynamic.
+ABSTRACT
+A system and method for memory-efficient inference.
+"""
+
+@test("PR14.1: Check 13 recovers a claim footer-merged after a LETTER-ending docket")
+def t():
+    qc = build_qc(spec=_SPEC_LETTER_MERGE)
+    qc.run_all_checks()
+    issue = get_check(qc, 13)
+    if not issue or issue.severity != Severity.PASS:
+        print(f"  ❌ Check 13 = {issue.severity.value if issue else 'absent'} (expected PASS); "
+              f"{issue.message[:90] if issue else ''}")
+        return False
+    return True
+
+@test("PR14.2: Check 13 still CRITICAL when an interior claim is genuinely missing")
+def t():
+    # Claims 1, 2, 4 — no '3' anywhere. Widened lookbehind must not over-recover.
+    spec = _SPEC_LETTER_MERGE.replace(
+        "LUM-0142US3. The method of claim 2, further comprising offloading cache entries.\n", "")
+    qc = build_qc(spec=spec)
+    qc.run_all_checks()
+    issue = get_check(qc, 13)
+    if not issue or issue.severity != Severity.CRITICAL:
+        print(f"  ❌ Check 13 = {issue.severity.value if issue else 'absent'} (expected CRITICAL)")
+        return False
+    return True
+
+@test("PR14.3: Check 28 — two-column POA (title on next row) captures name only")
+def t():
+    # OCR-style stacked layout: label, then name, then the title of invention
+    # on the immediately following line. The old \s+ tail swallowed the title.
+    poa = ("POWER OF ATTORNEY (PTO/AIA/82B)\n"
+           "First Named Inventor\n"
+           "Sarah J. CHEN\n"
+           "MEMORY-EFFICIENT INFERENCE FOR LARGE LANGUAGE MODELS\n"
+           "Customer Number: 142810\n")
+    qc = build_qc(poa=poa)
+    qc.documents['Power of Attorney'] = None  # force poa_text path (skip OCR branch)
+    qc.run_all_checks()
+    issue = get_check(qc, 28)
+    if not issue or issue.severity != Severity.PASS:
+        print(f"  ❌ Check 28 = {issue.severity.value if issue else 'absent'} (expected PASS); "
+              f"{issue.message[:120] if issue else ''}")
+        return False
+    if 'MEMORY' in (issue.message or '') or 'INFERENCE' in (issue.message or ''):
+        print(f"  ❌ title words leaked into captured name: {issue.message[:120]}")
+        return False
+    return True
+
+@test("PR14.4: Check 28 — single-line POA layout still works (no regression)")
+def t():
+    qc = build_qc()  # BASE_POA is single-line "First Named Inventor Sarah J. CHEN"
+    qc.documents['Power of Attorney'] = None
+    qc.run_all_checks()
+    issue = get_check(qc, 28)
+    if not issue or issue.severity != Severity.PASS:
+        print(f"  ❌ Check 28 = {issue.severity.value if issue else 'absent'} (expected PASS)")
+        return False
+    return True
+
+# ============================================================
 # Run
 # ============================================================
 print("="*80); print(f"COMPREHENSIVE TEST SUITE — {len(TESTS)} tests"); print("="*80)
