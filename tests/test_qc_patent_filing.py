@@ -1115,3 +1115,6 @@ print("="*80)
 if fail_labels:
     print("Failures:")
     for f in fail_labels: print(f"  - {f}")
+
+# Exit non-zero on any failure so CI (and `python tests/...` locally) fails.
+sys.exit(1 if failed else 0)
