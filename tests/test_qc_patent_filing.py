@@ -1,0 +1,768 @@
+"""Comprehensive test suite for the QC skill (post PR #6/#9 sync).
+
+Sections:
+  1. Baseline (perfect filing → all PASS, no CRITICAL)
+  2. Failure-branch scenarios (each check's CRITICAL/WARN path)
+  3. Suffix handling (XFA 'last' vs split()[-1])
+  4. Missing-document fallbacks emit only real check IDs (no phantoms 26/30/43)
+  5. self.documents path-based replacements (verify the right Path is used)
+  6. Check 75 (unrecognized files) surfaces in report
+  7. Tightened signature checks (11, 12, 44) — labels alone don't pass
+  8. Check 8 residency uses XFA structured field
+  9. Check 49 .docx fallback emits INFO not false PASS
+ 10. IDS checks 76-80 (NEW — PR #6)
+ 11. Compound-surname extraction (NEW — PR #9)
+ 12. Rotated-drawings FIG handling (NEW — PR #6)
+"""
+import sys, copy, re, os, tempfile, atexit, shutil
+from pathlib import Path
+
+# Resolve the script dir relative to this test file so the suite is portable.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT / "scripts"))
+from qc_patent_filing import PatentFilingQC, Severity
+
+# Scratch working dir with placeholder PDFs. Several checks stat the files in
+# self.documents (e.g. Check 58 file-size), so the referenced paths must exist.
+WORK = Path(tempfile.mkdtemp(prefix="qc_test_"))
+atexit.register(lambda: shutil.rmtree(WORK, ignore_errors=True))
+for _n in ['Spec.pdf', 'Drawings.pdf', 'ADS.pdf', 'Decl.pdf', 'Asgn.pdf',
+           'POA.pdf', 'IDS.pdf', 'WA.pdf']:
+    (WORK / _n).write_bytes(b'%PDF-1.4 placeholder')
+
+# ============================================================
+# Test fixtures
+# ============================================================
+BASE_INVENTORS = [
+    {"prefix": "", "first": "Sarah", "middle": "J.", "last": "CHEN", "suffix": "",
+     "citizenship": "US", "residency": "us-residency",
+     "res_city": "Mountain View", "res_state": "CA", "res_country": "US",
+     "mail_address1": "1500 Lumina Way", "mail_address2": "",
+     "mail_city": "Mountain View", "mail_state": "CA",
+     "mail_postcode": "94043", "mail_country": "US"},
+    {"prefix": "", "first": "Aditya", "middle": "Vikram", "last": "MEHTA", "suffix": "",
+     "citizenship": "IN", "residency": "non-us-residency",
+     "res_city": "Bengaluru", "res_state": "", "res_country": "IN",
+     "mail_address1": "c/o Lumina AI India",
+     "mail_address2": "", "mail_city": "Bengaluru", "mail_state": "KA",
+     "mail_postcode": "560103", "mail_country": "IN"},
+]
+BASE_ADS = {
+    "inventors": BASE_INVENTORS,
+    "title": "MEMORY-EFFICIENT INFERENCE FOR LARGE LANGUAGE MODELS",
+    "docket_number": "LUM-0142US", "customer_number": "142810",
+    "attorney_customer_number": "142810", "form_pages": "9",
+    "small_entity": False, "application_type": "REGULAR",
+    "submission_type": "UTL", "drawing_sheets": "8",
+    "representative_figure": "1", "non_publication": False,
+    "aia_transition": False, "assignee_org": "LUMINA AI, INC.",
+    "assignee_address": {"address1": "1500 Lumina Way", "address2": "",
+                         "city": "Mountain View", "state": "CA",
+                         "postcode": "94043", "country": "US"},
+    "signer": {"first_name": "Robert", "last_name": "Holcomb",
+               "registration_number": "62198",
+               "signature": "/Robert M. Holcomb/", "date": "2026-05-09"},
+    "domestic_continuity_entries": [], "foreign_priority_entries": [],
+}
+BASE_SPEC = """LUM-0142US
+MEMORY-EFFICIENT INFERENCE FOR LARGE LANGUAGE MODELS
+BACKGROUND
+[0001] Modern LLMs use lots of memory.
+SUMMARY
+[0010] Embodiments provide a system 100 and a method.
+BRIEF DESCRIPTION OF THE DRAWINGS
+[0020] FIG. 1 is a block diagram of a system 100.
+[0021] FIG. 2 illustrates a controller 102.
+DETAILED DESCRIPTION
+[0030] FIG. 1 depicts a system 100 with a controller 102.
+CLAIMS
+What is claimed is:
+1. A method comprising: measuring sensitivity; selecting precision; quantizing weights.
+2. The method of claim 1, wherein the measuring uses Hessian saliency.
+3. The method of claim 1, further comprising offloading cache entries.
+ABSTRACT
+A system and method for memory-efficient inference dynamically selects per-layer precision and offloads cache tensors.
+"""
+BASE_DRAWINGS = "Sheet 1/2 FIG. 1 100 102\nSheet 2/2 FIG. 2 102 104\n"
+BASE_DECL = """DECLARATION (37 CFR 1.63)
+Attorney Docket Number: LUM-0142US
+I hereby declare that I am an original inventor.
+Inventor 1
+Suffix
+Sarah J. CHEN
+/Sarah J. Chen/  Date: 2026-05-09
+I hereby declare that I am an original inventor.
+Inventor 2
+Suffix
+Aditya Vikram MEHTA
+/Aditya Vikram Mehta/  Date: 2026-05-09
+"""
+BASE_ASGN = """ASSIGNMENT
+Attorney Docket Number: LUM-0142US
+WHEREAS, Assignor(s):
+Sarah J. CHEN
+Aditya Vikram MEHTA
+are the inventors of the invention entitled MEMORY-EFFICIENT INFERENCE
+FOR LARGE LANGUAGE MODELS described in U.S. Patent Application bearing
+Attorney Docket No. LUM-0142US, hereby sell, assign, and transfer unto
+Assignee, LUMINA AI, INC., the entire right, title and interest.
+/Sarah J. Chen/  Date: 2026-05-09
+/Aditya Vikram Mehta/  Date: 2026-05-09
+"""
+BASE_POA = """POWER OF ATTORNEY (PTO/AIA/82B)
+Attorney Docket Number: LUM-0142US
+Applicant: LUMINA AI, INC.
+Customer Number: 142810
+First Named Inventor Sarah J. CHEN
+/Catherine A. Reyes/  Registration Number: 73415  Date: 2025-09-12
+"""
+
+DOC_KEYS = ['Specification', 'Drawings', 'ADS', 'Declaration', 'Assignment',
+            'Power of Attorney', 'IDS', 'IDS Written Assertion']
+
+def build_qc(**overrides):
+    qc = PatentFilingQC(str(WORK))
+    default_files = {
+        "Specification": "Spec.pdf", "Drawings": "Drawings.pdf",
+        "ADS": "ADS.pdf", "Declaration": "Decl.pdf",
+        "Assignment": "Asgn.pdf", "Power of Attorney": "POA.pdf",
+    }
+    qc.report.files_found = overrides.get('files_found', default_files)
+    folder = WORK
+    # documents dict keeps all 8 canonical keys; absent ones → None
+    qc.documents = {k: None for k in DOC_KEYS}
+    for k, v in qc.report.files_found.items():
+        qc.documents[k] = (folder / v) if v else None
+    qc.ads_data = copy.deepcopy(overrides.get('ads_data', BASE_ADS))
+    qc.ads_is_xfa = bool(qc.ads_data)
+    qc.ads_text = qc._synthesize_ads_text_from_xfa(qc.ads_data) if qc.ads_data else (overrides.get('ads_text') or "")
+    qc.spec_text = overrides.get('spec', BASE_SPEC)
+    qc.drawings_text = overrides.get('drawings', BASE_DRAWINGS)
+    qc.declaration_text = overrides.get('decl', BASE_DECL)
+    qc.assignment_text = overrides.get('asgn', BASE_ASGN)
+    qc.poa_text = overrides.get('poa', BASE_POA)
+    qc.ids_text = overrides.get('ids_text', "")
+    qc.ids_assertion_text = overrides.get('ids_assertion_text', "")
+    qc.image_only_pages = overrides.get('image_only_pages', {})
+    qc.unrecognized_files = overrides.get('unrecognized_files', [])
+    return qc
+
+def get_check(qc, cid):
+    return next((i for i in qc.report.issues if i.check_id == cid), None)
+
+def get_checks(qc, cid):
+    return [i for i in qc.report.issues if i.check_id == cid]
+
+# ============================================================
+# Test runner
+# ============================================================
+TESTS = []
+
+def test(label):
+    def deco(fn):
+        TESTS.append((label, fn))
+        return fn
+    return deco
+
+def assert_severity(qc, cid, expected, label):
+    qc.run_all_checks()
+    issue = get_check(qc, cid)
+    if not issue:
+        print(f"  ❌ {label}: Check {cid} did not fire")
+        return False
+    if issue.severity != expected:
+        print(f"  ❌ {label}: Check {cid} = {issue.severity.value} (expected {expected.value})")
+        print(f"      msg: {issue.message[:90]}")
+        return False
+    return True
+
+# ============================================================
+# 1. Baseline
+# ============================================================
+@test("BASELINE: perfect filing → 0 CRITICAL")
+def t():
+    qc = build_qc()
+    qc.run_all_checks()
+    crit = [i for i in qc.report.issues if i.severity == Severity.CRITICAL]
+    if crit:
+        print(f"  ❌ Got {len(crit)} CRITICAL findings:")
+        for i in crit: print(f"      [{i.check_id}] {i.message[:80]}")
+        return False
+    return True
+
+# ============================================================
+# 2. Failure-branch scenarios
+# ============================================================
+@test("F2.1: Check 1 → CRITICAL when inventor missing from decl")
+def t():
+    qc = build_qc(decl=BASE_DECL.replace('Aditya Vikram MEHTA', '').replace('/Aditya Vikram Mehta/', ''))
+    return assert_severity(qc, 1, Severity.CRITICAL, "Check 1")
+
+@test("F2.2: Check 2 → CRITICAL when title not in spec")
+def t():
+    qc = build_qc(spec=BASE_SPEC.replace('MEMORY-EFFICIENT INFERENCE FOR LARGE LANGUAGE MODELS', 'TOTALLY DIFFERENT'))
+    return assert_severity(qc, 2, Severity.CRITICAL, "Check 2")
+
+@test("F2.3: Check 3 → CRITICAL when docket mismatch")
+def t():
+    ads = copy.deepcopy(BASE_ADS); ads['docket_number'] = 'XXX-9999US'
+    qc = build_qc(ads_data=ads)
+    return assert_severity(qc, 3, Severity.CRITICAL, "Check 3")
+
+@test("F2.4: Check 4 → CRITICAL when customer number mismatch")
+def t():
+    qc = build_qc(poa=BASE_POA.replace('142810', '999999'))
+    return assert_severity(qc, 4, Severity.CRITICAL, "Check 4")
+
+@test("F2.5: Check 5 → WARN when assignee not in assignment")
+def t():
+    qc = build_qc(asgn=BASE_ASGN.replace('LUMINA AI, INC.', 'TOTALLY DIFFERENT ENTITY'))
+    return assert_severity(qc, 5, Severity.WARNING, "Check 5")
+
+@test("F2.6: Check 7 → CRITICAL when decl count < ADS count")
+def t():
+    qc = build_qc(decl=BASE_DECL.split('I hereby declare')[0] + 'I hereby declare\n/Sarah J. Chen/\n')
+    return assert_severity(qc, 7, Severity.CRITICAL, "Check 7")
+
+@test("F2.7: Check 9 → CRITICAL when spec missing")
+def t():
+    qc = build_qc(spec='', files_found={
+        "Specification": None, "Drawings": "Drawings.pdf", "ADS": "ADS.pdf",
+        "Declaration": "Decl.pdf", "Assignment": "Asgn.pdf", "Power of Attorney": "POA.pdf"})
+    return assert_severity(qc, 9, Severity.CRITICAL, "Check 9")
+
+@test("F2.8: Check 9 → CRITICAL with confirm-prompt when only decl missing")
+def t():
+    qc = build_qc(decl='', files_found={
+        "Specification": "Spec.pdf", "Drawings": "Drawings.pdf", "ADS": "ADS.pdf",
+        "Declaration": None, "Assignment": "Asgn.pdf", "Power of Attorney": "POA.pdf"})
+    qc.run_all_checks()
+    issue = next((i for i in qc.report.issues if i.check_id == 9 and 'confirm' in i.message.lower()), None)
+    if not issue:
+        print(f"  ❌ No 'confirm' message in Check 9 findings"); return False
+    return True
+
+@test("F2.9: Check 17 → WARN when abstract over 150 words")
+def t():
+    long_abs = ' '.join(['word'] * 200) + '.'
+    qc = build_qc(spec=BASE_SPEC.replace(
+        'A system and method for memory-efficient inference dynamically selects per-layer precision and offloads cache tensors.',
+        long_abs))
+    return assert_severity(qc, 17, Severity.WARNING, "Check 17")
+
+@test("F2.10: Check 13 → CRITICAL when claim missing")
+def t():
+    qc = build_qc(spec=BASE_SPEC.replace('2. The method of claim 1', '5. The method of claim 1'))
+    return assert_severity(qc, 13, Severity.CRITICAL, "Check 13")
+
+@test("F2.11: Check 27 → WARN when inventor missing country")
+def t():
+    ads = copy.deepcopy(BASE_ADS); ads['inventors'][0]['mail_country'] = ''
+    qc = build_qc(ads_data=ads)
+    return assert_severity(qc, 27, Severity.WARNING, "Check 27")
+
+@test("F2.12: Check 32 → WARN when inventor not in declaration")
+def t():
+    qc = build_qc(decl=BASE_DECL.replace('Aditya Vikram MEHTA', '').replace('/Aditya Vikram Mehta/', ''))
+    return assert_severity(qc, 32, Severity.WARNING, "Check 32")
+
+@test("F2.13: Check 36 → CRITICAL when assignor missing")
+def t():
+    qc = build_qc(asgn=BASE_ASGN.replace('Aditya Vikram MEHTA', '').replace('/Aditya Vikram Mehta/', ''))
+    return assert_severity(qc, 36, Severity.CRITICAL, "Check 36")
+
+@test("F2.14: Check 50 → CRITICAL when placeholder text in spec")
+def t():
+    qc = build_qc(spec=BASE_SPEC.replace('A method comprising', '[INSERT CLAIM TEXT HERE]'))
+    return assert_severity(qc, 50, Severity.CRITICAL, "Check 50")
+
+@test("F2.15: Check 73 → WARN when attorney/correspondence customer # differ")
+def t():
+    ads = copy.deepcopy(BASE_ADS); ads['attorney_customer_number'] = '999999'
+    qc = build_qc(ads_data=ads)
+    return assert_severity(qc, 73, Severity.WARNING, "Check 73")
+
+@test("F2.16: Check 35 → CRITICAL when decl date in future")
+def t():
+    qc = build_qc(decl=BASE_DECL.replace('Date: 2026-05-09', 'Date: 2099-01-01'))
+    return assert_severity(qc, 35, Severity.CRITICAL, "Check 35")
+
+@test("F2.17: Check 39 → CRITICAL when assignment date in future")
+def t():
+    future = '/Sarah J. Chen/  Date: 2099-01-01\n/Aditya Vikram Mehta/  Date: 2099-01-01'
+    qc = build_qc(asgn=BASE_ASGN.replace('/Sarah J. Chen/  Date: 2026-05-09\n/Aditya Vikram Mehta/  Date: 2026-05-09', future))
+    return assert_severity(qc, 39, Severity.CRITICAL, "Check 39")
+
+@test("F2.18: Check 65 → INFO when foreign priority claim present")
+def t():
+    ads = copy.deepcopy(BASE_ADS)
+    ads['foreign_priority_entries'] = [{'application_number': 'EP12345', 'country': 'EP', 'priority_date': '2024-01-01', 'access_code': ''}]
+    qc = build_qc(ads_data=ads)
+    return assert_severity(qc, 65, Severity.INFO, "Check 65")
+
+@test("F2.19: Check 63 → WARN when priority in spec but not ADS")
+def t():
+    qc = build_qc(spec=BASE_SPEC + "\nThis application claims the benefit of priority to U.S. Provisional Application No. 63/000,000.")
+    return assert_severity(qc, 63, Severity.WARNING, "Check 63")
+
+# ============================================================
+# 3. Suffix handling
+# ============================================================
+@test("S3.1: _xfa_surname returns last field (not 'Jr.' suffix)")
+def t():
+    qc = PatentFilingQC(str(WORK))
+    if qc._xfa_surname({"first": "John", "last": "SMITH", "suffix": "Jr."}) != "SMITH":
+        print("  ❌ Jr. case"); return False
+    if qc._xfa_surname({"first": "Lukas", "last": "SCHMIDT", "suffix": "III"}) != "SCHMIDT":
+        print("  ❌ III case"); return False
+    return True
+
+@test("S3.2: Check 1 uses surname (not suffix) for cross-doc match")
+def t():
+    ads = copy.deepcopy(BASE_ADS)
+    ads['inventors'].append({
+        "prefix": "", "first": "Lukas", "middle": "", "last": "SCHMIDT", "suffix": "III",
+        "citizenship": "DE", "residency": "non-us-residency",
+        "res_city": "Munich", "res_state": "", "res_country": "DE",
+        "mail_address1": "Munich St", "mail_address2": "",
+        "mail_city": "Munich", "mail_state": "", "mail_postcode": "80539", "mail_country": "DE"})
+    decl = BASE_DECL + "Inventor 3\nLukas SCHMIDT III\n/Lukas Schmidt III/  Date: 2026-05-09\n"
+    asgn = BASE_ASGN.replace('Aditya Vikram MEHTA', 'Aditya Vikram MEHTA\nLukas SCHMIDT III')
+    qc = build_qc(ads_data=ads, decl=decl, asgn=asgn, drawings="")
+    qc.run_all_checks()
+    issue = get_check(qc, 1)
+    if issue.severity != Severity.PASS:
+        print(f"  ❌ Check 1 = {issue.severity.value}, expected PASS; {issue.message[:90]}")
+        return False
+    return True
+
+# ============================================================
+# 4. Missing-document fallbacks
+# ============================================================
+@test("M4.1: Spec-missing emits only IDs 13-21 (no phantoms 22-27)")
+def t():
+    qc = build_qc(spec='', files_found={
+        "Specification": None, "Drawings": "Drawings.pdf", "ADS": "ADS.pdf",
+        "Declaration": "Decl.pdf", "Assignment": "Asgn.pdf", "Power of Attorney": "POA.pdf"})
+    qc.run_all_checks()
+    ids = sorted({i.check_id for i in qc.report.issues
+                  if i.message == "Specification not found" and i.category == "Specification"})
+    if ids != list(range(13, 22)):
+        print(f"  ❌ got {ids}, expected {list(range(13, 22))}"); return False
+    return True
+
+@test("M4.2: ADS-missing emits only (27, 28, 29, 31) — no phantom 30")
+def t():
+    qc = build_qc(ads_data=None, ads_text='', files_found={
+        "Specification": "Spec.pdf", "Drawings": "Drawings.pdf", "ADS": None,
+        "Declaration": "Decl.pdf", "Assignment": "Asgn.pdf", "Power of Attorney": "POA.pdf"})
+    qc.run_all_checks()
+    ids = sorted({i.check_id for i in qc.report.issues
+                  if i.message == "ADS not found" and i.category == "ADS"})
+    if ids != [27, 28, 29, 31]:
+        print(f"  ❌ got {ids}, expected [27, 28, 29, 31]"); return False
+    return True
+
+@test("M4.3: POA-missing → no phantom 43")
+def t():
+    qc = build_qc(poa='', files_found={
+        "Specification": "Spec.pdf", "Drawings": "Drawings.pdf", "ADS": "ADS.pdf",
+        "Declaration": "Decl.pdf", "Assignment": "Asgn.pdf", "Power of Attorney": None})
+    qc.run_all_checks()
+    if 43 in {i.check_id for i in qc.report.issues}:
+        print(f"  ❌ phantom Check 43 emitted"); return False
+    return True
+
+@test("M4.4: Decl-missing emits 32-35")
+def t():
+    qc = build_qc(decl='', files_found={
+        "Specification": "Spec.pdf", "Drawings": "Drawings.pdf", "ADS": "ADS.pdf",
+        "Declaration": None, "Assignment": "Asgn.pdf", "Power of Attorney": "POA.pdf"})
+    qc.run_all_checks()
+    ids = sorted({i.check_id for i in qc.report.issues
+                  if i.category == "Declaration" and i.message == "Declaration not found"})
+    if ids != list(range(32, 36)):
+        print(f"  ❌ got {ids}, expected {list(range(32, 36))}"); return False
+    return True
+
+# ============================================================
+# 5. self.documents path-based replacements
+# ============================================================
+@test("P5.1: self.documents dict has all 8 canonical keys, all None pre-load")
+def t():
+    qc = PatentFilingQC(str(WORK))
+    if set(qc.documents.keys()) != set(DOC_KEYS):
+        print(f"  ❌ keys mismatch: {set(qc.documents.keys())}"); return False
+    if any(v is not None for v in qc.documents.values()):
+        print(f"  ❌ values should be None pre-load"); return False
+    return True
+
+@test("P5.2: Check 58 (file size) reads from self.documents not folder.glob")
+def t():
+    folder = (WORK / "zerofile"); folder.mkdir(exist_ok=True)
+    zero = folder / "zero.pdf"; zero.write_bytes(b'')
+    other = folder / "other.pdf"; other.write_bytes(b'%PDF-1.4 ok')
+    qc = PatentFilingQC(str(folder))
+    qc.documents = {k: other for k in DOC_KEYS}
+    qc.documents["Specification"] = zero
+    qc.documents["IDS"] = None; qc.documents["IDS Written Assertion"] = None
+    qc.report.files_found = {k: (v.name if v else None) for k, v in qc.documents.items()}
+    for a in ['spec_text','drawings_text','ads_text','declaration_text','assignment_text','poa_text']:
+        setattr(qc, a, "")
+    qc.run_all_checks()
+    issue = get_check(qc, 58)
+    if not issue or issue.severity != Severity.CRITICAL or '0 bytes' not in issue.message:
+        print(f"  ❌ Check 58 didn't catch 0-byte file: {issue.severity.value if issue else 'absent'}")
+        return False
+    return True
+
+# ============================================================
+# 6. Check 75 unrecognized files
+# ============================================================
+@test("U6.1: Check 75 fires WARNING with file names")
+def t():
+    qc = build_qc(unrecognized_files=[(WORK / "Notes.pdf"), (WORK / "Random.docx")])
+    qc.run_all_checks()
+    issue = get_check(qc, 75)
+    if not issue or issue.severity != Severity.WARNING:
+        print(f"  ❌ Check 75 = {issue.severity.value if issue else 'absent'}"); return False
+    if 'Notes.pdf' not in (issue.details or '') or 'Random.docx' not in (issue.details or ''):
+        print(f"  ❌ Filenames not in details"); return False
+    return True
+
+@test("U6.2: Check 75 does NOT fire when no unrecognized files")
+def t():
+    qc = build_qc(unrecognized_files=[])
+    qc.run_all_checks()
+    if get_check(qc, 75) is not None:
+        print(f"  ❌ Check 75 fired unexpectedly"); return False
+    return True
+
+# ============================================================
+# 7. Tightened signature checks
+# ============================================================
+@test("Sig7.1: Check 11 — form labels alone do NOT pass")
+def t():
+    return assert_severity(build_qc(decl="DECLARATION\nLegal name of inventor: Sarah CHEN\nsignature\n"),
+                           11, Severity.WARNING, "Check 11 form-label-only")
+
+@test("Sig7.2: Check 11 — /Name/ marker passes")
+def t():
+    return assert_severity(build_qc(decl="DECLARATION\n/Sarah J. Chen/  Date: 2026-05-09\n"),
+                           11, Severity.PASS, "Check 11 /Name/")
+
+@test("Sig7.3: Check 11 — /s/ Name marker passes")
+def t():
+    return assert_severity(build_qc(decl="DECLARATION\n/s/ Sarah Chen\n2026-05-09\n"),
+                           11, Severity.PASS, "Check 11 /s/ Name")
+
+@test("Sig7.4: Check 11 — image-only pages → INFO hedge")
+def t():
+    return assert_severity(build_qc(decl="DECLARATION\nForm body text only\n",
+                                    image_only_pages={'Declaration': 2}),
+                           11, Severity.INFO, "Check 11 image-only hedge")
+
+@test("Sig7.5: Check 12 — /Name/ marker passes (assignment)")
+def t():
+    return assert_severity(build_qc(asgn="ASSIGNMENT\n/Sarah Chen/  Date: 2026-05-09\n"),
+                           12, Severity.PASS, "Check 12 /Name/")
+
+@test("Sig7.6: Check 12 — image-only pages → INFO hedge")
+def t():
+    return assert_severity(build_qc(asgn="ASSIGNMENT\nForm body text only\n",
+                                    image_only_pages={'Assignment': 2}),
+                           12, Severity.INFO, "Check 12 image-only hedge")
+
+@test("Sig7.7: Check 44 — /Name/ marker passes")
+def t():
+    return assert_severity(build_qc(poa="POWER OF ATTORNEY\n/Catherine Reyes/  Date: 2025-09-12\n"),
+                           44, Severity.PASS, "Check 44 /Name/")
+
+@test("Sig7.8: Check 44 — image-only pages → INFO hedge")
+def t():
+    return assert_severity(build_qc(poa="POWER OF ATTORNEY\nForm body only\n",
+                                    image_only_pages={'Power of Attorney': 1}),
+                           44, Severity.INFO, "Check 44 image-only hedge")
+
+# ============================================================
+# 8. Check 8 residency
+# ============================================================
+@test("R8.1: Check 8 PASS when all inventors have residency in XFA")
+def t():
+    return assert_severity(build_qc(), 8, Severity.PASS, "Check 8 baseline")
+
+@test("R8.2: Check 8 WARN when one inventor missing residency")
+def t():
+    ads = copy.deepcopy(BASE_ADS); ads['inventors'][1]['residency'] = ''
+    return assert_severity(build_qc(ads_data=ads), 8, Severity.WARNING, "Check 8 missing residency")
+
+@test("R8.3: Check 8 doesn't double-count 'US Residency' inside 'non-US Residency'")
+def t():
+    qc = PatentFilingQC(str(WORK))
+    qc.documents = {k: None for k in DOC_KEYS}
+    qc.report.files_found = {k: 'x.pdf' for k in DOC_KEYS}
+    qc.ads_data = None
+    qc.ads_text = "Inventor 1\nnon-US Residency\nInventor 2\nnon-US Residency\n"
+    qc.spec_text = "BACKGROUND\nbody"; qc.drawings_text = ""; qc.declaration_text = ""
+    qc.assignment_text = ""; qc.poa_text = ""; qc.ids_text = ""; qc.ids_assertion_text = ""
+    qc.image_only_pages = {}; qc.unrecognized_files = []
+    qc.run_all_checks()
+    issue = get_check(qc, 8)
+    if issue.severity != Severity.PASS:
+        print(f"  ❌ Check 8 = {issue.severity.value}; {issue.message[:90]}"); return False
+    return True
+
+# ============================================================
+# 9. Check 49 .docx fallback
+# ============================================================
+@test("D9.1: Check 49 → INFO when spec is .docx")
+def t():
+    folder = (WORK / "docx_spec"); folder.mkdir(exist_ok=True)
+    docx = folder / "Spec.docx"; docx.write_bytes(b'PK\x03\x04 placeholder docx')
+    qc = PatentFilingQC(str(folder))
+    qc.documents = {k: None for k in DOC_KEYS}
+    qc.documents["Specification"] = docx
+    qc.report.files_found = {"Specification": "Spec.docx"}
+    qc.spec_text = BASE_SPEC
+    for a in ['drawings_text','ads_text','declaration_text','assignment_text','poa_text','ids_text','ids_assertion_text']:
+        setattr(qc, a, "")
+    qc.ads_data = None; qc.image_only_pages = {}; qc.unrecognized_files = []
+    qc.run_all_checks()
+    issue = get_check(qc, 49)
+    if not issue or issue.severity != Severity.INFO:
+        print(f"  ❌ Check 49 = {issue.severity.value if issue else 'absent'}, expected INFO"); return False
+    if 'docx' not in issue.message.lower():
+        print(f"  ❌ Check 49 message doesn't mention .docx: {issue.message[:80]}"); return False
+    return True
+
+# ============================================================
+# 10. IDS checks 76-80 (NEW — PR #6)
+# ============================================================
+def _ids_xfa(sig="/Robert M. Holcomb/", reg="62198", us_docs=("10123456","10222333"),
+             pubs=(), foreigns=(), npls=()):
+    """Build a minimal XFA-like IDS text blob the check_ids parser understands."""
+    parts = ["<ids-form>"]
+    if sig is not None or reg is not None:
+        parts.append("<electronic-signature><basic-signature><text-string>"
+                     + (sig or "") + "</text-string></basic-signature>"
+                     + (f"<registered-number>{reg}</registered-number>" if reg else "")
+                     + "</electronic-signature>")
+    if us_docs:
+        parts.append("<us-patent-cite>" +
+                     "".join(f"<us-doc-reference><doc-number>{d}</doc-number></us-doc-reference>"
+                             for d in us_docs) + "</us-patent-cite>")
+    if pubs:
+        parts.append("<us-pub-appl-cite>" +
+                     "".join(f"<us-doc-reference><doc-number>{d}</doc-number></us-doc-reference>"
+                             for d in pubs) + "</us-pub-appl-cite>")
+    if foreigns:
+        parts.append("<us-foreign-document-cite>" +
+                     "".join(f"<us-doc-reference><doc-number>{d}</doc-number></us-doc-reference>"
+                             for d in foreigns) + "</us-foreign-document-cite>")
+    if npls:
+        parts.append("<us-nplcit>" + "".join(f"<text>{n}</text>" for n in npls) + "</us-nplcit>")
+    parts.append("</ids-form>")
+    return "".join(parts)
+
+@test("IDS10.1: Check 76 PASS when no IDS present (optional)")
+def t():
+    qc = build_qc()  # no IDS in documents
+    return assert_severity(qc, 76, Severity.PASS, "Check 76 no-IDS")
+
+@test("IDS10.2: Check 76 INFO when IDS form present")
+def t():
+    qc = build_qc(ids_text=_ids_xfa())
+    qc.documents['IDS'] = (WORK / "IDS.pdf")
+    qc.run_all_checks()
+    issue = get_check(qc, 76)
+    if not issue or issue.severity != Severity.INFO:
+        print(f"  ❌ Check 76 = {issue.severity.value if issue else 'absent'}"); return False
+    return True
+
+@test("IDS10.3: Check 77 PASS when signature + reg no present")
+def t():
+    qc = build_qc(ids_text=_ids_xfa(sig="/Robert M. Holcomb/", reg="62198"))
+    qc.documents['IDS'] = (WORK / "IDS.pdf")
+    return assert_severity(qc, 77, Severity.PASS, "Check 77 signed")
+
+@test("IDS10.4: Check 77 WARN when signature absent")
+def t():
+    qc = build_qc(ids_text=_ids_xfa(sig="", reg=""))
+    qc.documents['IDS'] = (WORK / "IDS.pdf")
+    return assert_severity(qc, 77, Severity.WARNING, "Check 77 unsigned")
+
+@test("IDS10.5: Check 77 WARN when only partial (sig, no reg)")
+def t():
+    qc = build_qc(ids_text=_ids_xfa(sig="/Robert M. Holcomb/", reg=""))
+    qc.documents['IDS'] = (WORK / "IDS.pdf")
+    return assert_severity(qc, 77, Severity.WARNING, "Check 77 partial")
+
+@test("IDS10.6: Check 78 INFO with correct reference counts")
+def t():
+    qc = build_qc(ids_text=_ids_xfa(us_docs=("10123456","10222333","10999000"),
+                                    pubs=("20210000001",), npls=("Smith et al. 2020",)))
+    qc.documents['IDS'] = (WORK / "IDS.pdf")
+    qc.run_all_checks()
+    issue = get_check(qc, 78)
+    if not issue or issue.severity != Severity.INFO:
+        print(f"  ❌ Check 78 = {issue.severity.value if issue else 'absent'}"); return False
+    # 3 US patents + 1 pub + 1 NPL = 5 references
+    if '5 reference' not in issue.message:
+        print(f"  ❌ Check 78 count wrong: {issue.message[:100]}"); return False
+    return True
+
+@test("IDS10.7: Check 78 WARN when no references filled")
+def t():
+    qc = build_qc(ids_text=_ids_xfa(us_docs=()))  # signature only, no cites
+    qc.documents['IDS'] = (WORK / "IDS.pdf")
+    return assert_severity(qc, 78, Severity.WARNING, "Check 78 empty")
+
+@test("IDS10.8: Check 79 PASS when exactly one §1.17(v) box checked")
+def t():
+    qc = build_qc()
+    qc.documents['IDS Written Assertion'] = (WORK / "WA.pdf")
+    qc._extract_acroform_fields = lambda p: {"Check Box1": "/Yes", "Check Box2": "/Off",
+                                             "Check Box3": "/Off", "Check Box4": "/Off",
+                                             "Signature": "", "Name PrintTyped": ""}
+    return assert_severity(qc, 79, Severity.PASS, "Check 79 one box")
+
+@test("IDS10.9: Check 79 CRITICAL when multiple boxes checked")
+def t():
+    qc = build_qc()
+    qc.documents['IDS Written Assertion'] = (WORK / "WA.pdf")
+    qc._extract_acroform_fields = lambda p: {"Check Box1": "/Yes", "Check Box2": "/Yes",
+                                             "Check Box3": "/Off", "Check Box4": "/Off"}
+    return assert_severity(qc, 79, Severity.CRITICAL, "Check 79 multi-box")
+
+@test("IDS10.10: Check 79 CRITICAL when no box checked")
+def t():
+    qc = build_qc()
+    qc.documents['IDS Written Assertion'] = (WORK / "WA.pdf")
+    qc._extract_acroform_fields = lambda p: {"Check Box1": "/Off", "Check Box2": "/Off",
+                                             "Check Box3": "/Off", "Check Box4": "/Off"}
+    return assert_severity(qc, 79, Severity.CRITICAL, "Check 79 no-box")
+
+@test("IDS10.11: Check 80 PASS when WA signed (sig + name)")
+def t():
+    qc = build_qc()
+    qc.documents['IDS Written Assertion'] = (WORK / "WA.pdf")
+    qc._extract_acroform_fields = lambda p: {"Check Box1": "/Yes", "Signature": "/Robert Holcomb/",
+                                             "Name PrintTyped": "Robert Holcomb",
+                                             "Practitioner Registration Number if applicable": "62198",
+                                             "Date": "2026-05-09"}
+    return assert_severity(qc, 80, Severity.PASS, "Check 80 signed")
+
+@test("IDS10.12: Check 80 WARN when WA unsigned")
+def t():
+    qc = build_qc()
+    qc.documents['IDS Written Assertion'] = (WORK / "WA.pdf")
+    qc._extract_acroform_fields = lambda p: {"Check Box1": "/Yes", "Signature": "",
+                                             "Name PrintTyped": "", "Date": ""}
+    return assert_severity(qc, 80, Severity.WARNING, "Check 80 unsigned")
+
+# ============================================================
+# 11. Compound-surname extraction (NEW — PR #9)
+# ============================================================
+@test("CS11.1: extract_inventors captures multi-word ALL-CAPS surname")
+def t():
+    qc = PatentFilingQC(str(WORK))
+    text = "Suffix\nJohann JINGLEHEIMER SCHMIT\n"
+    names = qc.extract_inventors(text)
+    if not any('JINGLEHEIMER SCHMIT' in n for n in names):
+        print(f"  ❌ compound surname truncated: {names}"); return False
+    return True
+
+@test("CS11.2: compound surname + suffix both captured")
+def t():
+    qc = PatentFilingQC(str(WORK))
+    text = "Suffix\nMaria DE LA CRUZ III\n"
+    names = qc.extract_inventors(text)
+    hit = next((n for n in names if 'DE LA CRUZ' in n), None)
+    if not hit:
+        print(f"  ❌ compound surname not captured: {names}"); return False
+    return True
+
+@test("CS11.3: no-middle and full-middle names still work (no regression)")
+def t():
+    qc = PatentFilingQC(str(WORK))
+    for txt, want in [("Suffix\nSarah CHEN\n", "CHEN"),
+                      ("Suffix\nSarah Jane CHEN\n", "CHEN"),
+                      ("Suffix\nAditya Vikram MEHTA\n", "MEHTA")]:
+        names = qc.extract_inventors(txt)
+        if not any(want in n for n in names):
+            print(f"  ❌ {txt!r} → {names}"); return False
+    return True
+
+@test("CS11.4: middle-INITIAL name captured (e.g. 'Sarah J. CHEN')")
+def t():
+    qc = PatentFilingQC(str(WORK))
+    names = qc.extract_inventors("Suffix\nSarah J. CHEN\n")
+    if not any('CHEN' in n for n in names):
+        print(f"  ❌ middle-initial name dropped: {names}"); return False
+    # two middle initials
+    names2 = qc.extract_inventors("Suffix\nSarah J. K. CHEN\n")
+    if not any('CHEN' in n for n in names2):
+        print(f"  ❌ two-initial name dropped: {names2}"); return False
+    return True
+
+@test("CS11.5: partial-extraction false positive fixed (mixed middle styles)")
+def t():
+    # Decl mixes a middle-initial name with a full-middle name. Before the fix,
+    # only the full-middle name was captured → the other was falsely 'missing'.
+    qc = PatentFilingQC(str(WORK))
+    got = qc.extract_inventors("Suffix\nSarah J. CHEN\nSuffix\nAditya Vikram MEHTA\n")
+    if not (any('CHEN' in n for n in got) and any('MEHTA' in n for n in got)):
+        print(f"  ❌ both names not captured: {got}"); return False
+    return True
+
+# ============================================================
+# 12. Rotated-drawings FIG handling (NEW — PR #6)
+# ============================================================
+@test("RD12.1: _drawings_text_extractable accepts reversed 'N.GIF' rotated labels")
+def t():
+    qc = PatentFilingQC(str(WORK))
+    qc.drawings_text = "1.GIF some content 2.GIF more content"
+    if not qc._drawings_text_extractable():
+        print(f"  ❌ rotated (reversed) FIG labels not recognized as extractable"); return False
+    return True
+
+@test("RD12.2: _drawings_text_extractable accepts normal 'FIG. N' labels")
+def t():
+    qc = PatentFilingQC(str(WORK))
+    qc.drawings_text = "FIG. 1 ... FIG. 2 ..."
+    if not qc._drawings_text_extractable():
+        print(f"  ❌ normal FIG labels not recognized"); return False
+    return True
+
+@test("RD12.3: _drawings_text_extractable False for image-only (no FIG labels)")
+def t():
+    qc = PatentFilingQC(str(WORK))
+    qc.drawings_text = "just some scattered numbers 100 102 no fig markers"
+    if qc._drawings_text_extractable():
+        print(f"  ❌ image-only wrongly classified as extractable"); return False
+    return True
+
+# ============================================================
+# Run
+# ============================================================
+print("="*80); print(f"COMPREHENSIVE TEST SUITE — {len(TESTS)} tests"); print("="*80)
+passed = 0; failed = 0; fail_labels = []
+for label, fn in TESTS:
+    try:
+        ok = fn()
+    except Exception as e:
+        import traceback
+        print(f"  💥 {label}: EXCEPTION {type(e).__name__}: {e}")
+        traceback.print_exc()
+        ok = False
+    if ok:
+        print(f"  ✓ {label}"); passed += 1
+    else:
+        failed += 1; fail_labels.append(label)
+print()
+print("="*80)
+print(f"RESULTS: {passed} passed, {failed} failed (out of {len(TESTS)})")
+print("="*80)
+if fail_labels:
+    print("Failures:")
+    for f in fail_labels: print(f"  - {f}")
