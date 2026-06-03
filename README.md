@@ -92,6 +92,19 @@ python3 scripts/qc_patent_filing.py /path/to/filing/documents
 python3 scripts/qc_patent_filing.py /path/to/filing/documents --output-dir /path/to/reports
 ```
 
+### Lightweight (Filing-Identity-Only) Mode
+
+Skips drafting-quality checks (antecedent basis, terminology consistency,
+abstract length, optional USPTO formatting, etc.) and reports only the checks
+that catch a **wrong or mismatched file** at filing time — cross-document
+consistency, document completeness, drawings margin labels, figure/claim
+counts, placeholder text, and dates. Use when the specification has already
+been drafting-reviewed.
+
+```bash
+python3 scripts/qc_patent_filing.py /path/to/filing/documents --lightweight
+```
+
 ### Optional: Authoritative Inventor List
 
 If you drop any of these files into the filing folder, the script will use them as the canonical source of inventor names and run an additional cross-check (Check 71) against ADS / declaration / assignment / drawings:
