@@ -2598,11 +2598,14 @@ class PatentFilingQC:
         # method" is extracted as "A.B.0413. The method" — the "13" is invisible
         # to all whitespace-anchored patterns above. For each gap in the
         # detected claim sequence, check whether that claim number appears
-        # directly after another digit (the footer-merge signature).
+        # directly after another non-whitespace character (the footer-merge
+        # signature). The preceding char may be a digit ("...0413.") or a
+        # letter when the docket ends in one (e.g. "...XXXXXUS19."), so the
+        # lookbehind is (?<=\S), not (?<=\d).
         temp_nums = sorted(set(int(n) for n in claim_matches if 1 <= int(n) <= 100))
         if temp_nums:
             for g in set(range(1, max(temp_nums) + 1)) - set(temp_nums):
-                if re.search(rf'(?<=\d){g}\.\s+(?=\D)', claims_text):
+                if re.search(rf'(?<=\S){g}\.\s+(?=\D)', claims_text):
                     claim_matches.append(str(g))
             claim_matches = list(set(claim_matches))
 
@@ -3405,7 +3408,14 @@ class PatentFilingQC:
         # POA forms often need OCR to extract filled-in values
         # Pattern: Name format is "FirstName LASTNAME" where last name is ALL CAPS
         # Don't use IGNORECASE - we need to distinguish names from form labels
-        poa_inventor_pattern = r'First\s*Named\s*Inventor\s+([A-Z][a-z]+(?:\s+(?:[A-Z][a-z]+|[A-Z]\.)){0,2}\s+[A-Z]{2,}(?:\s+[A-Z]{2,})*)'
+        # Whitespace INSIDE the name capture is horizontal-only ([ \t]+), not
+        # \s+: in two-column OCR layouts the title of invention sits on the row
+        # immediately below the inventor, and \s+ (which matches newlines) let
+        # the greedy surname tail cross the line boundary and swallow title
+        # words, producing a false mismatch. An optional single newline between
+        # the label and the name value handles both single-line and stacked
+        # (two-column) OCR layouts.
+        poa_inventor_pattern = r'First\s*Named\s*Inventor[ \t]*\n?[ \t]*([A-Z][a-z]+(?:[ \t]+(?:[A-Z][a-z]+|[A-Z]\.)){0,2}[ \t]+[A-Z]{2,}(?:[ \t]+[A-Z]{2,})*)'
 
         # First try OCR since PyPDF2 often can't extract filled form fields
         if OCR_AVAILABLE and self.documents.get('Power of Attorney'):
