@@ -163,6 +163,9 @@ class PatentFilingQC:
         # Files that classified as "Unknown" — surfaced in the report so the
         # user knows about them.
         self.unrecognized_files: List[Path] = []
+        # Sequence listing files (.xml / .txt) found in the folder — used by
+        # the sequence-listing checks (82-85). Populated in load_documents().
+        self.sequence_listing_files: List[Path] = []
         
     def extract_pdf_text(self, pdf_path: Path, doc_type: str = "Document") -> str:
         """Extract text from a PDF file. Tries pdfplumber first (preserves
@@ -1186,6 +1189,16 @@ class PatentFilingQC:
             elif doc_type == 'IDS Written Assertion':
                 self.ids_assertion_text = self._extract_ids_text(best_path, 'IDS Written Assertion')
 
+        # Sequence listing files — .xml or .txt files with 'seq' or 'sequence'
+        # in the stem. These are not classified by the content classifier (they
+        # aren't PDF/docx), so scan them separately here.
+        for ext in ('*.xml', '*.txt'):
+            for p in self.folder_path.glob(ext):
+                stem_lower = p.stem.lower()
+                if 'seq' in stem_lower or 'sequence' in stem_lower:
+                    self.sequence_listing_files.append(p)
+                    print(f"  🧬 Possible sequence listing: {p.name}")
+
         # Optional: authoritative inventor list (inventors.json/txt or *.eml)
         self._load_authoritative_inventors()
 
@@ -1860,6 +1873,7 @@ class PatentFilingQC:
         self.check_assignment()
         self.check_poa()
         self.check_ids()
+        self.check_sequence_listing()
         self.check_formatting()
         self.check_common_errors()
         self.check_file_quality()
@@ -6078,6 +6092,482 @@ class PatentFilingQC:
                 Severity.WARNING, "Specification not found"
             )
     
+    # High-specificity biological-sequence indicators. If none appear in the
+    # extracted document text (and no sequence listing file is present), the
+    # sequence-listing checks (82-85) emit a single PASS and return, so
+    # non-biological filings don't pay for the pattern scans.
+    _BIOLOGICAL_GATE_TERMS = [
+        r'\bSEQ\s+ID\s+NO',
+        r'\bsequence\s+listing\b',
+        r'\bnucleotide\s+sequence\b',
+        r'\bamino\s+acid\s+sequence\b',
+        r'\bpolynucleotide\b',
+        r'\boligonucleotide\b',
+        r'\bpolypeptide\b',
+        r'\bnucleic\s+acid\b',
+        r'\bDNA\b',
+        r'\bRNA\b',
+    ]
+
+    def _is_biological_application(self) -> bool:
+        """Return True if the spec (or any extracted document text) contains
+        any high-specificity biological-sequence indicator.
+
+        Called once before all sequence listing checks. If False, every
+        check in check_sequence_listing() exits immediately with a single
+        PASS so non-biological applications don't pay the cost of running
+        pattern searches, and the report stays clean.
+        """
+        search_text = ' '.join(filter(None, [
+            self.spec_text,
+            self.ads_text,
+            self.drawings_text,
+        ]))
+        for term in self._BIOLOGICAL_GATE_TERMS:
+            if re.search(term, search_text, re.IGNORECASE):
+                return True
+        # Also treat the presence of a sequence listing file in the folder
+        # as sufficient to trigger all checks even if text extraction failed.
+        if self.sequence_listing_files:
+            return True
+        return False
+
+    def _find_seq_listing_xml(self) -> Optional[Path]:
+        """Return the first .xml sequence listing file, or None."""
+        return next((p for p in self.sequence_listing_files
+                     if p.suffix.lower() == '.xml'), None)
+
+    def _find_seq_listing_txt(self) -> Optional[Path]:
+        """Return the first .txt sequence listing file, or None."""
+        return next((p for p in self.sequence_listing_files
+                     if p.suffix.lower() == '.txt'), None)
+
+    def check_sequence_listing(self):
+        """Checks 82–85: Sequence listing presence, format, internal
+        consistency, and biological sequence detection.
+
+        All four checks are gated by _is_biological_application(). If the
+        application has no biological sequence indicators the entire section
+        emits a single PASS and returns — keeping the report clean for the
+        vast majority of non-biological filings.
+        """
+        CATEGORY = "Sequence Listing"
+
+        if not self._is_biological_application():
+            self.report.add_issue(
+                82, CATEGORY, "Sequence Listing (Gate Check)",
+                Severity.PASS,
+                "No biological sequence indicators detected — "
+                "sequence listing checks skipped"
+            )
+            return
+
+        seq_xml = self._find_seq_listing_xml()
+        seq_txt = self._find_seq_listing_txt()
+        has_seq_id_no = bool(re.search(
+            r'\bSEQ\s+ID\s+NO', self.spec_text, re.IGNORECASE))
+
+        # ── Check 82: Missing sequence listing ─────────────────────────────
+        if seq_xml or seq_txt:
+            self.report.add_issue(
+                82, CATEGORY, "Sequence Listing Present",
+                Severity.PASS,
+                f"Sequence listing file found: "
+                f"{(seq_xml or seq_txt).name}"
+            )
+        else:
+            # Gather signals that indicate a listing is needed
+            signals = []
+            if has_seq_id_no:
+                signals.append('"SEQ ID NO" found in specification')
+
+            # "sequence listing" near "filed herewith" / "xml" / "txt"
+            # on the first 3,000 characters of the spec (roughly page 1)
+            spec_page1 = self.spec_text[:3000] if self.spec_text else ''
+            if re.search(r'sequence\s+listing', spec_page1, re.IGNORECASE):
+                ctx_hits = re.findall(
+                    r'.{0,80}sequence\s+listing.{0,80}',
+                    spec_page1, re.IGNORECASE)
+                for hit in ctx_hits:
+                    if re.search(
+                            r'filed\s+herewith|\.xml\b|\.txt\b|'
+                            r'ST\.?26|attached|accompan',
+                            hit, re.IGNORECASE):
+                        signals.append(
+                            'Spec page 1 references a sequence listing '
+                            f'filed herewith or as an attachment: '
+                            f'"{hit.strip()}"')
+                        break
+
+            # ADS mentions sequence listing
+            if self.ads_text and re.search(
+                    r'sequence\s+listing', self.ads_text, re.IGNORECASE):
+                signals.append('ADS references a sequence listing')
+
+            if has_seq_id_no:
+                self.report.add_issue(
+                    82, CATEGORY, "Sequence Listing Present",
+                    Severity.CRITICAL,
+                    'Specification contains "SEQ ID NO" references but no '
+                    'sequence listing file was found in the filing folder.',
+                    'A sequence listing in ST.26 XML format (.xml) is '
+                    'required under 37 CFR § 1.821(c). Every application '
+                    'filed on or after 2022-07-01 must use XML format '
+                    'regardless of priority date.\n\n'
+                    'Signals detected:\n'
+                    + '\n'.join(f'  • {s}' for s in signals)
+                )
+            elif signals:
+                self.report.add_issue(
+                    82, CATEGORY, "Sequence Listing Present",
+                    Severity.WARNING,
+                    'Biological sequence indicators detected but no sequence '
+                    'listing file was found in the filing folder.',
+                    'Verify whether a sequence listing is required under '
+                    '37 CFR § 1.821. If sequences qualifying under '
+                    '§ 1.821(a) are present, a ST.26 XML listing is '
+                    'mandatory.\n\n'
+                    'Signals detected:\n'
+                    + '\n'.join(f'  • {s}' for s in signals)
+                )
+            else:
+                # Gate triggered but no concrete missing-listing signals
+                self.report.add_issue(
+                    82, CATEGORY, "Sequence Listing Present",
+                    Severity.INFO,
+                    'Biological terminology detected; no sequence listing '
+                    'file found. Verify whether one is required.',
+                )
+
+        # ── Check 83: Sequence listing format ──────────────────────────────
+        if seq_txt and not seq_xml:
+            self.report.add_issue(
+                83, CATEGORY, "Sequence Listing Format",
+                Severity.CRITICAL,
+                f'Sequence listing is a plain-text (.txt) file '
+                f'({seq_txt.name}), which is not the required format.',
+                'All applications filed on or after 2022-07-01 must use '
+                'WIPO ST.26 XML format (.xml) regardless of priority date '
+                '(37 CFR § 1.824(a)(2)). The ST.25 plain-text format is '
+                'no longer accepted. Convert the listing to ST.26 XML '
+                'before filing (WIPO\'s free "DAISY" tool can assist).'
+            )
+        elif seq_xml:
+            # Validate that the XML is well-formed and looks like ST.26
+            try:
+                tree = ET.parse(seq_xml)
+                root = tree.getroot()
+                root_tag = root.tag.lower()
+                st26_ns = 'http://www.wipo.int/standards/XMLSchema/SeqRes'
+                is_st26 = (
+                    'st26sequencelisting' in root_tag
+                    or st26_ns in root.tag
+                )
+                if is_st26:
+                    self.report.add_issue(
+                        83, CATEGORY, "Sequence Listing Format",
+                        Severity.PASS,
+                        f'Sequence listing is in ST.26 XML format '
+                        f'({seq_xml.name})'
+                    )
+                else:
+                    self.report.add_issue(
+                        83, CATEGORY, "Sequence Listing Format",
+                        Severity.WARNING,
+                        f'Sequence listing XML ({seq_xml.name}) parsed '
+                        f'successfully but does not appear to use the '
+                        f'ST.26 root element or namespace.',
+                        f'Root element found: <{root.tag}>. '
+                        f'Expected root containing "ST26SequenceListing" '
+                        f'or namespace "{st26_ns}". Confirm the listing '
+                        f'was generated with a ST.26-compliant tool.'
+                    )
+            except ET.ParseError as exc:
+                self.report.add_issue(
+                    83, CATEGORY, "Sequence Listing Format",
+                    Severity.CRITICAL,
+                    f'Sequence listing XML ({seq_xml.name}) is not '
+                    f'well-formed and cannot be parsed.',
+                    f'XML parse error: {exc}\n'
+                    f'A malformed XML file will be rejected by the USPTO '
+                    f'EFS-Web / Patent Center upload. Regenerate the '
+                    f'listing with a ST.26-compliant tool.'
+                )
+        elif not seq_txt and not seq_xml:
+            # No file — format check is moot; Check 78 already flagged it
+            pass
+
+        # ── Check 84: Sequence listing internal consistency ─────────────────
+        if seq_xml:
+            try:
+                tree = ET.parse(seq_xml)
+                root = tree.getroot()
+
+                # ST.26 uses a namespace; strip it for robust tag matching
+                def _local(tag: str) -> str:
+                    return re.sub(r'\{[^}]+\}', '', tag)
+
+                def _find_text(element, *local_names) -> str:
+                    """Recursively search for first matching local tag."""
+                    for child in element:
+                        if _local(child.tag) in local_names:
+                            return (child.text or '').strip()
+                        result = _find_text(child, *local_names)
+                        if result:
+                            return result
+                    return ''
+
+                # Also check direct attributes (some ST.26 generators put
+                # applicantFileReference as an attribute on the root)
+                def _find_attrib(element, *local_names) -> str:
+                    for name in local_names:
+                        val = element.attrib.get(name, '')
+                        if not val:
+                            # Try namespace-qualified variants
+                            for k, v in element.attrib.items():
+                                if _local(k) == name and v:
+                                    return v.strip()
+                    return ''
+
+                xml_title = (
+                    _find_text(root, 'inventionTitle', 'InventionTitle',
+                               'title', 'Title')
+                    or _find_attrib(root, 'inventionTitle')
+                )
+                xml_docket = (
+                    _find_text(root, 'applicantFileReference',
+                               'ApplicantFileReference',
+                               'fileReference', 'FileReference')
+                    or _find_attrib(root, 'applicantFileReference')
+                )
+                xml_seq_count_el = _find_text(
+                    root, 'sequenceTotalQuantity',
+                    'SequenceTotalQuantity', 'totalQuantity')
+                xml_seq_count = int(xml_seq_count_el) \
+                    if xml_seq_count_el.isdigit() else None
+
+                # Count actual SequenceData elements
+                actual_count = sum(
+                    1 for el in root.iter()
+                    if _local(el.tag) in ('SequenceData', 'sequenceData'))
+
+                issues_84 = []
+
+                # Title match
+                if xml_title:
+                    spec_title = ''
+                    if self.ads_data and self.ads_data.get('title'):
+                        spec_title = self.ads_data['title']
+                    elif self.ads_text:
+                        m = re.search(
+                            r'(?:title\s+of\s+invention|invention\s+title)'
+                            r'\s*[:\-]?\s*(.+)',
+                            self.ads_text, re.IGNORECASE)
+                        if m:
+                            spec_title = m.group(1).strip()[:200]
+                    if spec_title:
+                        norm = lambda s: re.sub(r'\s+', ' ', s).lower().strip()
+                        if norm(xml_title) != norm(spec_title):
+                            issues_84.append(
+                                f'Invention title mismatch:\n'
+                                f'  Sequence listing: "{xml_title}"\n'
+                                f'  ADS/Spec:         "{spec_title}"'
+                            )
+
+                # Docket match
+                if xml_docket and self.ads_text:
+                    docket_m = re.search(
+                        r'(?:docket|attorney\s+(?:docket|file|ref(?:erence)?)'
+                        r'|file\s+(?:no|number|ref))'
+                        r'\s*[:\-#]?\s*([\w\-./]+)',
+                        self.ads_text, re.IGNORECASE)
+                    ads_docket = docket_m.group(1).strip() if docket_m else ''
+                    if ads_docket:
+                        norm_d = lambda s: s.upper().replace(' ', '')
+                        if norm_d(xml_docket) != norm_d(ads_docket):
+                            issues_84.append(
+                                f'Docket/file reference mismatch:\n'
+                                f'  Sequence listing: "{xml_docket}"\n'
+                                f'  ADS:              "{ads_docket}"'
+                            )
+
+                # Sequence count declared vs. actual
+                if xml_seq_count is not None and actual_count > 0:
+                    if xml_seq_count != actual_count:
+                        issues_84.append(
+                            f'Sequence count mismatch: listing declares '
+                            f'{xml_seq_count} sequence(s) in '
+                            f'<sequenceTotalQuantity> but contains '
+                            f'{actual_count} <SequenceData> element(s).'
+                        )
+
+                if issues_84:
+                    self.report.add_issue(
+                        84, CATEGORY, "Sequence Listing Internal Consistency",
+                        Severity.WARNING,
+                        f'{len(issues_84)} consistency issue(s) found in '
+                        f'sequence listing metadata.',
+                        '\n\n'.join(issues_84)
+                    )
+                else:
+                    checked = []
+                    if xml_title:
+                        checked.append('invention title')
+                    if xml_docket:
+                        checked.append('docket/file reference')
+                    if xml_seq_count is not None:
+                        checked.append(
+                            f'sequence count ({actual_count} sequence(s))')
+                    desc = (', '.join(checked)
+                            if checked else 'metadata fields')
+                    self.report.add_issue(
+                        84, CATEGORY, "Sequence Listing Internal Consistency",
+                        Severity.PASS,
+                        f'Sequence listing {desc} consistent with filing '
+                        f'package'
+                    )
+            except ET.ParseError:
+                # Already flagged in Check 79; skip silently here
+                pass
+            except Exception as exc:
+                self.report.add_issue(
+                    84, CATEGORY, "Sequence Listing Internal Consistency",
+                    Severity.INFO,
+                    f'Could not fully parse sequence listing for '
+                    f'consistency check: {exc}'
+                )
+
+        # ── Check 85: Biological sequence pattern detection ─────────────────
+        # Two sub-goals:
+        #   A) Flag sequences above the listing threshold that lack SEQ ID NO
+        #      (WARNING — may indicate a required listing was omitted).
+        #   B) Note sequences below the threshold (INFO — arms the attorney
+        #      if USPTO incorrectly issues an office action requiring a listing).
+        #
+        # Strategy: context-gated to avoid false positives.
+        #   Pass 1 — find context windows (±600 chars) around the gate terms
+        #             already used by _is_biological_application().
+        #   Pass 2 — search only within those windows for sequence patterns.
+
+        if not self.spec_text:
+            self.report.add_issue(
+                85, CATEGORY, "Biological Sequence Detection",
+                Severity.INFO,
+                "Specification text could not be extracted — "
+                "sequence pattern scan skipped"
+            )
+            return
+
+        # 3-letter amino acid codes (standard 20)
+        _AA3 = (r'(?:Ala|Arg|Asn|Asp|Cys|Gln|Glu|Gly|His|Ile|'
+                r'Leu|Lys|Met|Phe|Pro|Ser|Thr|Trp|Tyr|Val)')
+        # Nucleotide bases (DNA/RNA)
+        _NUC = r'[AGCTUagctu]'
+
+        # Patterns: (compiled_regex, label, threshold_count, unit)
+        _SEQ_PATTERNS = [
+            # Nucleotides: 10+ consecutive bases (above threshold)
+            (re.compile(rf'{_NUC}{{10,}}'),
+             'nucleotide', 10, 'bases', 'above'),
+            # Nucleotides: 4–9 (below threshold — may not need a listing)
+            (re.compile(rf'{_NUC}{{4,9}}'),
+             'nucleotide', 4, 'bases', 'below'),
+            # Amino acids (3-letter): 4+ residues separated by hyphen/space
+            (re.compile(
+                rf'{_AA3}(?:[-\s]{_AA3}){{3,}}',
+                re.IGNORECASE),
+             'amino acid (3-letter)', 4, 'residues', 'above'),
+            # Amino acids (3-letter): 2–3 residues (below threshold)
+            (re.compile(
+                rf'{_AA3}(?:[-\s]{_AA3}){{1,2}}',
+                re.IGNORECASE),
+             'amino acid (3-letter)', 2, 'residues', 'below'),
+            # 1-letter amino acid detection omitted: almost all English letters
+            # are valid AA codes (only B, J, O, U, X, Z are not), so any run of
+            # 4+ letters in a biological context window will match — producing
+            # thousands of false hits from words like "characteristics".
+        ]
+
+        # Build context windows around gate-term hits in the spec
+        windows: List[str] = []
+        for term in self._BIOLOGICAL_GATE_TERMS:
+            for m in re.finditer(term, self.spec_text, re.IGNORECASE):
+                start = max(0, m.start() - 600)
+                end = min(len(self.spec_text), m.end() + 600)
+                windows.append(self.spec_text[start:end])
+
+        if not windows:
+            # Gate triggered by seq listing file presence, not spec text
+            self.report.add_issue(
+                85, CATEGORY, "Biological Sequence Detection",
+                Severity.INFO,
+                'Sequence listing file present but no biological terms '
+                'found in the specification text — could not scan for '
+                'inline sequences.'
+            )
+            return
+
+        combined_windows = '\n'.join(windows)
+
+        above_threshold: List[str] = []
+        below_threshold: List[str] = []
+
+        for pattern, kind, count, unit, threshold in _SEQ_PATTERNS:
+            hits = pattern.findall(combined_windows)
+            if not hits:
+                continue
+            # De-duplicate and keep the longest examples (up to 3)
+            unique_hits = sorted(set(hits), key=len, reverse=True)[:3]
+            examples = ', '.join(f'"{h}"' for h in unique_hits)
+            entry = (f'{kind}: {len(hits)} hit(s) '
+                     f'(≥{count} {unit}); e.g. {examples}')
+            if threshold == 'above':
+                above_threshold.append(entry)
+            else:
+                below_threshold.append(entry)
+
+        if above_threshold and not has_seq_id_no:
+            self.report.add_issue(
+                85, CATEGORY, "Biological Sequence Detection",
+                Severity.WARNING,
+                'Sequences at or above the listing threshold detected in '
+                'the specification without a corresponding "SEQ ID NO" '
+                'identifier. Verify whether a sequence listing is required '
+                'under 37 CFR § 1.821(a).',
+                'Sequences detected (within biological context windows):\n'
+                + '\n'.join(f'  • {e}' for e in above_threshold)
+            )
+        elif above_threshold and has_seq_id_no:
+            # Sequences present and labeled — expected, no issue
+            self.report.add_issue(
+                85, CATEGORY, "Biological Sequence Detection",
+                Severity.PASS,
+                'Sequences detected in specification and labeled with '
+                '"SEQ ID NO" — consistent with a sequence listing filing'
+            )
+        elif below_threshold and not above_threshold:
+            self.report.add_issue(
+                85, CATEGORY, "Biological Sequence Detection",
+                Severity.INFO,
+                'Short biological sequences detected in the specification '
+                '(below the mandatory listing threshold: < 4 amino acids '
+                'or < 10 nucleotides). No sequence listing is required '
+                'under 37 CFR § 1.821(a). Note this if USPTO issues an '
+                'office action requiring a listing.',
+                'Short sequences detected (within biological context '
+                'windows):\n'
+                + '\n'.join(f'  • {e}' for e in below_threshold)
+            )
+        else:
+            self.report.add_issue(
+                85, CATEGORY, "Biological Sequence Detection",
+                Severity.INFO,
+                'Biological terminology found; no discrete sequence '
+                'patterns detected by automated scan. Manual review '
+                'recommended if sequences are expected.'
+            )
+
+
     def generate_html_report(self, output_path: str):
         """Emit a self-contained HTML report with embedded CSS. Produces the
         same content as generate_markdown_report but with deterministic
