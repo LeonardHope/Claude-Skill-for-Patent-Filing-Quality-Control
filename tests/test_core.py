@@ -191,6 +191,42 @@ def t():
         print(f"  ❌ evidence present despite enrich=False"); return False
     return True
 
+SPEC_PDF = SAMPLE_PDF.parent / "Specification.pdf"
+DRAW_PDF = SAMPLE_PDF.parent / "Drawings.pdf"
+_TITLE = "MEMORY-EFFICIENT INFERENCE FOR LARGE LANGUAGE MODELS"
+
+@test("LOC.1: locate strips surrounding punctuation from tokens")
+def t():
+    from core.locate import _tok, locate
+    if (_tok("A088-0179US)"), _tok("CHEN,"), _tok("(Docket")) != ("a088-0179us", "chen", "docket"):
+        print("  ❌ _tok punctuation strip wrong"); return False
+    if not locate(DRAW_PDF, "LUM-0142US"):   # 'LUM-0142US)' in the PDF
+        print("  ❌ docket not located against trailing-paren token"); return False
+    return True
+
+@test("EVID.6: Check 2 gets a pdf_region for the title in the specification")
+def t():
+    res = Result(folder="/f", generated_at=GEN_AT,
+                 ads_data={"title": _TITLE, "docket_number": "LUM-0142US"},
+                 issues=[Issue(2, "Cross-Document Consistency",
+                               "Application Title Consistency", "PASS", "ok")])
+    enrich(res, {"Specification": SPEC_PDF})
+    regions = [e for e in res.issues[0].evidence if e.locator.type == "pdf_region"]
+    if not regions or regions[0].doc_type != "Specification":
+        print(f"  ❌ no spec pdf_region: {res.issues[0].evidence}"); return False
+    return True
+
+@test("EVID.7: Check 23 gets a pdf_region for the docket in the drawings margin")
+def t():
+    res = Result(folder="/f", generated_at=GEN_AT,
+                 ads_data={"docket_number": "LUM-0142US"},
+                 issues=[Issue(23, "Drawings", "All Figures Have Labels", "PASS", "ok")])
+    enrich(res, {"Drawings": DRAW_PDF})
+    regions = [e for e in res.issues[0].evidence if e.locator.type == "pdf_region"]
+    if not regions or regions[0].doc_type != "Drawings":
+        print(f"  ❌ no drawings pdf_region: {res.issues[0].evidence}"); return False
+    return True
+
 
 # ---- run -------------------------------------------------------------------
 print("=" * 70)

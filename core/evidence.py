@@ -23,6 +23,22 @@ from .result import Result, Evidence, Locator
 _NAME_DOCS = ("Declaration", "Assignment")
 
 
+def _locate_flex(path, phrase, *, min_words=4):
+    """Locate `phrase`, falling back to progressively shorter prefixes. Useful
+    for long phrases (e.g. an invention title) that may not extract as one
+    contiguous run — a leading chunk still anchors the highlight."""
+    hit = locate(path, phrase)
+    if hit:
+        return hit
+    words = phrase.split()
+    while len(words) > min_words:
+        words = words[:-1]
+        hit = locate(path, " ".join(words))
+        if hit:
+            return hit
+    return None
+
+
 def _surnames(ads_data: Optional[dict]):
     if not ads_data:
         return []
@@ -76,6 +92,28 @@ def enrich(result: Result, doc_paths: Dict[str, Path]) -> Result:
         for surname, full in _surnames(result.ads_data):
             c1.evidence.extend(_inventor_evidence(surname, full, doc_paths))
 
+    # Check 2 — title consistency -> highlight the ADS title in the spec, plus
+    # the ADS title as a structured value.
+    c2 = by_id.get(2)
+    if c2 is not None and result.ads_data:
+        title = (result.ads_data.get("title") or "").strip()
+        if title:
+            spec = doc_paths.get("Specification")
+            hit = _locate_flex(spec, title) if spec else None
+            if hit:
+                c2.evidence.append(Evidence(
+                    doc_type="Specification",
+                    locator=Locator(type="pdf_region", page=hit["page"], bbox=hit["bbox"]),
+                    snippet=hit["matched"], expected=title, actual=hit["matched"],
+                    kind="match", label="ADS title located in the specification",
+                ))
+            c2.evidence.append(Evidence(
+                doc_type="ADS",
+                locator=Locator(type="xfa_field", field_path="title"),
+                snippet=title, actual=title, kind="value",
+                label="ADS invention title (structured XFA field)",
+            ))
+
     # Check 3 — attorney docket -> xfa_field receipt from the ADS value.
     c3 = by_id.get(3)
     if c3 is not None and result.ads_data:
@@ -86,6 +124,21 @@ def enrich(result: Result, doc_paths: Dict[str, Path]) -> Result:
                 locator=Locator(type="xfa_field", field_path="docket_number"),
                 snippet=docket, actual=docket, kind="value",
                 label="ADS attorney docket number (structured XFA field)",
+            ))
+
+    # Check 23 — drawings margin labels -> highlight the docket number where it
+    # appears in the drawings margin (the strongest "wrong file" identity mark).
+    c23 = by_id.get(23)
+    if c23 is not None and result.ads_data:
+        docket = (result.ads_data.get("docket_number") or "").strip()
+        drawings = doc_paths.get("Drawings")
+        hit = locate(drawings, docket) if (docket and drawings) else None
+        if hit:
+            c23.evidence.append(Evidence(
+                doc_type="Drawings",
+                locator=Locator(type="pdf_region", page=hit["page"], bbox=hit["bbox"]),
+                snippet=hit["matched"], expected=docket, actual=hit["matched"],
+                kind="match", label="Docket number found in the drawings margin",
             ))
 
     return result
