@@ -264,6 +264,63 @@ def t():
     return True
 
 
+# ---- report frontend (consumes Result) -------------------------------------
+from report.html import render  # noqa: E402
+
+def _report_result():
+    return Result(
+        folder="/f", generated_at=GEN_AT,
+        ads_data={"title": "WIDGET", "docket_number": "LUM-0142US",
+                  "inventors": [{"last": "CHEN"}]},
+        documents=[DocumentRef("Declaration", "D.pdf", "D.pdf", "pdf", 2)],
+        issues=[
+            Issue(1, "Cross-Document Consistency", "Inventor Names Consistency",
+                  "PASS", "all present", evidence=[Evidence(
+                      "Declaration", Locator("pdf_region", page=0, bbox=[1, 2, 3, 4]),
+                      snippet="CHEN", kind="match", label="surname CHEN found")]),
+            Issue(9, "Document Completeness", "All Required Documents Present",
+                  "CRITICAL", "Spec missing"),
+        ])
+
+@test("REP.1: render produces HTML with severity counts")
+def t():
+    h = render(_report_result())
+    if "<html" not in h or "Patent Filing QC Report" not in h:
+        print("  ❌ not an HTML report"); return False
+    if "1 Pass" not in h or "1 Critical" not in h:
+        print("  ❌ counts pills missing/incorrect"); return False
+    return True
+
+@test("REP.2: report is evidence-aware (receipts rendered)")
+def t():
+    h = render(_report_result())
+    if "receipt" not in h or "surname CHEN found" not in h:
+        print("  ❌ evidence receipt not rendered"); return False
+    if "Declaration p.1" not in h:
+        print("  ❌ receipt location not rendered"); return False
+    return True
+
+@test("REP.3: ADS summary + documents table appear")
+def t():
+    h = render(_report_result())
+    if "ADS Data Summary" not in h or "LUM-0142US" not in h:
+        print("  ❌ ADS summary missing"); return False
+    if "Documents Found" not in h or "D.pdf" not in h:
+        print("  ❌ documents table missing"); return False
+    return True
+
+@test("REP.4: content is HTML-escaped (no injection)")
+def t():
+    res = Result(folder="/f", generated_at=GEN_AT, issues=[
+        Issue(1, "C", "N", "INFO", "<script>alert(1)</script>")])
+    h = render(res)
+    if "<script>alert(1)</script>" in h:
+        print("  ❌ message not escaped"); return False
+    if "&lt;script&gt;" not in h:
+        print("  ❌ expected escaped form not found"); return False
+    return True
+
+
 # ---- run -------------------------------------------------------------------
 print("=" * 70)
 print(f"CORE SCHEMA + ADAPTER TESTS — {len(TESTS)} tests")
