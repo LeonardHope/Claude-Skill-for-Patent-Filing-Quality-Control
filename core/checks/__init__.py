@@ -15,8 +15,12 @@ from .cross_document import (  # noqa: F401
     check_correspondence, check_assignee_name, check_filing_date,
     check_inventor_count, check_residency,
 )
+from .completeness import (  # noqa: F401
+    check_required_documents, check_ads_fields,
+    check_declaration_signatures, check_assignment_signatures,
+)
 
-# id -> callable(qc) -> Issue ; checks core/checks now owns.
+# id -> callable(qc) -> Issue | list[Issue] ; checks core/checks now owns.
 REGISTRY = {
     1: check_inventor_names,
     2: check_application_title,
@@ -26,6 +30,10 @@ REGISTRY = {
     6: check_filing_date,
     7: check_inventor_count,
     8: check_residency,
+    9: check_required_documents,
+    10: check_ads_fields,
+    11: check_declaration_signatures,
+    12: check_assignment_signatures,
 }
 
 # Check IDs owned by core/checks (skipped in the engine when run via core).

@@ -275,6 +275,87 @@ def t():
         print(f"  ❌ severity = {issue.severity}"); return False
     return True
 
+# ---- Document Completeness (Checks 9-12) -----------------------------------
+import tempfile  # noqa: E402
+from core.checks.completeness import (check_required_documents, check_ads_fields,  # noqa: E402
+                                      check_declaration_signatures,
+                                      check_assignment_signatures)
+
+def _qc_files(files_found, folder=None, **attrs):
+    qc = _qc(**attrs)
+    qc.report.files_found = files_found
+    if folder:
+        from pathlib import Path
+        qc.folder_path = Path(folder)
+    return qc
+
+_ALL = {"Specification": "s.pdf", "Drawings": "d.pdf", "ADS": "a.pdf",
+        "Declaration": "dec.pdf"}
+
+@test("MIG9.1: Check 9 PASS when all required documents present")
+def t():
+    out = check_required_documents(_qc_files(_ALL))
+    if [i.severity for i in out] != ["PASS"]:
+        print(f"  ❌ {[(i.severity) for i in out]}"); return False
+    return True
+
+@test("MIG9.2: Check 9 CRITICAL (blocking) when the spec is missing")
+def t():
+    ff = dict(_ALL); ff["Specification"] = None
+    out = check_required_documents(_qc_files(ff))
+    if not any(i.severity == "CRITICAL" and "Specification" in i.message for i in out):
+        print(f"  ❌ {[(i.severity, i.message[:40]) for i in out]}"); return False
+    return True
+
+@test("MIG9.3: Check 9 missing-parts CRITICAL when only declaration missing, no scan")
+def t():
+    ff = dict(_ALL); ff["Declaration"] = None
+    with tempfile.TemporaryDirectory() as d:        # empty folder -> no declar file
+        out = check_required_documents(_qc_files(ff, folder=d))
+    if not any(i.severity == "CRITICAL" and "intentional" in i.message for i in out):
+        print(f"  ❌ {[(i.severity, i.message[:40]) for i in out]}"); return False
+    return True
+
+@test("MIG9.4: Check 9 WARNING when a 'declar'-named scan is present")
+def t():
+    ff = dict(_ALL); ff["Declaration"] = None
+    with tempfile.TemporaryDirectory() as d:
+        from pathlib import Path
+        (Path(d) / "X000-0000US-Declaration.pdf").write_bytes(b"%PDF-1.4 x")
+        out = check_required_documents(_qc_files(ff, folder=d))
+        sev = [i.severity for i in out]
+    if "WARNING" not in sev:
+        print(f"  ❌ {sev}"); return False
+    return True
+
+@test("MIG10.1: Check 10 CRITICAL when ADS text absent; PASS with fields")
+def t():
+    if check_ads_fields(_qc(ads_text="")).severity != "CRITICAL":
+        print("  ❌ empty ADS not CRITICAL"); return False
+    ok = check_ads_fields(_qc(ads_text="Title ... inventor ... correspondence ..."))
+    if ok.severity != "PASS":
+        print(f"  ❌ {ok.severity}"); return False
+    return True
+
+@test("MIG11.1: Check 11 — /Name/ PASS, none WARNING, image-only INFO")
+def t():
+    if check_declaration_signatures(_qc(declaration_text="/Sarah Chen/ Date")).severity != "PASS":
+        print("  ❌ /Name/ not PASS"); return False
+    if check_declaration_signatures(_qc(declaration_text="signature line", image_only_pages={})).severity != "WARNING":
+        print("  ❌ no-sig not WARNING"); return False
+    if check_declaration_signatures(_qc(declaration_text="form body",
+                                        image_only_pages={"Declaration": 2})).severity != "INFO":
+        print("  ❌ image-only not INFO"); return False
+    return True
+
+@test("MIG12.1: Check 12 — assignment /Name/ PASS, missing INFO (optional)")
+def t():
+    if check_assignment_signatures(_qc(assignment_text="/Sarah Chen/")).severity != "PASS":
+        print("  ❌ /Name/ not PASS"); return False
+    if check_assignment_signatures(_qc(assignment_text="")).severity != "INFO":
+        print("  ❌ missing assignment not INFO"); return False
+    return True
+
 @test("MIG1.2: native Check 1 CRITICAL when an inventor is missing")
 def t():
     # Second inventor is absent from both the text AND the sample PDF.
