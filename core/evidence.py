@@ -23,22 +23,6 @@ from .result import Result, Evidence, Locator
 _NAME_DOCS = ("Declaration", "Assignment")
 
 
-def _locate_flex(path, phrase, *, min_words=4):
-    """Locate `phrase`, falling back to progressively shorter prefixes. Useful
-    for long phrases (e.g. an invention title) that may not extract as one
-    contiguous run — a leading chunk still anchors the highlight."""
-    hit = locate(path, phrase)
-    if hit:
-        return hit
-    words = phrase.split()
-    while len(words) > min_words:
-        words = words[:-1]
-        hit = locate(path, " ".join(words))
-        if hit:
-            return hit
-    return None
-
-
 def _surnames(ads_data: Optional[dict]):
     if not ads_data:
         return []
@@ -92,27 +76,8 @@ def enrich(result: Result, doc_paths: Dict[str, Path]) -> Result:
         for surname, full in _surnames(result.ads_data):
             c1.evidence.extend(_inventor_evidence(surname, full, doc_paths))
 
-    # Check 2 — title consistency -> highlight the ADS title in the spec, plus
-    # the ADS title as a structured value.
-    c2 = by_id.get(2)
-    if c2 is not None and result.ads_data:
-        title = (result.ads_data.get("title") or "").strip()
-        if title:
-            spec = doc_paths.get("Specification")
-            hit = _locate_flex(spec, title) if spec else None
-            if hit:
-                c2.evidence.append(Evidence(
-                    doc_type="Specification",
-                    locator=Locator(type="pdf_region", page=hit["page"], bbox=hit["bbox"]),
-                    snippet=hit["matched"], expected=title, actual=hit["matched"],
-                    kind="match", label="ADS title located in the specification",
-                ))
-            c2.evidence.append(Evidence(
-                doc_type="ADS",
-                locator=Locator(type="xfa_field", field_path="title"),
-                snippet=title, actual=title, kind="value",
-                label="ADS invention title (structured XFA field)",
-            ))
+    # (Check 2 is now a native core check — see core/checks/cross_document.py —
+    # so it is not enriched here.)
 
     # Check 3 — attorney docket -> xfa_field receipt from the ADS value.
     c3 = by_id.get(3)

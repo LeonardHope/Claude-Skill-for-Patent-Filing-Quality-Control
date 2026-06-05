@@ -58,3 +58,19 @@ def locate(pdf_path, phrase: str, *, pad: float = 1.5) -> Optional[Dict]:
     except Exception:
         return None
     return None
+
+
+def locate_flex(pdf_path, phrase: str, *, min_words: int = 4) -> Optional[Dict]:
+    """locate(), falling back to progressively shorter prefixes. Useful for long
+    phrases (e.g. an invention title) that may not extract as one contiguous run
+    — a leading chunk still anchors the highlight."""
+    hit = locate(pdf_path, phrase)
+    if hit:
+        return hit
+    words = phrase.split()
+    while len(words) > min_words:
+        words = words[:-1]
+        hit = locate(pdf_path, " ".join(words))
+        if hit:
+            return hit
+    return None

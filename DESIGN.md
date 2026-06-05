@@ -208,6 +208,29 @@ behavior is byte-for-byte identical at each step. Rules:
 - **The HTML report is re-pointed at `Result`** early, so both frontends share
   the contract from the start.
 
+### 7.1 The migration mechanism (in use)
+
+A check is migrated by giving `core/checks/` ownership of its ID:
+
+1. The check's logic + native evidence move to a `core/checks/*` module
+   (`core.checks.REGISTRY` maps `id -> fn(qc) -> Issue`, `MIGRATED_IDS` is the
+   owned set).
+2. `core.build.run()` sets `QCReport.skip_check_ids |= MIGRATED_IDS` **only
+   within the core path**, so the engine doesn't emit those IDs there, then runs
+   the core versions and merges. Exactly one emission per check, with evidence.
+3. The **standalone CLI is unaffected** — it doesn't call `core.run`, so the
+   engine still emits its copy (this is why the engine keeps a transitional,
+   duplicated copy of a migrated check).
+
+The duplicate engine copy is removed only once the **HTML report also consumes
+`Result`** (the deferred Phase-1 step) — at that point both frontends go through
+`core` and the engine's copy is dead. So: re-point the report at `Result`, then
+delete migrated checks from the engine. Until then, `skip_check_ids` keeps the
+two paths consistent with no double-emission.
+
+*Status: Check 2 (Application Title) is the first migrated check — native
+evidence, engine-skipped in the core path, CLI unchanged.*
+
 ## 8. Roadmap
 
 - **Phase 0 — De-risking spike** (mostly throwaway). One vertical slice through
