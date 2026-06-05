@@ -1,12 +1,11 @@
 """Attach structured Evidence to a Result (Phase 2, incremental bridge).
 
 In the end state each check emits its own evidence as it runs (DESIGN.md) — and
-checks that have migrated to core/checks/ already do (Checks 1, 2). This module
+checks that have migrated to core/checks/ already do (Checks 1-4). This module
 is the transitional bridge for checks that still live in the monolith: it
 enriches their issues post-hoc from the engine's structured data + the source
 PDFs. Currently wired:
 
-  - Check 3   (Attorney Docket)      -> xfa_field from the ADS docket value.
   - Check 23  (Drawings margin)      -> pdf_region of the docket in the drawings.
 
 Enrichment is additive and never raises.
@@ -25,19 +24,7 @@ def enrich(result: Result, doc_paths: Dict[str, Path]) -> Result:
     for issue in result.issues:
         by_id.setdefault(issue.check_id, issue)
 
-    # (Checks 1 and 2 are native core checks now — core/checks/ — not enriched.)
-
-    # Check 3 — attorney docket -> xfa_field receipt from the ADS value.
-    c3 = by_id.get(3)
-    if c3 is not None and result.ads_data:
-        docket = (result.ads_data.get("docket_number") or "").strip()
-        if docket:
-            c3.evidence.append(Evidence(
-                doc_type="ADS",
-                locator=Locator(type="xfa_field", field_path="docket_number"),
-                snippet=docket, actual=docket, kind="value",
-                label="ADS attorney docket number (structured XFA field)",
-            ))
+    # (Checks 1-4 are native core checks now — core/checks/ — not enriched.)
 
     # Check 23 — drawings margin labels -> highlight the docket number where it
     # appears in the drawings margin (the strongest "wrong file" identity mark).

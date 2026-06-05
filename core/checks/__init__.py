@@ -10,12 +10,17 @@ carries native evidence.
 Migration is incremental: one check moves here per step; until the HTML report
 also consumes Result, the engine retains its (skipped-in-core) copy.
 """
-from .cross_document import check_application_title, check_inventor_names  # noqa: F401
+from .cross_document import (  # noqa: F401
+    check_inventor_names, check_application_title,
+    check_attorney_docket, check_correspondence,
+)
 
 # id -> callable(qc) -> Issue ; checks core/checks now owns.
 REGISTRY = {
     1: check_inventor_names,
     2: check_application_title,
+    3: check_attorney_docket,
+    4: check_correspondence,
 }
 
 # Check IDs owned by core/checks (skipped in the engine when run via core).
