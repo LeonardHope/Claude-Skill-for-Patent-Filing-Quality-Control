@@ -118,11 +118,17 @@ def run(folder: str, *, generated_at: Optional[str] = None,
 
     result = build_result(qc, generated_at=generated_at)
 
-    # Run the migrated core checks natively (they emit their own evidence).
+    # Run the migrated core checks natively (they emit their own evidence). A
+    # check returns an Issue, a list of Issues (e.g. Check 9 can emit two), or
+    # None.
     for fn in REGISTRY.values():
-        issue = fn(qc)
-        if issue is not None:
-            result.issues.append(issue)
+        out = fn(qc)
+        if out is None:
+            continue
+        if isinstance(out, list):
+            result.issues.extend(i for i in out if i is not None)
+        else:
+            result.issues.append(out)
     result.issues.sort(key=lambda i: i.check_id)
 
     if enrich:
