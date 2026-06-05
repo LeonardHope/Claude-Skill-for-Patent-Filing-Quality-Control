@@ -231,6 +231,12 @@ two paths consistent with no double-emission.
 *Status: Check 2 (Application Title) is the first migrated check — native
 evidence, engine-skipped in the core path, CLI unchanged.*
 
+*Both frontends now consume `Result`: the interactive viewer (`app/`) and the
+static HTML report (`report/`, evidence-aware). Next enabler for clean
+move-and-delete: retire the monolith's own `generate_html_report` + `main()` on
+`next` (superseded by `report/`), after which migrated checks can be deleted
+from the engine rather than skipped.*
+
 ## 8. Roadmap
 
 - **Phase 0 — De-risking spike** (mostly throwaway). One vertical slice through
