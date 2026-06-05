@@ -23,6 +23,7 @@ from .completeness import (  # noqa: F401
 )
 from .specification import check_specification  # noqa: F401
 from .drawings import check_drawings  # noqa: F401
+from .ads import check_ads  # noqa: F401
 
 CHECKS = [
     # Cross-Document Consistency (1-8)
@@ -36,6 +37,8 @@ CHECKS = [
     check_specification,
     # Drawings (22-24; 25 no-color stays engine-emitted)
     check_drawings,
+    # ADS (27, 29, 31, 73; 28 first-named-inventor uses POA OCR -> engine)
+    check_ads,
 ]
 
 MIGRATED_IDS = {
@@ -43,4 +46,5 @@ MIGRATED_IDS = {
     9, 10, 11, 12,
     13, 14, 15, 17, 18, 19, 20, 21,   # 16 (reference-numeral consistency) left in engine
     22, 23, 24,                       # 25 (no-color, image analysis) left in engine
+    27, 29, 31, 73,                   # 28 (first-named inventor, POA OCR) left in engine
 }
