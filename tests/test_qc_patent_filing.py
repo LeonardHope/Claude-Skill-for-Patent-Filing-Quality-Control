@@ -1397,6 +1397,67 @@ def t():
     return True
 
 # ============================================================
+# 20. Short-surname matching — single-letter family initials (e.g. "Manoj
+#     Kumar P") must not match every stray letter (Check 1 false negative)
+# ============================================================
+@test("SS21.1: _surname_present — single-letter surname needs a standalone token")
+def t():
+    qc = _qc_bare
+    if not qc._surname_present("P", "MANOJ KUMAR P SIGNED HERE"):
+        print("  ❌ standalone 'P' not matched"); return False
+    if qc._surname_present("P", "SPECIFICATION DEPLOYMENT PROCESS"):
+        print("  ❌ 'P' inside words matched (spurious)"); return False
+    return True
+
+@test("SS21.2: _surname_present — normal surnames keep substring behavior")
+def t():
+    qc = _qc_bare
+    if not qc._surname_present("CHEN", "SARAH J CHEN"):
+        print("  ❌ CHEN not matched"); return False
+    if qc._surname_present("MEHTA", "ONLY CHEN HERE"):
+        print("  ❌ absent MEHTA matched"); return False
+    return True
+
+def _ads_single_letter_surname():
+    ads = copy.deepcopy(BASE_ADS)
+    ads["inventors"] = [{"prefix": "", "first": "Manoj", "middle": "Kumar",
+                         "last": "P", "suffix": "", "citizenship": "IN",
+                         "residency": "non-us-residency", "res_city": "Chennai",
+                         "res_state": "", "res_country": "IN",
+                         "mail_address1": "1 St", "mail_address2": "",
+                         "mail_city": "Chennai", "mail_state": "TN",
+                         "mail_postcode": "600001", "mail_country": "IN"}]
+    return ads
+
+@test("SS21.3: Check 1 PASS when 'Manoj Kumar P' appears (standalone P)")
+def t():
+    decl = ("DECLARATION (37 CFR 1.63)\nI hereby declare that I am an original "
+            "inventor.\nInventor 1\nManoj Kumar P\n/Manoj Kumar P/  Date: 2026-05-09\n"
+            + "padding line.\n" * 10)
+    qc = build_qc(ads_data=_ads_single_letter_surname(), decl=decl, asgn=decl)
+    qc.run_all_checks()
+    issue = get_check(qc, 1)
+    if not issue or issue.severity != Severity.PASS:
+        print(f"  ❌ Check 1 = {issue.severity.value if issue else 'absent'} (expected PASS); "
+              f"{issue.message[:80] if issue else ''}")
+        return False
+    return True
+
+@test("SS21.4: Check 1 CRITICAL when the 'P' inventor is genuinely missing")
+def t():
+    # Declaration has 'p' inside many words but never the inventor's name nor a
+    # standalone 'P'. Old substring match would falsely PASS; the fix flags it.
+    decl = ("DECLARATION (37 CFR 1.63)\nThe specification describes a deployment "
+            "pipeline supporting application processing.\n" + "padding text.\n" * 12)
+    qc = build_qc(ads_data=_ads_single_letter_surname(), decl=decl, asgn=decl)
+    qc.run_all_checks()
+    issue = get_check(qc, 1)
+    if not issue or issue.severity != Severity.CRITICAL:
+        print(f"  ❌ Check 1 = {issue.severity.value if issue else 'absent'} (expected CRITICAL)")
+        return False
+    return True
+
+# ============================================================
 # Run
 # ============================================================
 print("="*80); print(f"COMPREHENSIVE TEST SUITE — {len(TESTS)} tests"); print("="*80)
