@@ -6782,17 +6782,35 @@ class PatentFilingQC:
 
         if above_threshold and not seq_xml and not seq_txt:
             # Sequences at or above threshold but no listing file in the folder.
-            # Presence of "SEQ ID NO" labels does not substitute for a listing.
-            self.report.add_issue(
-                85, CATEGORY, "Biological Sequence Detection",
-                Severity.CRITICAL,
-                'Sequences at or above the listing threshold detected in the '
-                'specification/drawings but no sequence listing file was found '
-                'in the filing folder. A ST.26 XML listing is required under '
-                '37 CFR § 1.821(c).',
-                'Sequences detected (within biological context windows):\n'
-                + '\n'.join(f'  • {e}' for e in above_threshold)
-            )
+            # Severity depends on whether the sequences carry SEQ ID NO labels:
+            #   - Labeled (SEQ ID NO present) → clearly inventive/referenced,
+            #     a listing is required → CRITICAL.
+            #   - Unlabeled → may be illustrative examples (e.g., a primer shown
+            #     in a method figure); the practitioner must decide whether the
+            #     listing requirement applies → WARNING.
+            if has_seq_id_no:
+                self.report.add_issue(
+                    85, CATEGORY, "Biological Sequence Detection",
+                    Severity.CRITICAL,
+                    'Sequences at or above the listing threshold are referenced '
+                    'with "SEQ ID NO" labels in the specification/drawings but no '
+                    'sequence listing file was found in the filing folder. A ST.26 '
+                    'XML listing is required under 37 CFR § 1.821(c).',
+                    'Sequences detected (within biological context windows):\n'
+                    + '\n'.join(f'  • {e}' for e in above_threshold)
+                )
+            else:
+                self.report.add_issue(
+                    85, CATEGORY, "Biological Sequence Detection",
+                    Severity.WARNING,
+                    'Sequences at or above the listing threshold detected in the '
+                    'specification/drawings without "SEQ ID NO" labels, and no '
+                    'sequence listing file was found. Verify whether a listing is '
+                    'required under 37 CFR § 1.821(a) — unlabeled sequences may '
+                    'be illustrative and not subject to the listing requirement.',
+                    'Sequences detected (within biological context windows):\n'
+                    + '\n'.join(f'  • {e}' for e in above_threshold)
+                )
         elif above_threshold and seq_txt and not seq_xml:
             # Non-XML listing present — wrong format for new filings.
             self.report.add_issue(
