@@ -5,17 +5,22 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Patent Filing QC</title>
 <style>
-  :root { --bg:#0f1419; --panel:#171c24; --line:#262d39; --text:#e6e9ee; --muted:#8a93a3; }
+  :root { --bg:#0f1419; --panel:#171c24; --line:#262d39; --text:#e6e9ee; --muted:#8a93a3;
+          --accent:#3a4a5f; --accentTx:#dbe7ff; }
   * { box-sizing:border-box; }
   body { margin:0; font:14px/1.45 -apple-system,Segoe UI,Roboto,sans-serif; color:var(--text); background:var(--bg); }
+  button { font:inherit; }
   header { padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel);
            display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
   header b { font-size:15px; } header .folder { color:var(--muted); font-size:12px; }
   .counts span { font-weight:700; padding:2px 8px; border-radius:10px; margin-left:6px; font-size:12px; }
-  .filters { margin-left:auto; display:flex; gap:6px; }
+  .hbtn { background:#1d2430; color:var(--text); border:1px solid var(--line); border-radius:6px;
+          padding:4px 10px; font-size:12px; cursor:pointer; }
+  .hbtn:hover { border-color:var(--accent); }
+  .filters { margin-left:auto; display:flex; gap:6px; align-items:center; }
   .filters button { background:#1d2430; color:var(--text); border:1px solid var(--line);
                     border-radius:6px; padding:3px 9px; font-size:12px; cursor:pointer; }
-  .filters button.on { background:#2a3340; border-color:#3a4a5f; }
+  .filters button.on { background:#2a3340; border-color:var(--accent); }
   .wrap { display:grid; grid-template-columns:420px 1fr; height:calc(100vh - 49px); }
   .checks { overflow:auto; border-right:1px solid var(--line); background:var(--panel); }
   .viewer { overflow:auto; position:relative; padding:16px; }
@@ -26,7 +31,7 @@
   .cname { font-weight:600; } .cmsg { color:var(--muted); margin-top:4px; }
   .ev { margin-top:8px; padding:7px 10px; background:#10141b; border:1px solid var(--line);
         border-radius:6px; font-size:13px; cursor:pointer; }
-  .ev:hover { border-color:#3a4a5f; }
+  .ev:hover { border-color:var(--accent); }
   .ev .tag { font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
   .ev.match .tag { color:#5ee08a; } .ev.missing .tag, .ev.mismatch .tag { color:#ff7a85; }
   .pagewrap { position:relative; margin:0 auto 16px; box-shadow:0 2px 18px rgba(0,0,0,.5); width:max-content; }
@@ -38,17 +43,72 @@
   .card h3 { margin:0 0 10px; } .card .row { display:flex; gap:10px; margin:6px 0; }
   .card .k { color:var(--muted); width:130px; flex:none; } .card code { color:#9ee6b4; }
   .hint { color:var(--muted); text-align:center; margin-top:40px; }
+
+  /* ---- landing ---- */
+  #landing { height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
+  .land { width:540px; max-width:100%; background:var(--panel); border:1px solid var(--line);
+          border-radius:14px; padding:34px 36px; text-align:center; }
+  .land .mark { font-size:13px; letter-spacing:.18em; text-transform:uppercase; color:var(--muted); }
+  .land h1 { margin:8px 0 6px; font-size:26px; }
+  .land p { color:var(--muted); margin:0 auto 22px; max-width:420px; }
+  .open { display:inline-flex; align-items:center; gap:9px; background:var(--accent); color:var(--accentTx);
+          border:none; border-radius:9px; padding:13px 26px; font-size:15px; font-weight:600; cursor:pointer; }
+  .open:hover { filter:brightness(1.12); }
+  .open svg { width:18px; height:18px; }
+  .manual { margin-top:22px; padding-top:18px; border-top:1px solid var(--line); }
+  .manual .lbl { font-size:12px; color:var(--muted); margin-bottom:8px; }
+  .manual .grp { display:flex; gap:8px; }
+  .manual input { flex:1; background:#10141b; color:var(--text); border:1px solid var(--line);
+                  border-radius:7px; padding:9px 11px; font-size:13px; font-family:ui-monospace,monospace; }
+  .manual button { background:#1d2430; color:var(--text); border:1px solid var(--line); border-radius:7px;
+                   padding:9px 16px; cursor:pointer; }
+  .status { margin-top:18px; min-height:20px; font-size:13px; }
+  .status.err { color:#ff7a85; } .status.busy { color:var(--muted); }
+  .spin { display:inline-block; width:13px; height:13px; margin-right:8px; vertical-align:-2px;
+          border:2px solid var(--line); border-top-color:var(--accentTx); border-radius:50%;
+          animation:rot .8s linear infinite; }
+  @keyframes rot { to { transform:rotate(360deg); } }
+  .hidden { display:none !important; }
 </style>
 </head>
 <body>
-<header>
-  <b>Patent Filing QC</b><span class="folder" id="folder"></span>
-  <span class="counts" id="counts"></span>
-  <div class="filters" id="filters"></div>
-</header>
-<div class="wrap">
-  <div class="checks" id="checks"></div>
-  <div class="viewer" id="viewer"><div class="hint">Select a check with a receipt on the left.</div></div>
+
+<!-- ====================== LANDING ====================== -->
+<div id="landing">
+  <div class="land">
+    <div class="mark">Patent Filing QC</div>
+    <h1>Open the filing folder</h1>
+    <p>Select the folder containing this application's filing documents. The quality
+       checks run automatically and the results appear here.</p>
+    <button class="open" id="openBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      Open filing folder…
+    </button>
+    <div class="manual">
+      <div class="lbl">…or paste the folder path (for shared / hosted setups)</div>
+      <div class="grp">
+        <input id="pathInput" placeholder="/path/to/the/filing/folder" spellcheck="false">
+        <button id="runBtn">Run QC</button>
+      </div>
+    </div>
+    <div class="status" id="status"></div>
+  </div>
+</div>
+
+<!-- ====================== APP ====================== -->
+<div id="app" class="hidden">
+  <header>
+    <b>Patent Filing QC</b><span class="folder" id="folder"></span>
+    <button class="hbtn" id="rerunBtn" title="Re-run the checks (after editing files)">Re-run</button>
+    <button class="hbtn" id="changeBtn">Open another folder</button>
+    <span class="counts" id="counts"></span>
+    <div class="filters" id="filters"></div>
+  </header>
+  <div class="wrap">
+    <div class="checks" id="checks"></div>
+    <div class="viewer" id="viewer"><div class="hint">Select a check with a receipt on the left.</div></div>
+  </div>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -57,19 +117,60 @@ pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 
 const VIEW_W = 780;
-const pdfCache = {};
-let RESULT = null, FILTER = "receipts";
+let pdfCache = {};
+let RESULT = null, FILTER = "receipts", FOLDER = null;
 
+const $ = id => document.getElementById(id);
+const qF = () => "folder=" + encodeURIComponent(FOLDER || "");
+
+/* ---------- folder selection / loading ---------- */
+function setStatus(msg, cls) { const s=$("status"); s.className="status "+(cls||""); s.innerHTML=msg; }
+
+async function pick() {
+  setStatus('<span class="spin"></span>Folder chooser is open — pick a folder (check behind this window).', "busy");
+  try {
+    const r = await fetch("/api/pick"); const d = await r.json();
+    if (d.path) { $("pathInput").value = d.path; loadFolder(d.path); }
+    else if (d.error) setStatus("Folder chooser unavailable: " + d.error + " — paste the path below instead.", "err");
+    else setStatus("No folder selected.", "");
+  } catch (e) { setStatus("Could not open the folder chooser. Paste the path instead.", "err"); }
+}
+
+async function loadFolder(folder, refresh) {
+  FOLDER = folder; pdfCache = {};
+  setStatus('<span class="spin"></span>Running quality checks on<br><code>'+folder+'</code>…', "busy");
+  try {
+    const r = await fetch("/api/result?" + qF() + (refresh ? "&refresh=1" : ""));
+    const d = await r.json();
+    if (!r.ok) { setStatus("Error: " + (d.error || r.status), "err"); return; }
+    RESULT = d; enterApp();
+  } catch (e) { setStatus("Error running checks: " + e, "err"); }
+}
+
+function enterApp() {
+  $("landing").classList.add("hidden");
+  $("app").classList.remove("hidden");
+  $("viewer").innerHTML = '<div class="hint">Select a check with a receipt on the left.</div>';
+  setup();
+}
+
+function backToLanding() {
+  $("app").classList.add("hidden");
+  $("landing").classList.remove("hidden");
+  setStatus("", "");
+}
+
+/* ---------- PDF rendering ---------- */
 async function loadPdf(docType) {
   if (pdfCache[docType]) return pdfCache[docType];
-  const buf = await (await fetch(`/api/pdf/${encodeURIComponent(docType)}`)).arrayBuffer();
+  const buf = await (await fetch(`/api/pdf/${encodeURIComponent(docType)}?` + qF())).arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
   pdfCache[docType] = pdf;
   return pdf;
 }
 
 async function showRegion(docType, page, bbox) {
-  const v = document.getElementById("viewer"); v.innerHTML = "Loading…";
+  const v = $("viewer"); v.innerHTML = "Loading…";
   const pdf = await loadPdf(docType);
   const p = await pdf.getPage(page + 1);
   const scale = VIEW_W / p.getViewport({ scale: 1 }).width;
@@ -91,7 +192,7 @@ async function showRegion(docType, page, bbox) {
 
 function showCard(ev) {
   const L = ev.locator;
-  document.getElementById("viewer").innerHTML = `
+  $("viewer").innerHTML = `
     <div class="card"><h3>Structured data receipt</h3>
       <div class="row"><div class="k">Document</div><div>${ev.doc_type} (XFA — no page geometry)</div></div>
       <div class="row"><div class="k">Field</div><div><code>${L.field_path||""}</code></div></div>
@@ -108,8 +209,9 @@ function activate(ev) {
   else if (L.type === "xfa_field") showCard(ev);
 }
 
+/* ---------- checks list ---------- */
 function render() {
-  const root = document.getElementById("checks"); root.innerHTML = "";
+  const root = $("checks"); root.innerHTML = "";
   const issues = RESULT.issues.filter(i =>
     FILTER === "all" ? true :
     FILTER === "receipts" ? (i.evidence && i.evidence.length) :
@@ -131,13 +233,13 @@ function render() {
 }
 
 function setup() {
-  document.getElementById("folder").textContent = RESULT.folder;
+  $("folder").textContent = RESULT.folder;
   const counts = {}; RESULT.issues.forEach(i => counts[i.severity]=(counts[i.severity]||0)+1);
-  document.getElementById("counts").innerHTML =
+  $("counts").innerHTML =
     ["CRITICAL","WARNING","INFO","PASS"].filter(s=>counts[s])
       .map(s=>`<span class="badge ${s}">${counts[s]} ${s}</span>`).join("");
   const withEv = RESULT.issues.filter(i=>i.evidence&&i.evidence.length).length;
-  const f = document.getElementById("filters");
+  const f = $("filters"); f.innerHTML = "";
   [["receipts",`Receipts (${withEv})`],["all","All"],["CRITICAL","Critical"],
    ["WARNING","Warning"],["INFO","Info"],["PASS","Pass"]].forEach(([k,lbl])=>{
     const b=document.createElement("button"); b.textContent=lbl;
@@ -148,7 +250,15 @@ function setup() {
   render();
 }
 
-fetch("/api/result").then(r=>r.json()).then(d=>{ RESULT=d; setup(); });
+/* ---------- wiring ---------- */
+$("openBtn").onclick = pick;
+$("runBtn").onclick = () => { const p=$("pathInput").value.trim(); if(p) loadFolder(p); };
+$("pathInput").addEventListener("keydown", e => { if(e.key==="Enter"){ const p=e.target.value.trim(); if(p) loadFolder(p); }});
+$("changeBtn").onclick = backToLanding;
+$("rerunBtn").onclick = () => { backToLanding(); loadFolder(FOLDER, true); };
+
+// If the server was started with a folder argument, skip the landing screen.
+fetch("/api/config").then(r=>r.json()).then(c=>{ if (c.preselected) loadFolder(c.preselected); });
 </script>
 </body>
 </html>

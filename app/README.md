@@ -7,21 +7,39 @@ source-document region that produced it. It lives on the `next` branch and does
 
 ## The real viewer (`server.py`) — Phase 2
 
-Runs the actual engine through `core` (with evidence enrichment) and serves an
-interactive viewer. Point it at any filing folder; all processing is local.
+Runs the actual engine through `core` (checks emit their own evidence) and serves
+an interactive viewer. All processing is local — nothing is uploaded.
+
+Intended workflow (attorneys / paralegals, at filing time): start the server
+once, navigate to the page, **open the filing folder**, and the QC runs and
+shows its results.
+
+```bash
+python3 app/server.py            # then open http://localhost:8000
+```
+
+On the landing screen, **Open filing folder…** launches a native OS folder
+chooser on the machine running the server (no path typing); a paste-a-path field
+is also there for shared / hosted setups. You can pre-select a folder on the
+command line to skip the landing screen:
 
 ```bash
 python3 app/server.py /path/to/filing/folder
-# then open http://localhost:8000
 ```
+
+> Restart the server after editing `server.py` — a running instance keeps the
+> old routes (a stale process is why `/api/pick` would 404).
 
 - Left: every check, grouped by severity, with a **Receipts** filter.
 - Click a receipt → the source region highlights in the PDF (`pdf_region`), or a
   structured data card appears for ADS fields (`xfa_field`).
-- Currently enriched with real evidence: **Check 1** (inventor names → highlight
-  per inventor in the Declaration/Assignment) and **Check 3** (docket → ADS
-  field card). More checks gain evidence as Phase 2 continues
-  (`core/evidence.py`).
+- Migrated checks emit native receipts wherever they can locate the source —
+  inventor names (highlighted per inventor in the Declaration), attorney docket,
+  assignee, drawing docket label, etc. Checks still in the engine (OCR / image /
+  network — see `core/checks/__init__.py`) appear without a locator for now.
+- **Re-run** (header) re-runs the checks after you edit files; **Open another
+  folder** returns to the landing screen. Results are cached per folder, so
+  opening a document never re-runs QC.
 
 Engine + schema live in [`../core/`](../core); tests in
 [`../tests/test_core.py`](../tests/test_core.py).
