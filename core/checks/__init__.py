@@ -33,6 +33,7 @@ from .file_quality import check_file_quality  # noqa: F401
 from .cross_references import check_cross_references  # noqa: F401
 from .priority import check_priority  # noqa: F401
 from .final_quality import check_final_quality  # noqa: F401
+from .ids import check_ids  # noqa: F401
 
 CHECKS = [
     # Cross-Document Consistency (1-8)
@@ -66,6 +67,8 @@ CHECKS = [
     check_priority,
     # Final Quality (66-70)
     check_final_quality,
+    # IDS (76-80; 74-75 load-time emissions, 71 authoritative-source -> engine)
+    check_ids,
 ]
 
 MIGRATED_IDS = {
@@ -83,4 +86,7 @@ MIGRATED_IDS = {
     61, 62,                           # 59, 60 (drafting-quality NLP) left in engine
     63, 64, 65,                       # 81 (priority app number, ODP network) left in engine
     66, 67, 68, 69, 70,
+    76, 77, 78, 79, 80,               # 71 (authoritative-source x-check), 74-75 (dup/unknown
+                                      # file load-time emissions), 82-85 (ST.26 seq listing)
+                                      # left in engine
 }

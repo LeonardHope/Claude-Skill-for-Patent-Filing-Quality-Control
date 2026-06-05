@@ -547,6 +547,102 @@ def t():
     return True
 
 
+# ---- IDS (76-80): exercised directly (sample/real folders have no IDS) -----
+from core.checks.ids import check_ids  # noqa: E402
+
+
+def _ids_xfa(sig="/Robert M. Holcomb/", reg="62198", us_docs=("10123456", "10222333"),
+             pubs=(), npls=()):
+    parts = ["<ids-form>", "<electronic-signature><basic-signature><text-string>"
+             + (sig or "") + "</text-string></basic-signature>"
+             + (f"<registered-number>{reg}</registered-number>" if reg else "")
+             + "</electronic-signature>"]
+    if us_docs:
+        parts.append("<us-patent-cite>" + "".join(
+            f"<us-doc-reference><doc-number>{d}</doc-number></us-doc-reference>"
+            for d in us_docs) + "</us-patent-cite>")
+    if pubs:
+        parts.append("<us-pub-appl-cite>" + "".join(
+            f"<us-doc-reference><doc-number>{d}</doc-number></us-doc-reference>"
+            for d in pubs) + "</us-pub-appl-cite>")
+    if npls:
+        parts.append("<us-nplcit>" + "".join(f"<text>{n}</text>" for n in npls) + "</us-nplcit>")
+    parts.append("</ids-form>")
+    return "".join(parts)
+
+
+def _by_id(issues, cid):
+    return next((i for i in issues if i.check_id == cid), None)
+
+
+@test("MIG76.1: Check 76 PASS (single) when no IDS documents present")
+def t():
+    out = check_ids(_qc(documents={}, ids_text=""))
+    if len(out) != 1 or out[0].check_id != 76 or out[0].severity != "PASS":
+        print(f"  ❌ {[ (i.check_id, i.severity) for i in out]}"); return False
+    return True
+
+
+@test("MIG77.1: Check 77 PASS (sig+reg), WARN (none), WARN (partial)")
+def t():
+    p = SAMPLE_PDF
+    for kw, want in (({"sig": "/R. Holcomb/", "reg": "62198"}, "PASS"),
+                     ({"sig": "", "reg": ""}, "WARNING"),
+                     ({"sig": "/R. Holcomb/", "reg": ""}, "WARNING")):
+        qc = _qc(documents={"IDS": p}, ids_text=_ids_xfa(**kw))
+        i = _by_id(check_ids(qc), 77)
+        if not i or i.severity != want:
+            print(f"  ❌ {kw} -> {i.severity if i else None} (want {want})"); return False
+    return True
+
+
+@test("MIG78.1: Check 78 INFO counts references; WARN when none")
+def t():
+    qc = _qc(documents={"IDS": SAMPLE_PDF},
+             ids_text=_ids_xfa(us_docs=("10123456", "10222333", "10999000"),
+                               pubs=("20210000001",), npls=("Smith et al. 2020",)))
+    i = _by_id(check_ids(qc), 78)
+    if not i or i.severity != "INFO" or "5 reference" not in i.message:
+        print(f"  ❌ {i.severity if i else None}: {i.message[:80] if i else ''}"); return False
+    qc2 = _qc(documents={"IDS": SAMPLE_PDF}, ids_text=_ids_xfa(us_docs=()))
+    i2 = _by_id(check_ids(qc2), 78)
+    if not i2 or i2.severity != "WARNING":
+        print(f"  ❌ empty -> {i2.severity if i2 else None}"); return False
+    return True
+
+
+@test("MIG79.1: Check 79 PASS (one box), CRITICAL (multi), CRITICAL (none)")
+def t():
+    p = SAMPLE_PDF
+    cases = (({"Check Box1": "/Yes", "Check Box2": "/Off"}, "PASS"),
+             ({"Check Box1": "/Yes", "Check Box2": "/Yes"}, "CRITICAL"),
+             ({"Check Box1": "/Off", "Check Box2": "/Off"}, "CRITICAL"))
+    for fields, want in cases:
+        qc = _qc(documents={"IDS Written Assertion": p})
+        qc._extract_acroform_fields = lambda _p, f=fields: f
+        i = _by_id(check_ids(qc), 79)
+        if not i or i.severity != want:
+            print(f"  ❌ {fields} -> {i.severity if i else None} (want {want})"); return False
+    return True
+
+
+@test("MIG80.1: Check 80 PASS (sig+name), WARN (unsigned)")
+def t():
+    p = SAMPLE_PDF
+    qc = _qc(documents={"IDS Written Assertion": p})
+    qc._extract_acroform_fields = lambda _p: {"Signature": "/R. Holcomb/",
+                                              "Name PrintTyped": "Robert Holcomb",
+                                              "Date": "2026-05-09"}
+    i = _by_id(check_ids(qc), 80)
+    if not i or i.severity != "PASS":
+        print("  ❌ signed != PASS"); return False
+    qc2 = _qc(documents={"IDS Written Assertion": p})
+    qc2._extract_acroform_fields = lambda _p: {"Signature": "", "Name PrintTyped": ""}
+    if _by_id(check_ids(qc2), 80).severity != "WARNING":
+        print("  ❌ unsigned != WARNING"); return False
+    return True
+
+
 # ---- migration parity: core == engine for every migrated check -------------
 @test("PARITY: core matches the engine for every migrated check (sample folder)")
 def t():
