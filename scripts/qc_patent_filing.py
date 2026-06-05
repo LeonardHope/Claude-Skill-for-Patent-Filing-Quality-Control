@@ -148,6 +148,13 @@ LIGHTWEIGHT_SKIP_IDS = {
 }
 
 
+def _fig_sort_key(fig_id: str):
+    """Sort key for figure-identity strings like '1', '4A', '4B', '10':
+    order by base number, then sub-figure letter."""
+    m = re.match(r'(\d+)([A-Za-z]*)', fig_id)
+    return (int(m.group(1)), m.group(2)) if m else (0, fig_id)
+
+
 class PatentFilingQC:
     """Main QC engine for patent filing documents"""
     
@@ -1723,58 +1730,41 @@ class PatentFilingQC:
 
     def _extract_figure_numbers(self, text: str) -> List[int]:
         """
-        Extract figure numbers from text, handling PyPDF2 extraction quirks.
+        Extract base figure numbers (ints). Sub-figures collapse to their base
+        (FIG. 4A -> 4); use _extract_figure_identities() for distinct sub-figure
+        counting. Recognizes the plural forms (FIGS./FIGURES) and handles PyPDF2
+        extraction quirks where text is concatenated without spaces:
+        - "FIG. 2" + "118" (ref numeral) -> "FIG. 2118"  (extracts 2)
+        - "FIG. 4" + "START" -> "FIG. 4START"             (extracts 4)
 
-        PyPDF2 often concatenates text without spaces, so:
-        - "FIG. 2" + "118" (ref numeral) becomes "FIG. 2118"
-        - "FIG. 4" + "START" becomes "FIG. 4START"
-        - "FIG. 5" + "CPU" becomes "FIG. 5CPU"
-
-        This method handles such cases intelligently.
+        The FIG anchor uses a zero-width lookbehind (not a consumed character),
+        so adjacent labels with no prose between them — e.g. "FIG. 1\nFIG. 2"
+        on consecutive drawing sheets — are ALL captured. (A consuming prefix
+        ate the separator the next match needed, dropping every other figure.)
         """
         if not text:
             return []
 
         fig_nums = set()
 
-        # All patterns require FIG to be a standalone word (preceded by non-letter or start)
-        # This prevents matching "CONFIG" as containing "FIG"
+        # Zero-width word boundary before FIG (prevents matching "CONFIG"),
+        # then optional plural S, optional dot, optional space.
+        FIG = r'(?<![A-Za-z])FIG(?:URE)?S?\.?\s*'
 
-        # Pattern 1: FIG. N followed by sub-figure letter A-E, then non-letter or more text
-        # e.g., "FIG. 3A " or "FIG. 3ABUILD" -> extracts 3
-        for match in re.finditer(r'(?:^|[^A-Z])FIG(?:URE)?\.?\s*(\d{1,2})([A-E])(?:[^A-Z]|[A-Z])', text, re.IGNORECASE):
-            num = int(match.group(1))
-            if 1 <= num <= 20:
-                fig_nums.add(num)
+        patterns = [
+            FIG + r'(\d{1,2})[A-E]',                  # sub-figure -> base (FIG. 3A -> 3)
+            FIG + r'(\d{1,2})[F-Z]',                  # concatenated word (FIG. 4START -> 4)
+            FIG + r'(\d{1,2})(?=[\s.,;:)\]\-]|$)',    # plain, at a boundary
+            FIG + r'(\d)\d{3,}',                      # ref-numeral concat (FIG. 2118 -> 2)
+            FIG + r'(1\d|20)\d{2,}',                  # FIG. 10200 -> 10
+        ]
+        for pat in patterns:
+            for match in re.finditer(pat, text, re.IGNORECASE):
+                num = int(match.group(1))
+                if 1 <= num <= 20:
+                    fig_nums.add(num)
 
-        # Pattern 2: FIG. N followed by uppercase letter F-Z (not a sub-figure)
-        # e.g., "FIG. 4START" -> extracts 4, "FIG. 5CPU" -> extracts 5
-        for match in re.finditer(r'(?:^|[^A-Z])FIG(?:URE)?\.?\s*(\d{1,2})([F-Z])', text, re.IGNORECASE):
-            num = int(match.group(1))
-            if 1 <= num <= 20:
-                fig_nums.add(num)
-
-        # Pattern 3: FIG. N followed by space, newline, punctuation, or end
-        for match in re.finditer(r'(?:^|[^A-Z])FIG(?:URE)?\.?\s*(\d{1,2})(?:[\s\.,;:\)\]\-]|$)', text, re.IGNORECASE):
-            num = int(match.group(1))
-            if 1 <= num <= 20:
-                fig_nums.add(num)
-
-        # Pattern 4: FIG. single-digit followed by 3+ digits (reference numeral)
-        # e.g., "FIG. 2118" -> extracts 2 (118 is likely a ref numeral)
-        for match in re.finditer(r'(?:^|[^A-Z])FIG(?:URE)?\.?\s*(\d)(\d{3,})', text, re.IGNORECASE):
-            num = int(match.group(1))
-            if 1 <= num <= 9:
-                fig_nums.add(num)
-
-        # Pattern 5: FIG. 1N or 20 followed by 2+ digits
-        # e.g., "FIG. 10200" -> extracts 10
-        for match in re.finditer(r'(?:^|[^A-Z])FIG(?:URE)?\.?\s*(1\d|20)(\d{2,})', text, re.IGNORECASE):
-            num = int(match.group(1))
-            if 10 <= num <= 20:
-                fig_nums.add(num)
-
-        # Pattern 6: Reversed FIG label from rotated landscape pages.
+        # Reversed FIG label from rotated landscape pages.
         # When a drawings page has /Rotate=90 or 270 (common for landscape
         # figures bound into a portrait filing), text extractors return the
         # characters in reverse reading order, so "FIG. 1" comes out as
@@ -1791,6 +1781,48 @@ class PatentFilingQC:
                 fig_nums.add(num)
 
         return sorted(fig_nums)
+
+    def _extract_subfigures(self, text: str):
+        """Return the set of sub-figure identities present, e.g. {(4,'A'),(4,'B')}.
+
+        Handles the singular ("FIG. 4A"), the plural form, and enumerations like
+        "FIGS. 4A and 4B" / "FIGS. 4A, 4B" / "FIGS. 4A-4B" where the second
+        sub-figure is not directly preceded by a FIG token. The USPTO treats
+        sub-figures as distinct figures, so the figure COUNT must keep them
+        separate (see _extract_figure_identities)."""
+        subs = set()
+        if not text:
+            return subs
+        # Anchor on FIG/FIGURE/FIGS/FIGURES, then a figure list that STARTS with
+        # a sub-figure (digit + letter), optionally continuing with more tokens
+        # joined by and/&/,/-/to/through.
+        anchor = r'(?<![A-Za-z])FIG(?:URE)?S?\.?\s*'
+        cont = r'(?:\s*(?:,|&|and|to|through|\-|–)\s*\d{1,2}[A-E]?)*'
+        for m in re.finditer(anchor + r'(\d{1,2}[A-E]' + cont + r')',
+                             text, re.IGNORECASE):
+            for n_str, letter in re.findall(r'(\d{1,2})([A-E])', m.group(1),
+                                            re.IGNORECASE):
+                n = int(n_str)
+                if 1 <= n <= 20:
+                    subs.add((n, letter.upper()))
+        return subs
+
+    def _extract_figure_identities(self, text: str) -> List[str]:
+        """Return distinct figure identities as strings, e.g.
+        ['1','2','3','4A','4B','5','6','7','8'] for a 9-figure set.
+
+        Unlike _extract_figure_numbers (which returns base integers and is used
+        by the sequential-numbering checks), this counts sub-figures as separate
+        figures: 4A and 4B are two figures, not one. When a base number has any
+        sub-figures, the bare base is dropped in favour of its sub-figures so
+        4 / 4A / 4B don't collapse to a single value. Used by the figure-COUNT
+        comparison (Check 61)."""
+        base = set(self._extract_figure_numbers(text))
+        subs = self._extract_subfigures(text)
+        sub_bases = {n for n, _ in subs}
+        ids = {str(n) for n in base if n not in sub_bases}
+        ids |= {f"{n}{letter}" for n, letter in subs}
+        return sorted(ids, key=lambda s: (int(re.match(r'\d+', s).group()), s))
 
     def _extract_reference_numerals(self, text: str) -> dict:
         """
@@ -5269,28 +5301,30 @@ class PatentFilingQC:
         # Same image-only-drawings caveat as Check 15/22 — if the drawings PDF
         # has no extractable FIG. labels, comparing counts is meaningless.
         if not self._drawings_text_extractable():
-            spec_figs = set(self._extract_figure_numbers(self.spec_text)) if self.spec_text else set()
+            spec_figs = self._extract_figure_identities(self.spec_text) if self.spec_text else []
             self.report.add_issue(
                 61, "Cross-References", "Drawing Figure Count Matches Specification",
                 Severity.INFO,
                 f"Drawings PDF appears to be image-only — figure count not verifiable by text extraction. "
                 f"Spec references {len(spec_figs)} figure(s)" + (
-                    f" (FIG. {', '.join(str(n) for n in sorted(spec_figs))})" if spec_figs else ""
+                    f" (FIG. {', '.join(spec_figs)})" if spec_figs else ""
                 ) + ". Manually verify drawings contain matching figures."
             )
         elif self.spec_text and self.drawings_text:
-            spec_figs = set(self._extract_figure_numbers(self.spec_text))
-            drawing_figs = set(self._extract_figure_numbers(self.drawings_text))
+            # Compare figure IDENTITIES (sub-figures like 4A/4B counted as
+            # distinct, plural "FIGS." recognized), not collapsed base integers.
+            spec_figs = set(self._extract_figure_identities(self.spec_text))
+            drawing_figs = set(self._extract_figure_identities(self.drawings_text))
 
             if spec_figs == drawing_figs:
                 self.report.add_issue(
                     61, "Cross-References", "Drawing Figure Count Matches Specification",
-                    Severity.PASS, f"Figure numbers match: {len(spec_figs)} figures (FIG. {', '.join(str(n) for n in sorted(spec_figs))})"
+                    Severity.PASS, f"Figure numbers match: {len(spec_figs)} figures (FIG. {', '.join(sorted(spec_figs, key=_fig_sort_key))})"
                 )
             elif len(spec_figs) == len(drawing_figs):
                 self.report.add_issue(
                     61, "Cross-References", "Drawing Figure Count Matches Specification",
-                    Severity.WARNING, f"Same figure count ({len(spec_figs)}) but different numbers. Spec: {sorted(spec_figs)}, Drawings: {sorted(drawing_figs)}"
+                    Severity.WARNING, f"Same figure count ({len(spec_figs)}) but different numbers. Spec: {sorted(spec_figs, key=_fig_sort_key)}, Drawings: {sorted(drawing_figs, key=_fig_sort_key)}"
                 )
             else:
                 self.report.add_issue(
