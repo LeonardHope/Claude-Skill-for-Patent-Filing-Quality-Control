@@ -107,7 +107,7 @@ def run(folder: str, *, generated_at: Optional[str] = None,
         from datetime import datetime, timezone
         generated_at = datetime.now(timezone.utc).isoformat()
 
-    from .checks import MIGRATED_IDS, REGISTRY
+    from .checks import MIGRATED_IDS, CHECKS
 
     qc = PatentFilingQC(folder)
     qc.load_documents()
@@ -119,9 +119,9 @@ def run(folder: str, *, generated_at: Optional[str] = None,
     result = build_result(qc, generated_at=generated_at)
 
     # Run the migrated core checks natively (they emit their own evidence). A
-    # check returns an Issue, a list of Issues (e.g. Check 9 can emit two), or
-    # None.
-    for fn in REGISTRY.values():
+    # check returns an Issue, a list of Issues (a check or a whole category may
+    # emit several), or None.
+    for fn in CHECKS:
         out = fn(qc)
         if out is None:
             continue

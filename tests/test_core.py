@@ -530,6 +530,34 @@ def t():
     return True
 
 
+# ---- migration parity: core == engine for every migrated check -------------
+@test("PARITY: core matches the engine for every migrated check (sample folder)")
+def t():
+    from collections import defaultdict
+    from core.checks import CHECKS, MIGRATED_IDS
+    qc = PatentFilingQC(str(SAMPLE_PDF.parent))
+    qc.load_documents()
+    qc.run_all_checks()                       # engine emits everything (no skip)
+    eng = defaultdict(list)
+    for i in qc.report.issues:
+        if i.check_id in MIGRATED_IDS:
+            eng[i.check_id].append((i.severity.value, i.message))
+    core = defaultdict(list)
+    for fn in CHECKS:
+        out = fn(qc)
+        for i in (out if isinstance(out, list) else [out]):
+            if i is not None:
+                core[i.check_id].append((i.severity, i.message))
+    bad = [cid for cid in MIGRATED_IDS if sorted(eng[cid]) != sorted(core[cid])]
+    if bad:
+        print(f"  ❌ parity mismatch (engine vs core) for checks: {sorted(bad)}")
+        for cid in sorted(bad)[:3]:
+            print(f"      {cid} engine={eng[cid]}")
+            print(f"      {cid} core  ={core[cid]}")
+        return False
+    return True
+
+
 # ---- run -------------------------------------------------------------------
 print("=" * 70)
 print(f"CORE SCHEMA + ADAPTER TESTS — {len(TESTS)} tests")
