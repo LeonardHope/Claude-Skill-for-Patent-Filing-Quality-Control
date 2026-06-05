@@ -1231,6 +1231,54 @@ def t():
     return True
 
 # ============================================================
+# 17. Image-only drawings classification fallback
+#     (an image-only drawings PDF with no extractable text must not be dropped
+#      to Unknown — that cascaded into 5 false "Drawings not found" CRITICALs)
+# ============================================================
+_qc_bare = PatentFilingQC(str(WORK))
+
+@test("DR18.1: image-only file (no text), generic name → Drawings (low conf)")
+def t():
+    r = _qc_bare._maybe_unreadable_drawings("X000-0000US-001", "")
+    if r != [("Drawings", 3.0)]:
+        print(f"  ❌ got {r}"); return False
+    return True
+
+@test("DR18.2: filename '...-Drawings.pdf' → Drawings (the reported case)")
+def t():
+    r = _qc_bare._maybe_unreadable_drawings("X000-0000US-Drawings", "")
+    if not r or r[0][0] != "Drawings":
+        print(f"  ❌ got {r}"); return False
+    return True
+
+@test("DR18.3: 'Figures'/'Sheets' filename hints → Drawings even with some text")
+def t():
+    longish = "x" * 80  # >50 chars, so only the name hint can fire
+    for stem in ("Figures", "FormalSheets", "drawing-set"):
+        r = _qc_bare._maybe_unreadable_drawings(stem, longish)
+        if not r or r[0][0] != "Drawings":
+            print(f"  ❌ {stem!r} → {r}"); return False
+    return True
+
+@test("DR18.4: no hint + substantial readable text → None (don't grab it)")
+def t():
+    r = _qc_bare._maybe_unreadable_drawings(
+        "CoverLetter", "Dear Sir, enclosed are the documents for this filing.")
+    if r is not None:
+        print(f"  ❌ should not classify a readable non-drawings file: {r}"); return False
+    return True
+
+@test("DR18.5: fallback only applies on Unknown — readable docs classify normally")
+def t():
+    # _classify_text on declaration text must NOT be Unknown, so the fallback
+    # branch in _classify_file never runs for a readable document.
+    res = _qc_bare._classify_text(
+        "DECLARATION I hereby declare that I am an original inventor 37 CFR 1.63")
+    if not res or res[0][0] == "Unknown":
+        print(f"  ❌ declaration text classified Unknown: {res}"); return False
+    return True
+
+# ============================================================
 # Run
 # ============================================================
 print("="*80); print(f"COMPREHENSIVE TEST SUITE — {len(TESTS)} tests"); print("="*80)
