@@ -933,7 +933,44 @@ class PatentFilingQC:
             if len(text.strip()) < 200:
                 text = self.extract_pdf_text(path, '<classifying>')
 
-        return self._classify_text(text)
+        results = self._classify_text(text)
+
+        # Fallback: content classification found nothing. In a filing folder,
+        # an image-only PDF with no usable text is almost always the drawings —
+        # the one document routinely filed as pure images with no extractable
+        # text (no "FIG." labels for the content scorer to read). Without this,
+        # such a drawings PDF is dropped to Unknown and cascades into five false
+        # "Drawings not found" CRITICALs (checks 9, 22, 23, 24, 25).
+        if all(t == 'Unknown' for t, _ in results):
+            fallback = self._maybe_unreadable_drawings(path.stem, text)
+            if fallback:
+                print(f"  🖼  {path.name} → Drawings "
+                      f"(content unreadable; image-only / filename fallback)")
+                return fallback
+
+        return results
+
+    def _maybe_unreadable_drawings(self, stem: str, text: str):
+        """Last-resort drawings fallback, used only when content classification
+        returned Unknown. Returns [('Drawings', conf)] or None.
+
+        Two signals, in priority order:
+          1. The filename clearly says drawings/figures/sheets. (Filename is a
+             last-resort corroboration here, consistent with the declaration
+             scan-hint fallback — the content classifier already failed.)
+          2. The file is effectively image-only (negligible text even after the
+             OCR attempt in _classify_file), which in a filing folder points to
+             the drawings.
+        Confidence is deliberately low so any genuine, text-bearing drawings
+        PDF (scored in _score_text) still wins the slot.
+        """
+        name_hint = any(k in stem.lower()
+                        for k in ('drawing', 'figure', 'figs', 'sheet'))
+        if name_hint:
+            return [('Drawings', 5.0)]
+        if len(text.strip()) < 50:   # image-only: no usable text recovered
+            return [('Drawings', 3.0)]
+        return None
 
     def _classify_text(self, text: str) -> List[Tuple[str, float]]:
         """Score text and apply combined-document detection. Returns a list
