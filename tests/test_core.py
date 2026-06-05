@@ -15,6 +15,7 @@ sys.path.insert(0, str(_ROOT / "scripts"))           # for the engine
 
 from core.result import Result, DocumentRef, Issue, Evidence, Locator  # noqa: E402
 from core.build import build_result                                    # noqa: E402
+from core.evidence import enrich                                       # noqa: E402
 from qc_patent_filing import PatentFilingQC, Severity                  # noqa: E402
 
 SAMPLE_PDF = _ROOT / "app" / "sample" / "Declaration.pdf"
@@ -113,6 +114,81 @@ def t():
     back = json.loads(s)
     if back["issues"][0]["check_id"] != 1:
         print(f"  ❌ serialized issue wrong"); return False
+    return True
+
+
+# ---- evidence enrichment (Phase 2) -----------------------------------------
+# The sample Declaration.pdf carries "Sarah J. CHEN" (page 1) and
+# "Aditya Vikram MEHTA" (page 2). Drive Check 1 from injected ADS data.
+_ADS = {"docket_number": "LUM-0142US",
+        "inventors": [{"first": "Sarah", "middle": "J.", "last": "CHEN"},
+                      {"first": "Aditya", "middle": "Vikram", "last": "MEHTA"}]}
+
+def _result_with_checks_1_and_3(ads=_ADS):
+    return Result(folder="/f", generated_at=GEN_AT, ads_data=ads, issues=[
+        Issue(1, "Cross-Document Consistency", "Inventor Names Consistency",
+              "PASS", "all present"),
+        Issue(3, "Cross-Document Consistency", "Attorney Docket Number Consistency",
+              "PASS", "docket matches"),
+    ])
+
+@test("EVID.1: Check 1 gets a pdf_region per inventor on the right page")
+def t():
+    res = _result_with_checks_1_and_3()
+    enrich(res, {"Declaration": SAMPLE_PDF})
+    c1 = next(i for i in res.issues if i.check_id == 1)
+    regions = [e for e in c1.evidence if e.locator.type == "pdf_region"]
+    by_name = {e.expected: e for e in regions}
+    if set(by_name) != {"CHEN", "MEHTA"}:
+        print(f"  ❌ surnames located: {set(by_name)}"); return False
+    if by_name["CHEN"].locator.page != 0 or by_name["MEHTA"].locator.page != 1:
+        print(f"  ❌ wrong pages: CHEN={by_name['CHEN'].locator.page} "
+              f"MEHTA={by_name['MEHTA'].locator.page}"); return False
+    b = by_name["CHEN"].locator.bbox
+    if not (b and len(b) == 4 and b[2] > b[0] and b[3] > b[1]):
+        print(f"  ❌ bad bbox: {b}"); return False
+    return True
+
+@test("EVID.2: Check 3 gets an xfa_field receipt with the docket value")
+def t():
+    res = _result_with_checks_1_and_3()
+    enrich(res, {"Declaration": SAMPLE_PDF})
+    c3 = next(i for i in res.issues if i.check_id == 3)
+    xf = [e for e in c3.evidence if e.locator.type == "xfa_field"]
+    if not xf or xf[0].locator.field_path != "docket_number" or xf[0].actual != "LUM-0142US":
+        print(f"  ❌ xfa_field evidence wrong: {xf}"); return False
+    return True
+
+@test("EVID.3: a surname not in the document yields a 'missing' receipt")
+def t():
+    ads = {"inventors": [{"first": "Nobody", "last": "ZZZNOTHERE"}]}
+    res = Result(folder="/f", generated_at=GEN_AT, ads_data=ads, issues=[
+        Issue(1, "Cross-Document Consistency", "Inventor Names Consistency",
+              "CRITICAL", "missing")])
+    enrich(res, {"Declaration": SAMPLE_PDF})
+    c1 = res.issues[0]
+    miss = [e for e in c1.evidence if e.kind == "missing"]
+    if not miss or miss[0].locator.type != "pdf_page":
+        print(f"  ❌ expected a missing pdf_page receipt: {c1.evidence}"); return False
+    return True
+
+@test("EVID.4: enriched evidence serializes (pdf_region bbox survives to JSON)")
+def t():
+    res = _result_with_checks_1_and_3()
+    enrich(res, {"Declaration": SAMPLE_PDF})
+    back = json.loads(res.to_json())
+    c1 = next(i for i in back["issues"] if i["check_id"] == 1)
+    region = next(e for e in c1["evidence"] if e["locator"]["type"] == "pdf_region")
+    if "bbox" not in region["locator"] or len(region["locator"]["bbox"]) != 4:
+        print(f"  ❌ bbox missing in JSON: {region['locator']}"); return False
+    return True
+
+@test("EVID.5: run(folder, enrich=False) attaches no evidence")
+def t():
+    from core.build import run
+    res = run(str(SAMPLE_PDF.parent), generated_at=GEN_AT, enrich=False)
+    if any(i.evidence for i in res.issues):
+        print(f"  ❌ evidence present despite enrich=False"); return False
     return True
 
 
