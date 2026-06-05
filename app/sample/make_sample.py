@@ -1,7 +1,8 @@
-"""Generate a tiny sample declaration PDF for the Phase-0 spike.
+"""Generate tiny sample filing PDFs for the v2 viewer + evidence tests.
 
-Throwaway: just enough real text, on two pages, to prove that we can locate a
-phrase (an inventor surname) and get its page + bounding box. Coordinates are
+Just enough real text to prove we can locate phrases (inventor surnames, the
+title, the docket) and get their page + bounding box. Title/docket use the
+generic BASE_ADS values from the test suite (no client data). Coordinates are
 in points (unit="pt") so they line up directly with pdfplumber's output.
 
 Run:  python3 app/sample/make_sample.py
@@ -9,7 +10,10 @@ Run:  python3 app/sample/make_sample.py
 from pathlib import Path
 from fpdf import FPDF
 
-OUT = Path(__file__).resolve().parent / "Declaration.pdf"
+HERE = Path(__file__).resolve().parent
+OUT = HERE / "Declaration.pdf"
+TITLE = "MEMORY-EFFICIENT INFERENCE FOR LARGE LANGUAGE MODELS"
+DOCKET = "LUM-0142US"
 
 
 def build():
@@ -53,5 +57,39 @@ def build():
     print(f"wrote {OUT}")
 
 
+def build_spec():
+    pdf = FPDF(unit="pt", format="letter")
+    pdf.set_auto_page_break(False)
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=13)
+    pdf.set_xy(72, 90)
+    pdf.cell(0, 18, TITLE)                       # title near the top (Check 2)
+    pdf.set_font("Helvetica", size=11)
+    pdf.set_xy(72, 140)
+    pdf.cell(0, 14, "BACKGROUND")
+    pdf.set_xy(72, 162)
+    pdf.cell(0, 14, "Modern systems require efficient inference.")
+    out = HERE / "Specification.pdf"
+    pdf.output(str(out)); print(f"wrote {out}")
+
+
+def build_drawings():
+    pdf = FPDF(unit="pt", format="letter")
+    pdf.set_auto_page_break(False)
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=10)
+    pdf.set_xy(72, 54)
+    pdf.cell(0, 14, f"(Docket No.: {DOCKET})")   # margin docket label (Check 23)
+    pdf.set_xy(420, 54)
+    pdf.cell(0, 14, "Sheet 1 of 1")
+    pdf.set_font("Helvetica", size=12)
+    pdf.set_xy(260, 380)
+    pdf.cell(0, 16, "FIG. 1")
+    out = HERE / "Drawings.pdf"
+    pdf.output(str(out)); print(f"wrote {out}")
+
+
 if __name__ == "__main__":
     build()
+    build_spec()
+    build_drawings()

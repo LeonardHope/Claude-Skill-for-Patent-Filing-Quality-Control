@@ -12,18 +12,28 @@ import re
 from typing import Dict, Optional
 
 _WS = re.compile(r"\s+")
+_EDGE_PUNCT = ".,;:()[]{}\"'"
 
 
 def _norm(s: str) -> str:
     return _WS.sub(" ", s).strip().lower()
 
 
+def _tok(s: str) -> str:
+    """Normalize a token and strip surrounding punctuation, keeping internal
+    chars: 'X000-0000US)' -> 'X000-0179us' (internal '-' kept); 'CHEN,' ->
+    'chen'. Lets a phrase match even when the PDF token carries a trailing
+    paren/comma from its surrounding text."""
+    return _norm(s).strip(_EDGE_PUNCT)
+
+
 def locate(pdf_path, phrase: str, *, pad: float = 1.5) -> Optional[Dict]:
     """First run of consecutive words on a page whose concatenation matches
-    `phrase` (case/space-insensitive). Returns
+    `phrase` (case/space/edge-punctuation-insensitive). Returns
     {page, bbox:[x0,top,x1,bottom], page_width, page_height, matched} or None.
     Never raises — returns None on any extraction error."""
-    targets = _norm(phrase).split()
+    targets = [_tok(t) for t in _norm(phrase).split()]
+    targets = [t for t in targets if t]
     if not targets:
         return None
     try:
@@ -31,7 +41,7 @@ def locate(pdf_path, phrase: str, *, pad: float = 1.5) -> Optional[Dict]:
         with pdfplumber.open(str(pdf_path)) as pdf:
             for page_index, page in enumerate(pdf.pages):
                 words = page.extract_words(use_text_flow=True)
-                normed = [_norm(w["text"]) for w in words]
+                normed = [_tok(w["text"]) for w in words]
                 for i in range(len(words) - len(targets) + 1):
                     if normed[i:i + len(targets)] == targets:
                         span = words[i:i + len(targets)]
