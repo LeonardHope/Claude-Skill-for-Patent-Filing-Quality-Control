@@ -643,6 +643,32 @@ def t():
     return True
 
 
+# ---- read-only guarantee: the QC run must never touch the filing folder -----
+@test("READONLY: core.run() creates, modifies, or deletes nothing in the folder")
+def t():
+    from core.build import run as _run
+    folder = SAMPLE_PDF.parent
+
+    def snap():
+        s = {}
+        for p in sorted(folder.rglob("*")):
+            if p.is_file():
+                st = p.stat()
+                s[str(p.relative_to(folder))] = (st.st_size, st.st_mtime_ns)
+        return s
+
+    before = snap()
+    _run(str(folder), generated_at="t")        # full QC incl. OCR on the sample
+    after = snap()
+    if before != after:
+        added = set(after) - set(before)
+        removed = set(before) - set(after)
+        changed = {k for k in before if k in after and before[k] != after[k]}
+        print(f"  ❌ folder changed — added={added} removed={removed} changed={changed}")
+        return False
+    return True
+
+
 # ---- migration parity: core == engine for every migrated check -------------
 @test("PARITY: core matches the engine for every migrated check (sample folder)")
 def t():

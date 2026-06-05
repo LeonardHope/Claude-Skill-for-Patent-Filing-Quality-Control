@@ -24,6 +24,21 @@
   .wrap { display:grid; grid-template-columns:420px 1fr; height:calc(100vh - 49px); }
   .checks { overflow:auto; border-right:1px solid var(--line); background:var(--panel); }
   .viewer { overflow:auto; position:relative; padding:16px; }
+  .cattools { display:flex; gap:8px; padding:8px 14px; border-bottom:1px solid var(--line); background:var(--panel); }
+  .cattools button { background:#1d2430; color:var(--muted); border:1px solid var(--line);
+                     border-radius:6px; padding:3px 9px; font-size:11px; cursor:pointer; }
+  .cattools button:hover { color:var(--text); border-color:var(--accent); }
+  .cat { position:sticky; top:0; z-index:1; background:var(--panel); padding:9px 14px;
+         border-bottom:1px solid var(--line); cursor:pointer; user-select:none;
+         display:flex; align-items:center; gap:9px; }
+  .cat:hover { background:#1b212b; }
+  .cat .chev { font-size:11px; color:var(--muted); flex:none; transition:transform .12s; display:inline-block; }
+  .cat.collapsed .chev { transform:rotate(-90deg); }
+  .cat .ctitle { font-weight:700; font-size:13px; }
+  .cat .ccount { color:var(--muted); font-size:12px; }
+  .cat .cdots { margin-left:auto; display:flex; gap:5px; }
+  .cat .cdots .badge { margin:0; }
+  .catbody.collapsed { display:none; }
   .check { padding:11px 14px; border-bottom:1px solid var(--line); }
   .badge { display:inline-block; font-size:11px; font-weight:700; padding:2px 7px; border-radius:10px; margin-right:8px; }
   .PASS { background:#123524; color:#5ee08a; } .CRITICAL { background:#3a1418; color:#ff7a85; }
@@ -106,7 +121,13 @@
     <div class="filters" id="filters"></div>
   </header>
   <div class="wrap">
-    <div class="checks" id="checks"></div>
+    <div class="checks" id="checks">
+      <div class="cattools">
+        <button id="expandAll">Expand all</button>
+        <button id="collapseAll">Collapse all</button>
+      </div>
+      <div id="checklist"></div>
+    </div>
     <div class="viewer" id="viewer"><div class="hint">Select a check with a receipt on the left.</div></div>
   </div>
 </div>
@@ -118,7 +139,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc =
 
 const VIEW_W = 780;
 let pdfCache = {};
-let RESULT = null, FILTER = "receipts", FOLDER = null;
+let RESULT = null, FILTER = "receipts", FOLDER = null, COLLAPSED = {};
 
 const $ = id => document.getElementById(id);
 const qF = () => "folder=" + encodeURIComponent(FOLDER || "");
@@ -210,26 +231,48 @@ function activate(ev) {
 }
 
 /* ---------- checks list ---------- */
+function checkEl(issue) {
+  const el = document.createElement("div"); el.className = "check";
+  el.innerHTML = `<div><span class="badge ${issue.severity}">${issue.severity}</span>
+    <span class="cname">${issue.check_id}. ${issue.check_name}</span></div>
+    <div class="cmsg">${issue.message}</div>`;
+  (issue.evidence||[]).forEach(ev => {
+    const e = document.createElement("div"); e.className = "ev " + (ev.kind||"");
+    e.innerHTML = `<div class="tag">${ev.locator.type} · ${ev.kind}</div><div>${ev.label||ev.snippet||""}</div>`;
+    e.onclick = () => activate(ev);
+    el.appendChild(e);
+  });
+  return el;
+}
+
 function render() {
-  const root = $("checks"); root.innerHTML = "";
+  const root = $("checklist"); root.innerHTML = "";
   const issues = RESULT.issues.filter(i =>
     FILTER === "all" ? true :
     FILTER === "receipts" ? (i.evidence && i.evidence.length) :
     i.severity === FILTER);
-  issues.forEach(issue => {
-    const el = document.createElement("div"); el.className = "check";
-    el.innerHTML = `<div><span class="badge ${issue.severity}">${issue.severity}</span>
-      <span class="cname">${issue.check_id}. ${issue.check_name}</span></div>
-      <div class="cmsg">${issue.message}</div>`;
-    (issue.evidence||[]).forEach(ev => {
-      const e = document.createElement("div"); e.className = "ev " + (ev.kind||"");
-      e.innerHTML = `<div class="tag">${ev.locator.type} · ${ev.kind}</div><div>${ev.label||ev.snippet||""}</div>`;
-      e.onclick = () => activate(ev);
-      el.appendChild(e);
-    });
-    root.appendChild(el);
+  if (!issues.length) { root.innerHTML = `<div class="hint">No checks match this filter.</div>`; return; }
+
+  const order = [], byCat = {};
+  issues.forEach(i => { const c = i.category || "Other";
+    if (!(c in byCat)) { byCat[c] = []; order.push(c); } byCat[c].push(i); });
+
+  order.forEach(cat => {
+    const list = byCat[cat], collapsed = !!COLLAPSED[cat];
+    const counts = {}; list.forEach(i => counts[i.severity] = (counts[i.severity]||0)+1);
+    const pills = ["CRITICAL","WARNING","INFO","PASS"].filter(s=>counts[s])
+      .map(s=>`<span class="badge ${s}">${counts[s]}</span>`).join("");
+    const head = document.createElement("div");
+    head.className = "cat" + (collapsed ? " collapsed" : "");
+    head.innerHTML = `<span class="chev">▾</span><span class="ctitle">${cat}</span>
+      <span class="ccount">${list.length}</span><span class="cdots">${pills}</span>`;
+    const body = document.createElement("div");
+    body.className = "catbody" + (collapsed ? " collapsed" : "");
+    list.forEach(issue => body.appendChild(checkEl(issue)));
+    head.onclick = () => { COLLAPSED[cat] = !COLLAPSED[cat];
+      head.classList.toggle("collapsed"); body.classList.toggle("collapsed"); };
+    root.appendChild(head); root.appendChild(body);
   });
-  if (!issues.length) root.innerHTML = `<div class="hint">No checks match this filter.</div>`;
 }
 
 function setup() {
@@ -247,6 +290,8 @@ function setup() {
     b.onclick=()=>{FILTER=k; [...f.children].forEach(c=>c.classList.remove("on")); b.classList.add("on"); render();};
     f.appendChild(b);
   });
+  $("expandAll").onclick = () => { COLLAPSED = {}; render(); };
+  $("collapseAll").onclick = () => { RESULT.issues.forEach(i => COLLAPSED[i.category||"Other"]=true); render(); };
   render();
 }
 
