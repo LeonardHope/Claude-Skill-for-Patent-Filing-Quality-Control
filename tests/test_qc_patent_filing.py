@@ -1279,6 +1279,124 @@ def t():
     return True
 
 # ============================================================
+# 18. Drawings scoring — figure-rich drawings with lots of callout text
+#     (synthetic; reproduces a real filing where a 9-figure, 60+ reference-
+#      numeral drawings PDF extracted 4k+ chars and was wrongly dropped to
+#      Unknown because of a prose-length ceiling)
+# ============================================================
+def _figure_rich_drawings_text(figs=9, n_callouts=360):
+    """Build drawings-style text: figure labels + a 'Page N of M' margin header
+    + many reference numerals + dense uppercase part-label callouts, with NO
+    specification structure. Comfortably exceeds the old 4000-char ceiling."""
+    parts = []
+    labels = ["AUTOMATED TEST FAILURES", "FIRMWARE SOURCE CODE REPOSITORY",
+              "INTEGRATED DEVELOPMENT ENVIRONMENT", "SYSTEM UNDER TEST",
+              "MACHINE LEARNING MODEL", "TEST FAILURE ANALYZER",
+              "RENDERED TEST EXECUTION LOG", "VECTOR DATABASE",
+              "DIAGNOSTIC ROUTING MODULE", "ERROR ORIGIN CLASSIFIER"]
+    for fig in range(1, figs + 1):
+        parts.append(f"Page {fig} of {figs}    (Docket No.: X000-0000US)")
+        for i in range(n_callouts // figs):
+            parts.append(labels[i % len(labels)])
+            parts.append(str(100 + (i * 2) % 900))   # reference numeral on its own line
+        parts.append(f"FIG. {fig}")
+    return "\n".join(parts)
+
+@test("DR19.1: figure-rich drawings with 4k+ chars of callouts → Drawings")
+def t():
+    text = _figure_rich_drawings_text()
+    assert len(re.sub(r"\s+", " ", text)) > 4000, "fixture should exceed old ceiling"
+    bt, bs, scores = _qc_bare._score_text(text)
+    if bt != "Drawings":
+        print(f"  ❌ classified {bt} (score {bs}); Drawings={scores.get('Drawings')}")
+        return False
+    return True
+
+@test("DR19.2: 'Page N of M' margin header recognized as a sheet signal")
+def t():
+    # Sparse text, only the margin header + a couple numerals (no FIG label).
+    text = "Page 1 of 7\n(Docket No.: X000-0000US)\n102\n104\n"
+    bt, bs, scores = _qc_bare._score_text(text)
+    if scores.get("Drawings", 0) < 3:
+        print(f"  ❌ Drawings score too low: {scores.get('Drawings')}"); return False
+    return True
+
+@test("DR19.3: a real spec that references figures is NOT misclassified as Drawings")
+def t():
+    # Spec has FIG. mentions but also claim/abstract/background structure.
+    bt, bs, scores = _qc_bare._score_text(BASE_SPEC)
+    if bt == "Drawings":
+        print(f"  ❌ spec misclassified as Drawings; scores={scores}"); return False
+    if scores.get("Specification", 0) < 5:
+        print(f"  ❌ spec didn't score as Specification: {scores}"); return False
+    return True
+
+@test("DR19.4: figure-label regex accepts 'FIG 1' / 'FIGURE 1' (no period)")
+def t():
+    for variant in ("FIG 1", "FIGURE 1", "Figs. 2"):
+        text = f"Page 1 of 3\n{variant}\nWIDGET ASSEMBLY\n102\nFRAME\n104\n{variant}\n"
+        # add a second figure label so fig_count >= 2 path is exercised
+        text += "FIG 2\nGEAR\n106\n"
+        _, _, scores = _qc_bare._score_text(text)
+        if scores.get("Drawings", 0) < 3:
+            print(f"  ❌ {variant!r} not recognized: Drawings={scores.get('Drawings')}")
+            return False
+    return True
+
+# ============================================================
+# 19. Figure counting — sub-figures + plural "FIGS." (Check 61)
+# ============================================================
+_FC_SPEC = (
+    "Title of invention\nBRIEF DESCRIPTION OF THE DRAWINGS\n"
+    "FIG. 1 is a system diagram. FIG. 2 is a flow chart. FIG. 3 shows a module. "
+    "FIGS. 4A and 4B are flow diagrams. FIG. 5 is a timeline. FIG. 6 is a graph. "
+    "FIG. 7 is a circuit. FIG. 8 is a layout.\nDETAILED DESCRIPTION\nbody text.\n"
+)
+_FC_DRAW = "FIG. 1\nFIG. 2\nFIG. 3\nFIG. 4A\nFIG. 4B\nFIG. 5\nFIG. 6\nFIG. 7\nFIG. 8\n"
+
+@test("FC20.1: sub-figures counted distinctly — 4A and 4B are two figures")
+def t():
+    ids = _qc_bare._extract_figure_identities(_FC_DRAW)
+    if ids != ["1", "2", "3", "4A", "4B", "5", "6", "7", "8"]:
+        print(f"  ❌ identities = {ids}"); return False
+    if len(ids) != 9:
+        print(f"  ❌ count = {len(ids)} (expected 9)"); return False
+    return True
+
+@test("FC20.2: plural 'FIGS. 4A and 4B' enumeration captures both 4A and 4B")
+def t():
+    subs = _qc_bare._extract_subfigures("FIGS. 4A and 4B are flow diagrams")
+    if subs != {(4, "A"), (4, "B")}:
+        print(f"  ❌ subfigures = {subs}"); return False
+    return True
+
+@test("FC20.3: adjacent 'FIG. 1\\nFIG. 2\\n...' — no alternating figures dropped")
+def t():
+    nums = _qc_bare._extract_figure_numbers(_FC_DRAW)
+    if nums != [1, 2, 3, 4, 5, 6, 7, 8]:
+        print(f"  ❌ base nums = {nums} (adjacency bug?)"); return False
+    return True
+
+@test("FC20.4: Check 61 PASS — spec 9 figs == drawings 9 figs (the reported case)")
+def t():
+    qc = build_qc(spec=_FC_SPEC, drawings=_FC_DRAW)
+    qc.run_all_checks()
+    issue = get_check(qc, 61)
+    if not issue or issue.severity != Severity.PASS:
+        print(f"  ❌ Check 61 = {issue.severity.value if issue else 'absent'} "
+              f"(expected PASS); {issue.message[:100] if issue else ''}")
+        return False
+    if "9 figures" not in issue.message:
+        print(f"  ❌ message should report 9 figures: {issue.message[:100]}"); return False
+    return True
+
+@test("FC20.5: 'CONFIGURATION' is not mistaken for a figure")
+def t():
+    if _qc_bare._extract_figure_numbers("the CONFIGURATION 3 settings"):
+        print("  ❌ CONFIG matched as a figure"); return False
+    return True
+
+# ============================================================
 # Run
 # ============================================================
 print("="*80); print(f"COMPREHENSIVE TEST SUITE — {len(TESTS)} tests"); print("="*80)
