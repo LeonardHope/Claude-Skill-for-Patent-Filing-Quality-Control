@@ -107,10 +107,23 @@ def run(folder: str, *, generated_at: Optional[str] = None,
         from datetime import datetime, timezone
         generated_at = datetime.now(timezone.utc).isoformat()
 
+    from .checks import MIGRATED_IDS, REGISTRY
+
     qc = PatentFilingQC(folder)
     qc.load_documents()
+    # Tell the engine to skip checks core now owns — set ONLY here, so the
+    # standalone CLI (which doesn't go through core.run) is unaffected.
+    qc.report.skip_check_ids = set(qc.report.skip_check_ids) | set(MIGRATED_IDS)
     qc.run_all_checks()
+
     result = build_result(qc, generated_at=generated_at)
+
+    # Run the migrated core checks natively (they emit their own evidence).
+    for fn in REGISTRY.values():
+        issue = fn(qc)
+        if issue is not None:
+            result.issues.append(issue)
+    result.issues.sort(key=lambda i: i.check_id)
 
     if enrich:
         from .evidence import enrich as _enrich

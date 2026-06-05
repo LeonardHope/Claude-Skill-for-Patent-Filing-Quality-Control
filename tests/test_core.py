@@ -204,16 +204,52 @@ def t():
         print("  ❌ docket not located against trailing-paren token"); return False
     return True
 
-@test("EVID.6: Check 2 gets a pdf_region for the title in the specification")
+class _FakeQC:
+    """Minimal stand-in for a finished engine run, for the native core check."""
+    def __init__(self, ads_data, spec_text, documents):
+        self.ads_data = ads_data; self.spec_text = spec_text
+        self.ads_text = ""; self.documents = documents
+    def extract_title(self, _): return ""
+
+@test("MIG.1: native Check 2 (core/checks) — PASS + pdf_region + xfa_field")
 def t():
-    res = Result(folder="/f", generated_at=GEN_AT,
-                 ads_data={"title": _TITLE, "docket_number": "LUM-0142US"},
-                 issues=[Issue(2, "Cross-Document Consistency",
-                               "Application Title Consistency", "PASS", "ok")])
-    enrich(res, {"Specification": SPEC_PDF})
-    regions = [e for e in res.issues[0].evidence if e.locator.type == "pdf_region"]
-    if not regions or regions[0].doc_type != "Specification":
-        print(f"  ❌ no spec pdf_region: {res.issues[0].evidence}"); return False
+    from core.checks.cross_document import check_application_title
+    qc = _FakeQC({"title": _TITLE}, f"BACKGROUND\n{_TITLE}\nbody",
+                 {"Specification": SPEC_PDF})
+    issue = check_application_title(qc)
+    if issue.check_id != 2 or issue.severity != "PASS":
+        print(f"  ❌ check_id/severity = {issue.check_id}/{issue.severity}"); return False
+    types = {e.locator.type for e in issue.evidence}
+    if types != {"pdf_region", "xfa_field"}:
+        print(f"  ❌ evidence types = {types}"); return False
+    return True
+
+@test("MIG.2: native Check 2 — CRITICAL when the title is absent from the spec")
+def t():
+    from core.checks.cross_document import check_application_title
+    qc = _FakeQC({"title": _TITLE}, "BACKGROUND\nsomething unrelated entirely",
+                 {"Specification": SPEC_PDF})
+    issue = check_application_title(qc)
+    if issue.severity != "CRITICAL":
+        print(f"  ❌ severity = {issue.severity} (expected CRITICAL)"); return False
+    return True
+
+@test("MIG.3: core.run emits Check 2 exactly once (engine copy skipped)")
+def t():
+    from core.build import run
+    res = run(str(SAMPLE_PDF.parent), generated_at=GEN_AT)
+    c2 = [i for i in res.issues if i.check_id == 2]
+    if len(c2) != 1:
+        print(f"  ❌ Check 2 appears {len(c2)} times (duplicate or missing)"); return False
+    return True
+
+@test("MIG.4: issues stay ordered by check_id after core checks are appended")
+def t():
+    from core.build import run
+    res = run(str(SAMPLE_PDF.parent), generated_at=GEN_AT)
+    ids = [i.check_id for i in res.issues]
+    if ids != sorted(ids):
+        print(f"  ❌ issues not ordered by check_id"); return False
     return True
 
 @test("EVID.7: Check 23 gets a pdf_region for the docket in the drawings margin")
