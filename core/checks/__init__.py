@@ -27,6 +27,9 @@ from .ads import check_ads  # noqa: F401
 from .declaration import check_declaration  # noqa: F401
 from .assignment import check_assignment  # noqa: F401
 from .power_of_attorney import check_poa  # noqa: F401
+from .formatting import check_formatting  # noqa: F401
+from .common_errors import check_common_errors  # noqa: F401
+from .file_quality import check_file_quality  # noqa: F401
 
 CHECKS = [
     # Cross-Document Consistency (1-8)
@@ -48,6 +51,12 @@ CHECKS = [
     check_assignment,
     # Power of Attorney (42, 44; 41 OCRs short POA forms -> engine)
     check_poa,
+    # USPTO Formatting (45; 49 page-numbering reads the PDF -> engine)
+    check_formatting,
+    # Common Errors (50, 51; 52-54 drafting-quality heuristics -> engine)
+    check_common_errors,
+    # File Quality (55, 56, 58; 57 password check reads PDFs -> engine)
+    check_file_quality,
 ]
 
 MIGRATED_IDS = {
@@ -59,4 +68,7 @@ MIGRATED_IDS = {
     32, 33, 34,                       # 35 (declaration date, OCR) left in engine
     36, 37, 38, 40,                   # 39 (assignment date, OCR) left in engine
     42, 44,                           # 41 (POA practitioners, OCR) left in engine
+    45,                               # 49 (page numbering, reads PDF) left in engine
+    50, 51,                           # 52-54 (drafting-quality heuristics) left in engine
+    55, 56, 58,                       # 57 (password protection, reads PDFs) left in engine
 }
