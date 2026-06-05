@@ -11,8 +11,9 @@ Migration is incremental: one check moves here per step; until the HTML report
 also consumes Result, the engine retains its (skipped-in-core) copy.
 """
 from .cross_document import (  # noqa: F401
-    check_inventor_names, check_application_title,
-    check_attorney_docket, check_correspondence,
+    check_inventor_names, check_application_title, check_attorney_docket,
+    check_correspondence, check_assignee_name, check_filing_date,
+    check_inventor_count, check_residency,
 )
 
 # id -> callable(qc) -> Issue ; checks core/checks now owns.
@@ -21,6 +22,10 @@ REGISTRY = {
     2: check_application_title,
     3: check_attorney_docket,
     4: check_correspondence,
+    5: check_assignee_name,
+    6: check_filing_date,
+    7: check_inventor_count,
+    8: check_residency,
 }
 
 # Check IDs owned by core/checks (skipped in the engine when run via core).

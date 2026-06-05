@@ -228,8 +228,10 @@ The duplicate engine copy is removed only once the **HTML report also consumes
 delete migrated checks from the engine. Until then, `skip_check_ids` keeps the
 two paths consistent with no double-emission.
 
-*Status: Check 2 (Application Title) is the first migrated check — native
-evidence, engine-skipped in the core path, CLI unchanged.*
+*Status: the entire Cross-Document Consistency category (Checks 1–8) is migrated
+to `core/checks/cross_document.py` — native evidence, engine-skipped in the core
+path, CLI unchanged. Engine-vs-core parity verified on a real filing (identical
+severity + message for all 8).*
 
 *Both frontends now consume `Result`: the interactive viewer (`app/`) and the
 static HTML report (`report/`, evidence-aware). Next enabler for clean
