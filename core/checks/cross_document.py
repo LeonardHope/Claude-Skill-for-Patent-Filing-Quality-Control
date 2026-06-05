@@ -43,7 +43,15 @@ def _inventor_evidence(qc, pairs):
             path = docs.get(doc_type)
             if not path:
                 continue
-            hit = locate(path, surname) or locate(path, inv_name)
+            # A short surname (e.g. a single-letter "P") is ambiguous as a bare
+            # token — it can match a stray initial elsewhere on the page. For
+            # those, locate the full name first so the given name disambiguates
+            # which inventor; fall back to the bare surname only if the full
+            # name doesn't extract as one run. Normal surnames keep the tighter
+            # surname-only highlight.
+            short = len((surname or "").strip()) <= 2
+            order = ((inv_name, surname) if short else (surname, inv_name))
+            hit = next((h for h in (locate(path, q) for q in order if q) if h), None)
             if hit:
                 ev.append(Evidence(
                     doc_type=doc_type,

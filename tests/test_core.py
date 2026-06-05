@@ -152,6 +152,25 @@ def t():
         print("  ❌ wrong pages"); return False
     return True
 
+@test("MIG1.short: short surname locates full name first; normal surname unchanged")
+def t():
+    import core.checks.cross_document as cd
+    calls = []
+    orig = cd.locate
+    cd.locate = lambda path, q: (calls.append(q), None)[1]   # record order, find nothing
+    try:
+        qc = _qc1([], "", documents={"Declaration": SAMPLE_PDF})
+        cd._inventor_evidence(qc, [("Manoj Kumar P", "P")])
+        if calls[:2] != ["Manoj Kumar P", "P"]:
+            print(f"  ❌ short-surname order: {calls}"); return False
+        calls.clear()
+        cd._inventor_evidence(qc, [("Sarah J. CHEN", "CHEN")])
+        if calls[:2] != ["CHEN", "Sarah J. CHEN"]:
+            print(f"  ❌ normal-surname order: {calls}"); return False
+        return True
+    finally:
+        cd.locate = orig
+
 from core.checks.cross_document import check_attorney_docket, check_correspondence  # noqa: E402
 
 def _qc(**attrs):
