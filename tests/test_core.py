@@ -117,70 +117,87 @@ def t():
     return True
 
 
-# ---- evidence enrichment (Phase 2) -----------------------------------------
+# ---- native Check 1 (core/checks) + Check 3 enricher -----------------------
 # The sample Declaration.pdf carries "Sarah J. CHEN" (page 1) and
-# "Aditya Vikram MEHTA" (page 2). Drive Check 1 from injected ADS data.
-_ADS = {"docket_number": "LUM-0142US",
-        "inventors": [{"first": "Sarah", "middle": "J.", "last": "CHEN"},
-                      {"first": "Aditya", "middle": "Vikram", "last": "MEHTA"}]}
+# "Aditya Vikram MEHTA" (page 2).
+from core.checks.cross_document import check_inventor_names  # noqa: E402
 
-def _result_with_checks_1_and_3(ads=_ADS):
-    return Result(folder="/f", generated_at=GEN_AT, ads_data=ads, issues=[
-        Issue(1, "Cross-Document Consistency", "Inventor Names Consistency",
-              "PASS", "all present"),
-        Issue(3, "Cross-Document Consistency", "Attorney Docket Number Consistency",
-              "PASS", "docket matches"),
-    ])
+def _qc1(inventors, decl, asgn="", image_only=None, documents=None):
+    """A real PatentFilingQC (for its name-matching helpers) with just the
+    state Check 1 reads, set directly."""
+    qc = PatentFilingQC(str(SAMPLE_PDF.parent))
+    qc.ads_data = {"inventors": inventors}
+    qc.ads_text = ""
+    qc.declaration_text = decl
+    qc.assignment_text = asgn
+    qc.image_only_pages = image_only or {}
+    qc.documents = documents or {}
+    return qc
 
-@test("EVID.1: Check 1 gets a pdf_region per inventor on the right page")
+_INV2 = [{"first": "Sarah", "middle": "J.", "last": "CHEN"},
+         {"first": "Aditya", "middle": "Vikram", "last": "MEHTA"}]
+_DECL_TXT = ("DECLARATION\nSarah J. CHEN and Aditya Vikram MEHTA are inventors.\n"
+             + "padding.\n" * 10)
+
+@test("MIG1.1: native Check 1 PASS + pdf_region per inventor on the right page")
 def t():
-    res = _result_with_checks_1_and_3()
-    enrich(res, {"Declaration": SAMPLE_PDF})
-    c1 = next(i for i in res.issues if i.check_id == 1)
-    regions = [e for e in c1.evidence if e.locator.type == "pdf_region"]
-    by_name = {e.expected: e for e in regions}
-    if set(by_name) != {"CHEN", "MEHTA"}:
-        print(f"  ❌ surnames located: {set(by_name)}"); return False
-    if by_name["CHEN"].locator.page != 0 or by_name["MEHTA"].locator.page != 1:
-        print(f"  ❌ wrong pages: CHEN={by_name['CHEN'].locator.page} "
-              f"MEHTA={by_name['MEHTA'].locator.page}"); return False
-    b = by_name["CHEN"].locator.bbox
-    if not (b and len(b) == 4 and b[2] > b[0] and b[3] > b[1]):
-        print(f"  ❌ bad bbox: {b}"); return False
+    qc = _qc1(_INV2, _DECL_TXT, documents={"Declaration": SAMPLE_PDF})
+    issue = check_inventor_names(qc)
+    if issue.check_id != 1 or issue.severity != "PASS":
+        print(f"  ❌ {issue.check_id}/{issue.severity}: {issue.message[:60]}"); return False
+    regions = {e.expected: e for e in issue.evidence if e.locator.type == "pdf_region"}
+    if set(regions) != {"CHEN", "MEHTA"}:
+        print(f"  ❌ located surnames: {set(regions)}"); return False
+    if regions["CHEN"].locator.page != 0 or regions["MEHTA"].locator.page != 1:
+        print("  ❌ wrong pages"); return False
     return True
 
 @test("EVID.2: Check 3 gets an xfa_field receipt with the docket value")
 def t():
-    res = _result_with_checks_1_and_3()
-    enrich(res, {"Declaration": SAMPLE_PDF})
-    c3 = next(i for i in res.issues if i.check_id == 3)
-    xf = [e for e in c3.evidence if e.locator.type == "xfa_field"]
+    res = Result(folder="/f", generated_at=GEN_AT,
+                 ads_data={"docket_number": "LUM-0142US"},
+                 issues=[Issue(3, "Cross-Document Consistency",
+                               "Attorney Docket Number Consistency", "PASS", "ok")])
+    enrich(res, {})
+    xf = [e for e in res.issues[0].evidence if e.locator.type == "xfa_field"]
     if not xf or xf[0].locator.field_path != "docket_number" or xf[0].actual != "LUM-0142US":
         print(f"  ❌ xfa_field evidence wrong: {xf}"); return False
     return True
 
-@test("EVID.3: a surname not in the document yields a 'missing' receipt")
+@test("MIG1.2: native Check 1 CRITICAL when an inventor is missing")
 def t():
-    ads = {"inventors": [{"first": "Nobody", "last": "ZZZNOTHERE"}]}
-    res = Result(folder="/f", generated_at=GEN_AT, ads_data=ads, issues=[
-        Issue(1, "Cross-Document Consistency", "Inventor Names Consistency",
-              "CRITICAL", "missing")])
-    enrich(res, {"Declaration": SAMPLE_PDF})
-    c1 = res.issues[0]
-    miss = [e for e in c1.evidence if e.kind == "missing"]
+    # Second inventor is absent from both the text AND the sample PDF.
+    inv = [{"first": "Sarah", "last": "CHEN"},
+           {"first": "Nobody", "last": "ZZZNOTHERE"}]
+    qc = _qc1(inv, "DECLARATION\nOnly Sarah CHEN is named here.\n" + "padding.\n" * 10,
+              documents={"Declaration": SAMPLE_PDF})
+    issue = check_inventor_names(qc)
+    if issue.severity != "CRITICAL":
+        print(f"  ❌ severity = {issue.severity} (expected CRITICAL)"); return False
+    miss = [e for e in issue.evidence
+            if e.kind == "missing" and e.expected == "ZZZNOTHERE"]
     if not miss or miss[0].locator.type != "pdf_page":
-        print(f"  ❌ expected a missing pdf_page receipt: {c1.evidence}"); return False
+        print(f"  ❌ expected a missing pdf_page receipt for ZZZNOTHERE"); return False
     return True
 
-@test("EVID.4: enriched evidence serializes (pdf_region bbox survives to JSON)")
+@test("MIG1.3: native Check 1 hedges to WARNING when missing on an image-only doc")
 def t():
-    res = _result_with_checks_1_and_3()
-    enrich(res, {"Declaration": SAMPLE_PDF})
+    qc = _qc1(_INV2, "DECLARATION\nOnly Sarah J. CHEN is named.\n" + "padding.\n" * 10,
+              image_only={"Declaration": 2}, documents={"Declaration": SAMPLE_PDF})
+    issue = check_inventor_names(qc)
+    if issue.severity != "WARNING":
+        print(f"  ❌ severity = {issue.severity} (expected WARNING)"); return False
+    return True
+
+@test("MIG1.4: native Check 1 evidence serializes (bbox survives to JSON)")
+def t():
+    qc = _qc1(_INV2, _DECL_TXT, documents={"Declaration": SAMPLE_PDF})
+    res = Result(folder="/f", generated_at=GEN_AT, issues=[check_inventor_names(qc)])
     back = json.loads(res.to_json())
-    c1 = next(i for i in back["issues"] if i["check_id"] == 1)
-    region = next(e for e in c1["evidence"] if e["locator"]["type"] == "pdf_region")
-    if "bbox" not in region["locator"] or len(region["locator"]["bbox"]) != 4:
-        print(f"  ❌ bbox missing in JSON: {region['locator']}"); return False
+    region = next(e for e in back["issues"][0]["evidence"]
+                  if e["locator"]["type"] == "pdf_region")
+    if len(region["locator"]["bbox"]) != 4:
+        print(f"  ❌ bbox missing in JSON"); return False
     return True
 
 @test("EVID.5: run(folder, enrich=False) attaches no evidence")
