@@ -205,6 +205,76 @@ def t():
         print(f"  ❌ severity = {issue.severity} (expected CRITICAL)"); return False
     return True
 
+from core.checks.cross_document import (check_assignee_name, check_filing_date,  # noqa: E402
+                                        check_inventor_count, check_residency)
+
+@test("MIG5.1: native Check 5 PASS when assignee appears in assignment; xfa_field")
+def t():
+    qc = _qc(ads_data={"assignee_org": "LUMINA AI, INC."}, ads_text="",
+             assignment_text="assigns to LUMINA AI, INC. the entire right title "
+                             "and interest", documents={})
+    issue = check_assignee_name(qc)
+    if issue.check_id != 5 or issue.severity != "PASS":
+        print(f"  ❌ {issue.check_id}/{issue.severity}"); return False
+    if not any(e.locator.type == "xfa_field" for e in issue.evidence):
+        print(f"  ❌ no xfa_field receipt"); return False
+    return True
+
+@test("MIG5.2: native Check 5 WARNING when assignee not found in assignment")
+def t():
+    qc = _qc(ads_data={"assignee_org": "LUMINA AI, INC."}, ads_text="",
+             assignment_text="assigns to SOME OTHER ENTITY the entire right", documents={})
+    issue = check_assignee_name(qc)
+    if issue.severity != "WARNING":
+        print(f"  ❌ severity = {issue.severity}"); return False
+    return True
+
+@test("MIG6.1: native Check 6 PASS with no conflicting filing dates")
+def t():
+    qc = _qc(ads_text="", poa_text="Filing Date Herewith")
+    issue = check_filing_date(qc)
+    if issue.check_id != 6 or issue.severity != "PASS":
+        print(f"  ❌ {issue.check_id}/{issue.severity}"); return False
+    return True
+
+_INV2D = [{"first": "Sarah", "last": "CHEN"}, {"first": "Aditya", "last": "MEHTA"}]
+
+@test("MIG7.1: native Check 7 PASS when ADS count == declaration count")
+def t():
+    qc = _qc(ads_data={"inventors": _INV2D}, ads_text="", image_only_pages={},
+             declaration_text="I hereby declare ... I hereby declare ...")
+    issue = check_inventor_count(qc)
+    if issue.check_id != 7 or issue.severity != "PASS":
+        print(f"  ❌ {issue.check_id}/{issue.severity}: {issue.message[:60]}"); return False
+    return True
+
+@test("MIG7.2: native Check 7 CRITICAL when declaration has fewer inventors")
+def t():
+    qc = _qc(ads_data={"inventors": _INV2D}, ads_text="", image_only_pages={},
+             declaration_text="I hereby declare that I am an inventor.")
+    issue = check_inventor_count(qc)
+    if issue.severity != "CRITICAL":
+        print(f"  ❌ severity = {issue.severity}"); return False
+    return True
+
+@test("MIG8.1: native Check 8 PASS when all inventors have residency")
+def t():
+    qc = _qc(ads_data={"inventors": [{"residency": "us-residency"},
+                                     {"residency": "non-us-residency"}]}, ads_text="")
+    issue = check_residency(qc)
+    if issue.check_id != 8 or issue.severity != "PASS":
+        print(f"  ❌ {issue.check_id}/{issue.severity}"); return False
+    return True
+
+@test("MIG8.2: native Check 8 WARNING when an inventor lacks residency")
+def t():
+    qc = _qc(ads_data={"inventors": [{"residency": "us-residency"}, {"residency": ""}]},
+             ads_text="")
+    issue = check_residency(qc)
+    if issue.severity != "WARNING":
+        print(f"  ❌ severity = {issue.severity}"); return False
+    return True
+
 @test("MIG1.2: native Check 1 CRITICAL when an inventor is missing")
 def t():
     # Second inventor is absent from both the text AND the sample PDF.

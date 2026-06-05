@@ -277,3 +277,164 @@ def check_correspondence(qc) -> Issue:
             snippet=ads_cust, actual=ads_cust, kind="value",
             label="ADS customer number (structured XFA field)"))
     return issue
+
+
+_ASSIGNEE_RE = re.compile(r"([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+(?:,?\s*(?:LLC|Inc|Corp)))")
+_STOP = {"THE", "AND", "INC", "LLC", "CORP", "LTD", "CO"}
+
+
+def _normalize_company(name):
+    if not name:
+        return ""
+    norm = re.sub(r"[\s,\.]+", " ", name.lower())
+    return norm.replace("0", "o").replace("1", "l").strip()
+
+
+def check_assignee_name(qc) -> Issue:
+    """Check 5: the ADS assignee appears in the assignment. Evidence: ADS
+    assignee xfa_field + a pdf_region where it appears in the assignment."""
+    name = "Assignee Name Consistency"
+    ads = getattr(qc, "ads_data", None)
+    ads_assignee = (ads or {}).get("assignee_org")
+    if not ads_assignee and getattr(qc, "ads_text", ""):
+        for pat in (r"(?:Organization|ization)\s*Name\s*[|\s]+([A-Za-z][\w\s,]+(?:LLC|Inc|Corp))",
+                    r"c/o\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+(?:,?\s*(?:LLC|Inc|Corp)))",
+                    r"Applicant\s*Name[:\s|]+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+(?:,?\s*(?:LLC|Inc|Corp)))"):
+            m = re.search(pat, qc.ads_text, re.IGNORECASE)
+            if m:
+                ads_assignee = re.sub(r"\s+", " ", m.group(1).strip())
+                break
+
+    asgn_text = getattr(qc, "assignment_text", "") or ""
+    assignment_assignee = None
+    if asgn_text:
+        if ads_assignee:
+            key = [w for w in re.findall(r"[A-Za-z]{3,}", ads_assignee.upper()) if w not in _STOP]
+            asgn_norm = qc._normalize_for_compare(asgn_text)
+            if key and sum(1 for w in key if w in asgn_norm) >= max(1, len(key) // 2):
+                assignment_assignee = ads_assignee
+        if not assignment_assignee:
+            m = _ASSIGNEE_RE.search(asgn_text)
+            if m:
+                assignment_assignee = re.sub(r"\s+", " ", m.group(1).strip())
+
+    if ads_assignee and assignment_assignee:
+        a, b = _normalize_company(ads_assignee), _normalize_company(assignment_assignee)
+        if len(set(a.split()) & set(b.split())) >= 2 or a in b or b in a:
+            issue = Issue(5, _CAT, name, "PASS", f"Assignee name consistent: {assignment_assignee}")
+        else:
+            issue = Issue(5, _CAT, name, "WARNING",
+                          f"Assignee names may differ: ADS='{ads_assignee}', "
+                          f"Assignment='{assignment_assignee}'")
+    elif ads_assignee and asgn_text:
+        issue = Issue(5, _CAT, name, "WARNING",
+                      f"ADS lists assignee '{ads_assignee}' but no matching name found "
+                      f"in the assignment text. Verify the assignment is to the same entity.")
+    elif ads_assignee or assignment_assignee:
+        issue = Issue(5, _CAT, name, "PASS",
+                      f"Assignee found: {ads_assignee or assignment_assignee}")
+    else:
+        issue = Issue(5, _CAT, name, "INFO", "Could not extract assignee name for comparison")
+
+    if ads_assignee:
+        issue.evidence.append(Evidence(
+            doc_type="ADS", locator=Locator(type="xfa_field", field_path="assignee_org"),
+            snippet=ads_assignee, actual=ads_assignee, kind="value",
+            label="ADS assignee (structured XFA field)"))
+        asgn_path = (getattr(qc, "documents", {}) or {}).get("Assignment")
+        if asgn_path:
+            hit = locate(asgn_path, ads_assignee)
+            if hit:
+                issue.evidence.append(Evidence(
+                    doc_type="Assignment",
+                    locator=Locator(type="pdf_region", page=hit["page"], bbox=hit["bbox"]),
+                    snippet=hit["matched"], expected=ads_assignee, actual=hit["matched"],
+                    kind="match", label="Assignee located in the assignment"))
+    return issue
+
+
+def check_filing_date(qc) -> Issue:
+    """Check 6: documents consistently indicate a new filing (no premature
+    filing dates on the POA/ADS)."""
+    name = "Filing Date Consistency"
+    issues = []
+    poa = getattr(qc, "poa_text", "") or ""
+    if poa and not re.search(r"Filing\s*Date\s*Herewith", poa, re.IGNORECASE) and \
+       re.search(r"Filing\s*Date\s*\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}", poa, re.IGNORECASE):
+        issues.append("POA has specific filing date (should be 'Herewith' for new applications)")
+    ads = getattr(qc, "ads_text", "") or ""
+    if ads:
+        m = re.search(r"Filing\s*Date[:\s]+(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", ads, re.IGNORECASE)
+        if m:
+            issues.append(f"ADS has filing date: {m.group(1)}")
+    if not issues:
+        return Issue(6, _CAT, name, "PASS",
+                     "Documents consistently indicate new filing (no conflicting dates)")
+    return Issue(6, _CAT, name, "WARNING", f"Filing date inconsistency: {'; '.join(issues)}")
+
+
+def check_inventor_count(qc) -> Issue:
+    """Check 7: ADS inventor count matches the declaration (phrase/signature
+    count), continuation-aware and image-only-hedged."""
+    name = "Number of Inventors Consistency"
+    ads_inventors = [n for n, _ in _ads_inventor_pairs(qc)]
+    decl = getattr(qc, "declaration_text", "") or ""
+    if not (ads_inventors and decl):
+        return Issue(7, _CAT, name, "INFO",
+                     "Unable to count inventors — ADS or Declaration text not available")
+    ads_count = len(ads_inventors)
+    decl_count = max(len(re.findall(r"(?:i|I)\s+hereby\s+declare", decl)),
+                     len(re.findall(r"/[A-Z][^/\n]{2,40}/", decl)))
+    if decl_count == ads_count:
+        return Issue(7, _CAT, name, "PASS",
+                     f"Same number of inventors ({ads_count}) in ADS and Declaration")
+    if decl_count == 0:
+        return Issue(7, _CAT, name, "INFO",
+                     f"ADS has {ads_count} inventor(s); could not count inventors in "
+                     f"declaration. Manual verification recommended.")
+    cont_note = ""
+    if qc._is_continuation_filing():
+        cont_note = (" Note: this is a continuation filing — if the parent's declaration "
+                     "is carried forward, inventorship may have changed in the "
+                     "continuation, in which case a new declaration is required.")
+    img = (getattr(qc, "image_only_pages", {}) or {}).get("Declaration", 0)
+    if img and decl_count + img >= ads_count:
+        return Issue(7, _CAT, name, "WARNING",
+                     f"Could not confirm count: ADS has {ads_count}, Declaration text shows "
+                     f"{decl_count} signed declaration(s) and {img} additional image-only "
+                     f"page(s) which may contain the remaining {ads_count - decl_count}.")
+    return Issue(7, _CAT, name, "CRITICAL",
+                 f"Inventor count mismatch: ADS has {ads_count}, Declaration has "
+                 f"{decl_count}." + cont_note)
+
+
+def check_residency(qc) -> Issue:
+    """Check 8: every inventor has residency populated (XFA structured field,
+    or a residency-line count fallback for non-XFA ADS)."""
+    name = "Inventor Citizenship/Residency Consistency"
+    ads = getattr(qc, "ads_data", None)
+    if ads and ads.get("inventors"):
+        invs = ads["inventors"]
+        total = len(invs)
+        populated = sum(1 for inv in invs if (inv.get("residency") or "").strip())
+        if total > 0 and populated == total:
+            return Issue(8, _CAT, name, "PASS",
+                         f"All {total} inventors have residency information")
+        if total > 0:
+            return Issue(8, _CAT, name, "WARNING",
+                         f"Only {populated} of {total} inventors have residency "
+                         f"populated in the ADS")
+        return Issue(8, _CAT, name, "INFO", "No inventors found in ADS XFA data")
+    if getattr(qc, "ads_text", ""):
+        us = len(re.findall(r"(?<!non-)US\s*Residency", qc.ads_text, re.IGNORECASE))
+        non_us = len(re.findall(r"non-US\s*Residency", qc.ads_text, re.IGNORECASE))
+        with_res = us + non_us
+        inv_count = len(re.findall(r"Inventor\s+\d+", qc.ads_text, re.IGNORECASE))
+        if inv_count > 0 and with_res >= inv_count:
+            return Issue(8, _CAT, name, "PASS",
+                         f"All {inv_count} inventors have residency information")
+        if inv_count > 0:
+            return Issue(8, _CAT, name, "WARNING",
+                         f"Found {with_res} residency entries for {inv_count} inventors")
+        return Issue(8, _CAT, name, "INFO", "Could not verify inventor residency information")
+    return Issue(8, _CAT, name, "INFO", "ADS not available to check residency information")
