@@ -284,10 +284,25 @@ class PatentFilingQC:
             self._document_read_failure(doc_type, pdf_path, f"OCR failed: {str(ocr_error)}")
             return None
 
+    def _surname_present(self, surname_norm: str, norm_text: str) -> bool:
+        """Whether a normalized surname appears in normalized document text.
+
+        A very short surname (<= 2 chars — e.g. a single-letter family initial,
+        common in South Indian names such as "Manoj Kumar P") matches almost any
+        text as a bare substring ("p" is inside "specification"), so it must
+        appear as a STANDALONE token. Normal-length surnames keep the proven
+        substring test."""
+        if not surname_norm:
+            return False
+        if len(surname_norm) <= 2:
+            return re.search(r'\b' + re.escape(surname_norm) + r'\b',
+                             norm_text) is not None
+        return surname_norm in norm_text
+
     def _count_ads_inventors_present(self, text: str) -> int:
         """How many ADS inventors are findable in `text`, using the same
-        surname-or-full-name substring test as Check 1. Returns 0 when the ADS
-        inventor list isn't available."""
+        surname-or-full-name test as Check 1. Returns 0 when the ADS inventor
+        list isn't available."""
         if not (self.ads_data and self.ads_data.get('inventors')):
             return 0
         norm = self._normalize_for_compare(text)
@@ -295,7 +310,7 @@ class PatentFilingQC:
         for inv in self.ads_data['inventors']:
             surname = self._normalize_for_compare(self._xfa_surname(inv))
             full = self._normalize_for_compare(self._format_xfa_inventor(inv))
-            if (surname and surname in norm) or (full and full in norm):
+            if self._surname_present(surname, norm) or (full and full in norm):
                 found += 1
         return found
 
@@ -2062,7 +2077,7 @@ class PatentFilingQC:
                     for inv_name, surname in ads_inventor_pairs:
                         last_norm = self._normalize_for_compare(surname)
                         full_norm = self._normalize_for_compare(inv_name)
-                        if (last_norm and last_norm in norm_doc) or \
+                        if self._surname_present(last_norm, norm_doc) or \
                            (full_norm and full_norm in norm_doc):
                             continue
                         missing.append(inv_name)
