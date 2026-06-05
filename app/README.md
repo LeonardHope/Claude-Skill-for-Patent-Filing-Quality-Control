@@ -5,6 +5,27 @@ an interactive, evidence-linked review surface where every check links to the
 source-document region that produced it. It lives on the `next` branch and does
 **not** affect the shipping skill on `main`.
 
+## The real viewer (`server.py`) — Phase 2
+
+Runs the actual engine through `core` (with evidence enrichment) and serves an
+interactive viewer. Point it at any filing folder; all processing is local.
+
+```bash
+python3 app/server.py /path/to/filing/folder
+# then open http://localhost:8000
+```
+
+- Left: every check, grouped by severity, with a **Receipts** filter.
+- Click a receipt → the source region highlights in the PDF (`pdf_region`), or a
+  structured data card appears for ADS fields (`xfa_field`).
+- Currently enriched with real evidence: **Check 1** (inventor names → highlight
+  per inventor in the Declaration/Assignment) and **Check 3** (docket → ADS
+  field card). More checks gain evidence as Phase 2 continues
+  (`core/evidence.py`).
+
+Engine + schema live in [`../core/`](../core); tests in
+[`../tests/test_core.py`](../tests/test_core.py).
+
 ## `spike/` — Phase-0 de-risking spike (mostly throwaway)
 
 The smallest end-to-end slice that proves the riskiest parts of the architecture

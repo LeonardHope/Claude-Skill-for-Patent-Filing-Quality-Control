@@ -92,10 +92,12 @@ def build_result(qc, *, generated_at: str) -> Result:
     )
 
 
-def run(folder: str, *, generated_at: Optional[str] = None) -> Result:
+def run(folder: str, *, generated_at: Optional[str] = None,
+        enrich: bool = True) -> Result:
     """Load the folder, run all checks, and return a Result. Imports the engine
     lazily so `core.result`/`build_result` stay decoupled from the legacy
-    script."""
+    script. When `enrich` is set, attaches structured evidence (receipts) for
+    the checks core knows how to enrich."""
     import sys
     scripts = Path(__file__).resolve().parent.parent / "scripts"
     sys.path.insert(0, str(scripts))
@@ -108,4 +110,10 @@ def run(folder: str, *, generated_at: Optional[str] = None) -> Result:
     qc = PatentFilingQC(folder)
     qc.load_documents()
     qc.run_all_checks()
-    return build_result(qc, generated_at=generated_at)
+    result = build_result(qc, generated_at=generated_at)
+
+    if enrich:
+        from .evidence import enrich as _enrich
+        doc_paths = {k: v for k, v in (getattr(qc, "documents", {}) or {}).items() if v}
+        _enrich(result, doc_paths)
+    return result
