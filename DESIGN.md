@@ -213,8 +213,9 @@ behavior is byte-for-byte identical at each step. Rules:
 A check is migrated by giving `core/checks/` ownership of its ID:
 
 1. The check's logic + native evidence move to a `core/checks/*` module
-   (`core.checks.REGISTRY` maps `id -> fn(qc) -> Issue`, `MIGRATED_IDS` is the
-   owned set).
+   (`core.checks.CHECKS` is the flat list of `fn(qc) -> Issue | list[Issue] |
+   None`; a single function may own a whole category and emit several issues.
+   `MIGRATED_IDS` is the owned set).
 2. `core.build.run()` sets `QCReport.skip_check_ids |= MIGRATED_IDS` **only
    within the core path**, so the engine doesn't emit those IDs there, then runs
    the core versions and merges. Exactly one emission per check, with evidence.
@@ -228,10 +229,22 @@ The duplicate engine copy is removed only once the **HTML report also consumes
 delete migrated checks from the engine. Until then, `skip_check_ids` keeps the
 two paths consistent with no double-emission.
 
-*Status: two full categories migrated — Cross-Document Consistency (1–8,
-`core/checks/cross_document.py`) and Document Completeness (9–12,
-`core/checks/completeness.py`). Native evidence, engine-skipped in the core
-path, CLI unchanged. Engine-vs-core parity verified on a real filing.*
+*Status: migration complete for every tractable check — ~57 checks across all
+categories now emit natively from `core/checks/`: Cross-Document Consistency
+(1–8), Document Completeness (9–12), Specification (13–21), Drawings (22–24),
+ADS (27, 29, 31, 73), Declaration (32–34), Assignment (36–38, 40), Power of
+Attorney (42, 44), Formatting (45), Common Errors (50, 51), File Quality (55,
+56, 58), Cross-References (61, 62), Priority (63–65), Final Quality (66–70),
+and IDS (76–80). Native evidence, engine-skipped in the core path, CLI
+unchanged. Engine-vs-core full-severity parity verified on a real filing
+(no mismatches, correct emit-once including Check 9's two-issue case).*
+
+*Intentionally left engine-emitted (not in `MIGRATED_IDS`) because replication
+is high-risk and low-evidence-value — they wrap OCR, image analysis, raw PDF
+I/O, network calls, intricate drafting-quality NLP, load-time file emissions,
+or ST.26 XML: 16, 25, 28, 35, 39, 41, 49, 52–54, 57, 59, 60, 71, 74, 75, 81,
+82–85. These still appear in every `Result`; they're just produced by the
+engine and carry no native locator evidence yet.*
 
 *Both frontends now consume `Result`: the interactive viewer (`app/`) and the
 static HTML report (`report/`, evidence-aware). Next enabler for clean
