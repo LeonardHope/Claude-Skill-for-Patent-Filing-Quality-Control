@@ -1279,6 +1279,71 @@ def t():
     return True
 
 # ============================================================
+# 18. Drawings scoring — figure-rich drawings with lots of callout text
+#     (synthetic; reproduces a real filing where a 9-figure, 60+ reference-
+#      numeral drawings PDF extracted 4k+ chars and was wrongly dropped to
+#      Unknown because of a prose-length ceiling)
+# ============================================================
+def _figure_rich_drawings_text(figs=9, n_callouts=360):
+    """Build drawings-style text: figure labels + a 'Page N of M' margin header
+    + many reference numerals + dense uppercase part-label callouts, with NO
+    specification structure. Comfortably exceeds the old 4000-char ceiling."""
+    parts = []
+    labels = ["AUTOMATED TEST FAILURES", "FIRMWARE SOURCE CODE REPOSITORY",
+              "INTEGRATED DEVELOPMENT ENVIRONMENT", "SYSTEM UNDER TEST",
+              "MACHINE LEARNING MODEL", "TEST FAILURE ANALYZER",
+              "RENDERED TEST EXECUTION LOG", "VECTOR DATABASE",
+              "REMEDIATION ROUTING ENGINE", "FAULT ORIGIN ATTRIBUTION"]
+    for fig in range(1, figs + 1):
+        parts.append(f"Page {fig} of {figs}    (Docket No.: A088-0179US)")
+        for i in range(n_callouts // figs):
+            parts.append(labels[i % len(labels)])
+            parts.append(str(100 + (i * 2) % 900))   # reference numeral on its own line
+        parts.append(f"FIG. {fig}")
+    return "\n".join(parts)
+
+@test("DR19.1: figure-rich drawings with 4k+ chars of callouts → Drawings")
+def t():
+    text = _figure_rich_drawings_text()
+    assert len(re.sub(r"\s+", " ", text)) > 4000, "fixture should exceed old ceiling"
+    bt, bs, scores = _qc_bare._score_text(text)
+    if bt != "Drawings":
+        print(f"  ❌ classified {bt} (score {bs}); Drawings={scores.get('Drawings')}")
+        return False
+    return True
+
+@test("DR19.2: 'Page N of M' margin header recognized as a sheet signal")
+def t():
+    # Sparse text, only the margin header + a couple numerals (no FIG label).
+    text = "Page 1 of 7\n(Docket No.: A088-0179US)\n102\n104\n"
+    bt, bs, scores = _qc_bare._score_text(text)
+    if scores.get("Drawings", 0) < 3:
+        print(f"  ❌ Drawings score too low: {scores.get('Drawings')}"); return False
+    return True
+
+@test("DR19.3: a real spec that references figures is NOT misclassified as Drawings")
+def t():
+    # Spec has FIG. mentions but also claim/abstract/background structure.
+    bt, bs, scores = _qc_bare._score_text(BASE_SPEC)
+    if bt == "Drawings":
+        print(f"  ❌ spec misclassified as Drawings; scores={scores}"); return False
+    if scores.get("Specification", 0) < 5:
+        print(f"  ❌ spec didn't score as Specification: {scores}"); return False
+    return True
+
+@test("DR19.4: figure-label regex accepts 'FIG 1' / 'FIGURE 1' (no period)")
+def t():
+    for variant in ("FIG 1", "FIGURE 1", "Figs. 2"):
+        text = f"Page 1 of 3\n{variant}\nWIDGET ASSEMBLY\n102\nFRAME\n104\n{variant}\n"
+        # add a second figure label so fig_count >= 2 path is exercised
+        text += "FIG 2\nGEAR\n106\n"
+        _, _, scores = _qc_bare._score_text(text)
+        if scores.get("Drawings", 0) < 3:
+            print(f"  ❌ {variant!r} not recognized: Drawings={scores.get('Drawings')}")
+            return False
+    return True
+
+# ============================================================
 # Run
 # ============================================================
 print("="*80); print(f"COMPREHENSIVE TEST SUITE — {len(TESTS)} tests"); print("="*80)
