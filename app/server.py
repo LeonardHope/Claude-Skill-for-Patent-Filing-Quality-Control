@@ -54,8 +54,12 @@ def build_for(folder: str, refresh: bool = False):
     return _CACHE[key]
 
 
-# AppleScript: `activate` brings the chooser to the front (otherwise it can open
-# *behind* the browser and look like nothing happened). Cancel → error -128.
+# Each platform's native folder chooser is invoked as a SUBPROCESS, never an
+# in-process GUI toolkit — the HTTP handler runs in a worker thread, and Tk/Win32
+# dialogs must own the main thread, so a subprocess is the only safe way here.
+
+# macOS: `activate` brings the chooser to the front (else it can open *behind*
+# the browser). Cancel → osascript exits non-zero with error -128.
 _OSA = (
     'activate\n'
     'set theFolder to choose folder with prompt '
@@ -63,31 +67,46 @@ _OSA = (
     'return POSIX path of theFolder'
 )
 
+# Windows: a PowerShell FolderBrowserDialog (TopMost so it comes to the front).
+# Prints the chosen path, or "__CANCELLED__" so we can tell cancel from failure.
+_PS = (
+    "Add-Type -AssemblyName System.Windows.Forms;"
+    "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
+    "$d.Description = 'Select the patent filing folder to QC';"
+    "$d.ShowNewFolderButton = $false;"
+    "$top = New-Object System.Windows.Forms.Form -Property @{TopMost=$true};"
+    "if ($d.ShowDialog($top) -eq [System.Windows.Forms.DialogResult]::OK)"
+    " { Write-Output $d.SelectedPath } else { Write-Output '__CANCELLED__' }"
+)
+
 
 def pick_folder():
     """Open a native OS 'choose folder' dialog on the machine running the server.
     Returns {"path": str|None, "error": str|None}. A user cancel is not an error
     (path None, error None); anything else reports a reason the UI can show."""
-    if platform.system() == "Darwin":
-        try:
+    system = platform.system()
+    try:
+        if system == "Windows":
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-STA", "-Command", _PS],
+                capture_output=True, text=True, timeout=600)
+            out = (r.stdout or "").strip()
+            if not out or out == "__CANCELLED__":
+                return {"path": None, "error": None}        # cancelled — fine
+            return {"path": out, "error": None}
+        if system == "Darwin":
             r = subprocess.run(["osascript", "-e", _OSA],
                                capture_output=True, text=True, timeout=600)
-        except Exception as e:
-            return {"path": None, "error": f"could not launch folder chooser: {e}"}
-        if r.returncode == 0:
-            return {"path": r.stdout.strip().rstrip("/") or None, "error": None}
-        if "-128" in (r.stderr or "") or "User canceled" in (r.stderr or ""):
-            return {"path": None, "error": None}            # cancelled — fine
-        return {"path": None, "error": (r.stderr or "folder chooser failed").strip()}
-    try:                                              # Windows / Linux fallback
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-        path = filedialog.askdirectory(title="Select the patent filing folder to QC")
-        root.destroy()
-        return {"path": path or None, "error": None}
+            if r.returncode == 0:
+                return {"path": r.stdout.strip().rstrip("/") or None, "error": None}
+            if "-128" in (r.stderr or "") or "User canceled" in (r.stderr or ""):
+                return {"path": None, "error": None}        # cancelled — fine
+            return {"path": None, "error": (r.stderr or "folder chooser failed").strip()}
     except Exception as e:
-        return {"path": None, "error": f"no folder chooser available: {e}"}
+        return {"path": None, "error": f"could not launch folder chooser: {e}"}
+    # Linux / unknown: no reliable headless-safe native chooser — use path entry.
+    return {"path": None, "error": "no native folder chooser on this OS — "
+            "paste the folder path below instead"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -165,15 +184,24 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    # Prefer :8000, but fall back to an OS-assigned free port so a second copy
+    # (or anything already on 8000) doesn't fail to launch — important for the
+    # double-click launcher where the user can't free the port themselves.
+    try:
+        httpd = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    except OSError:
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = httpd.server_address[1]
+    url = f"http://localhost:{port}"
     where = PRESELECTED or "(choose a folder in the browser)"
-    print(f"Patent Filing QC — interactive viewer\n  folder: {where}\n"
-          f"  http://localhost:{PORT}")
+    print(f"Patent Filing QC — interactive viewer\n  folder: {where}\n  {url}\n"
+          f"  (leave this window open while you work; close it to stop)")
     try:
         import webbrowser
-        webbrowser.open(f"http://localhost:{PORT}")
+        webbrowser.open(url)
     except Exception:
         pass
-    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    httpd.serve_forever()
 
 
 if __name__ == "__main__":

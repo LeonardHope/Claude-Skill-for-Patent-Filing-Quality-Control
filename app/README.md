@@ -10,22 +10,35 @@ source-document region that produced it. It lives on the `next` branch and does
 Runs the actual engine through `core` (checks emit their own evidence) and serves
 an interactive viewer. All processing is local — nothing is uploaded.
 
-Intended workflow (attorneys / paralegals, at filing time): start the server
-once, navigate to the page, **open the filing folder**, and the QC runs and
-shows its results.
+Intended workflow (attorneys / paralegals, at filing time): launch the tool,
+**open the filing folder**, and the QC runs and shows its results.
+
+### For firm users — double-click launcher (per-desktop)
+
+From the project folder:
+
+- **Windows:** double-click **`Patent Filing QC.bat`**
+- **macOS:** double-click **`Patent Filing QC.command`**
+
+The first launch sets up a private Python environment and installs dependencies
+(needs internet that one time, ~1 min); every launch after is instant and works
+offline. The browser opens automatically. Closing the window stops the tool.
+Requires Python 3 installed (python.org). OCR-based checks additionally need the
+system `tesseract` + `poppler` binaries — without them the tool still runs and
+all other checks work; only the OCR-dependent checks are skipped.
+
+### For developers
 
 ```bash
-python3 app/server.py            # then open http://localhost:8000
+python3 app/server.py                       # then open the printed URL
+python3 app/server.py /path/to/filing/folder  # pre-select a folder, skip landing
 ```
 
 On the landing screen, **Open filing folder…** launches a native OS folder
-chooser on the machine running the server (no path typing); a paste-a-path field
-is also there for shared / hosted setups. You can pre-select a folder on the
-command line to skip the landing screen:
-
-```bash
-python3 app/server.py /path/to/filing/folder
-```
+chooser on the machine running the server (PowerShell dialog on Windows,
+`osascript` on macOS — both run as a subprocess, never an in-process GUI
+toolkit). A paste-a-path field is also there for shared / hosted setups. The
+server prefers port 8000 and falls back to a free port if it's taken.
 
 > Restart the server after editing `server.py` — a running instance keeps the
 > old routes (a stale process is why `/api/pick` would 404).
