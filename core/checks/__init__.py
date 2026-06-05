@@ -22,6 +22,7 @@ from .completeness import (  # noqa: F401
     check_declaration_signatures, check_assignment_signatures,
 )
 from .specification import check_specification  # noqa: F401
+from .drawings import check_drawings  # noqa: F401
 
 CHECKS = [
     # Cross-Document Consistency (1-8)
@@ -33,10 +34,13 @@ CHECKS = [
     check_declaration_signatures, check_assignment_signatures,
     # Specification (13-21, except 16 which stays engine-emitted)
     check_specification,
+    # Drawings (22-24; 25 no-color stays engine-emitted)
+    check_drawings,
 ]
 
 MIGRATED_IDS = {
     1, 2, 3, 4, 5, 6, 7, 8,
     9, 10, 11, 12,
     13, 14, 15, 17, 18, 19, 20, 21,   # 16 (reference-numeral consistency) left in engine
+    22, 23, 24,                       # 25 (no-color, image analysis) left in engine
 }

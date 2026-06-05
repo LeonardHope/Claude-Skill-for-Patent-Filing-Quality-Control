@@ -461,15 +461,32 @@ def t():
         print(f"  ❌ issues not ordered by check_id"); return False
     return True
 
-@test("EVID.7: Check 23 gets a pdf_region for the docket in the drawings margin")
+@test("MIG23.1: native Check 23 emits a pdf_region docket receipt in the drawings")
 def t():
-    res = Result(folder="/f", generated_at=GEN_AT,
-                 ads_data={"docket_number": "LUM-0142US"},
-                 issues=[Issue(23, "Drawings", "All Figures Have Labels", "PASS", "ok")])
-    enrich(res, {"Drawings": DRAW_PDF})
-    regions = [e for e in res.issues[0].evidence if e.locator.type == "pdf_region"]
-    if not regions or regions[0].doc_type != "Drawings":
-        print(f"  ❌ no drawings pdf_region: {res.issues[0].evidence}"); return False
+    from core.checks.drawings import check_drawings
+    qc = _qc(ads_data={"docket_number": "LUM-0142US", "title": "WIDGET ASSEMBLY DEVICE"},
+             ads_text="", spec_text="",
+             drawings_text="(Docket No.: LUM-0142US) Title: WIDGET ASSEMBLY DEVICE "
+                          "FIG. 1 FIG. 2 Sheet 1 of 1",
+             documents={"Drawings": DRAW_PDF})
+    out = check_drawings(qc)
+    c23 = next(i for i in out if i.check_id == 23)
+    if not any(e.locator.type == "pdf_region" and e.doc_type == "Drawings"
+               for e in c23.evidence):
+        print(f"  ❌ no drawings pdf_region: {c23.evidence}"); return False
+    return True
+
+@test("MIG22.1: native Check 24 detects sheet numbering; missing -> WARNING")
+def t():
+    from core.checks.drawings import check_drawings
+    qc = _qc(drawings_text="FIG. 1 FIG. 2 Sheet 1 of 2", documents={})
+    c24 = next(i for i in check_drawings(qc) if i.check_id == 24)
+    if c24.severity != "PASS":
+        print(f"  ❌ {c24.severity}"); return False
+    qc2 = _qc(drawings_text="FIG. 1 FIG. 2 no sheets here", documents={})
+    c24b = next(i for i in check_drawings(qc2) if i.check_id == 24)
+    if c24b.severity != "WARNING":
+        print(f"  ❌ {c24b.severity}"); return False
     return True
 
 
