@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Patent Filing QC — Phase-0 spike</title>
+<style>
+  :root { --bg:#0f1419; --panel:#171c24; --line:#262d39; --text:#e6e9ee; --muted:#8a93a3; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 -apple-system,Segoe UI,Roboto,sans-serif; color:var(--text); background:var(--bg); }
+  header { padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header b { font-size:15px; } header span { color:var(--muted); margin-left:8px; }
+  .wrap { display:grid; grid-template-columns: 380px 1fr; height: calc(100vh - 47px); }
+  .checks { overflow:auto; border-right:1px solid var(--line); background:var(--panel); }
+  .viewer { overflow:auto; position:relative; padding:16px; }
+  .check { padding:12px 14px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .check:hover { background:#1d2430; }
+  .check.active { background:#22303f; }
+  .badge { display:inline-block; font-size:11px; font-weight:700; padding:2px 7px; border-radius:10px; margin-right:8px; }
+  .PASS { background:#123524; color:#5ee08a; } .CRITICAL { background:#3a1418; color:#ff7a85; }
+  .WARNING { background:#3a2e10; color:#ffcf66; } .INFO { background:#10283a; color:#74b9ff; }
+  .cname { font-weight:600; } .cmsg { color:var(--muted); margin-top:4px; }
+  .ev { margin-top:8px; padding:8px 10px; background:#10141b; border:1px solid var(--line); border-radius:6px; font-size:13px; }
+  .ev:hover { border-color:#3a4a5f; }
+  .ev .tag { font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+  .ev .lbl { margin-top:2px; }
+  .pagewrap { position:relative; margin:0 auto 16px; box-shadow:0 2px 18px rgba(0,0,0,.5); width:max-content; }
+  canvas { display:block; }
+  .hl { position:absolute; background:rgba(255,213,79,.32); outline:2px solid #ffd54f; border-radius:2px;
+        animation: pulse 1s ease-in-out 2; }
+  @keyframes pulse { 0%,100%{ background:rgba(255,213,79,.30);} 50%{ background:rgba(255,213,79,.62);} }
+  .card { max-width:560px; margin:8px auto; padding:18px 20px; background:var(--panel); border:1px solid var(--line); border-radius:10px; }
+  .card h3 { margin:0 0 10px; } .card .row { display:flex; gap:10px; margin:6px 0; }
+  .card .k { color:var(--muted); width:120px; flex:none; } .card code { color:#9ee6b4; }
+  .hint { color:var(--muted); text-align:center; margin-top:40px; }
+</style>
+</head>
+<body>
+<header><b>Patent Filing QC</b><span>Phase-0 spike · click a check or a receipt to locate it</span></header>
+<div class="wrap">
+  <div class="checks" id="checks"></div>
+  <div class="viewer" id="viewer"><div class="hint">Select a check on the left.</div></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+const VIEW_W = 760;                 // target render width (px)
+const pdfCache = {};                // doc_type -> loaded pdf
+let DOCS = {};
+
+async function loadPdf(docType) {
+  if (pdfCache[docType]) return pdfCache[docType];
+  const buf = await (await fetch(`/api/pdf/${docType}`)).arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  pdfCache[docType] = pdf;
+  return pdf;
+}
+
+async function showRegion(docType, page, bbox) {
+  const viewer = document.getElementById("viewer");
+  viewer.innerHTML = "";
+  const pdf = await loadPdf(docType);
+  const p = await pdf.getPage(page + 1);
+  const base = p.getViewport({ scale: 1 });
+  const scale = VIEW_W / base.width;
+  const vp = p.getViewport({ scale });
+
+  const wrap = document.createElement("div");
+  wrap.className = "pagewrap";
+  const canvas = document.createElement("canvas");
+  canvas.width = vp.width; canvas.height = vp.height;
+  wrap.appendChild(canvas);
+
+  // pdfplumber bbox [x0, top, x1, bottom] in points, top-down -> px at scale
+  const hl = document.createElement("div");
+  hl.className = "hl";
+  hl.style.left = (bbox[0] * scale) + "px";
+  hl.style.top = (bbox[1] * scale) + "px";
+  hl.style.width = ((bbox[2] - bbox[0]) * scale) + "px";
+  hl.style.height = ((bbox[3] - bbox[1]) * scale) + "px";
+  wrap.appendChild(hl);
+
+  viewer.appendChild(wrap);
+  await p.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
+  hl.scrollIntoView({ block: "center", behavior: "smooth" });
+}
+
+function showCard(ev) {
+  const v = document.getElementById("viewer");
+  const L = ev.locator;
+  v.innerHTML = `
+    <div class="card">
+      <h3>Structured data receipt</h3>
+      <div class="row"><div class="k">Document</div><div>${ev.doc_type} (XFA — no page geometry)</div></div>
+      <div class="row"><div class="k">Field</div><div><code>${L.field_path}</code></div></div>
+      <div class="row"><div class="k">Value (actual)</div><div><code>${ev.actual ?? "—"}</code></div></div>
+      <div class="row"><div class="k">Expected</div><div><code>${ev.expected ?? "—"}</code></div></div>
+      <div class="row"><div class="k">Verdict</div><div>${ev.kind}</div></div>
+      <div class="row"><div class="k">Note</div><div>${ev.label || ""}</div></div>
+    </div>`;
+}
+
+function activateEvidence(ev) {
+  const L = ev.locator || {};
+  if (L.type === "pdf_region") showRegion(ev.doc_type, L.page, L.bbox);
+  else if (L.type === "pdf_page") showRegion(ev.doc_type, L.page, [0, 0, 0, 0]);
+  else if (L.type === "xfa_field") showCard(ev);
+}
+
+function render(result) {
+  DOCS = Object.fromEntries(result.documents.map(d => [d.doc_type, d]));
+  const root = document.getElementById("checks");
+  result.issues.forEach((issue, idx) => {
+    const el = document.createElement("div");
+    el.className = "check";
+    el.innerHTML = `
+      <div><span class="badge ${issue.severity}">${issue.severity}</span>
+           <span class="cname">${issue.check_id}. ${issue.check_name}</span></div>
+      <div class="cmsg">${issue.message}</div>`;
+    (issue.evidence || []).forEach(ev => {
+      const e = document.createElement("div");
+      e.className = "ev";
+      e.innerHTML = `<div class="tag">${ev.locator.type} · ${ev.kind}</div>
+                     <div class="lbl">${ev.label || ev.snippet || ""}</div>`;
+      e.onclick = (event) => { event.stopPropagation(); setActive(el); activateEvidence(ev); };
+      el.appendChild(e);
+    });
+    el.onclick = () => { setActive(el); if (issue.evidence?.[0]) activateEvidence(issue.evidence[0]); };
+    root.appendChild(el);
+  });
+}
+function setActive(el) {
+  document.querySelectorAll(".check.active").forEach(n => n.classList.remove("active"));
+  el.classList.add("active");
+}
+
+fetch("/api/result").then(r => r.json()).then(render);
+</script>
+</body>
+</html>
