@@ -91,7 +91,7 @@ patent-filing-qc/
 └── .github/workflows/
 ```
 
-Two principles:
+Three principles:
 
 1. **Engine produces data, not HTML.** `core` returns a JSON-serializable
    `Result` (§5). The HTML report is just one consumer; the app's API is
@@ -99,6 +99,27 @@ Two principles:
 2. **One module per check category.** Splitting the ~78 checks out of the
    6,000-line monolith both enables the app and permanently removes the
    "every change collides in one giant file" problem.
+3. **DRY — shared primitives, not copy-paste.** Cross-cutting logic lives in
+   one place and is imported, never duplicated. See §4.1.
+
+### 4.1 Shared primitives (DRY)
+
+The monolith currently repeats logic that should be single-sourced; the
+refactor is the moment to extract it. Concrete targets, grounded in real
+duplication in `qc_patent_filing.py` today:
+
+| Primitive | Why (current duplication) |
+|---|---|
+| `core/patterns.py` — inventor-name regex, signature markers (`/s/`, `/Name/`), date formats, docket shapes | The inventor-name pattern is **copy-pasted in 5 places** today; signature-marker logic repeats across Checks 11/12/44. One constant each. |
+| `core/locate.py` — `locate(doc, phrase) -> Locator` | **The single biggest new DRY risk.** Mapping matched text → page + bbox must be ONE helper used by every `pdf_region` evidence, never reimplemented per check. |
+| `core/names.py` — normalize, surname extraction, "is inventor present in text?" | The presence predicate is mirrored between Check 1 and `_count_ads_inventors_present`; `_normalize_for_compare` is used widely. |
+| `core/extract.py` — one OCR path | Already partly done (`_ocr_pdf_text` was factored out during the conditional-OCR work); keep it single-sourced. |
+| Date-logic helper | Declaration-date (35) and assignment-date (39) checks are parallel implementations. |
+| Missing-document fallback helper | Each missing-doc case emits a range of IDs with near-identical `add_issue` loops. |
+| Evidence emission + rendering | Checks emit structured `Evidence` through **one** path; **one** renderer formats it per frontend — replacing today's per-check hand-formatted `details` strings. The evidence model is itself a DRY win: presentation logic stops being copy-pasted into every check. |
+
+Guardrail: when a check needs logic a sibling already has, extract a shared
+helper rather than copying it. The regression suite makes that safe.
 
 ## 5. The contract: Result + Evidence schema
 
