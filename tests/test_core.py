@@ -152,16 +152,57 @@ def t():
         print("  ❌ wrong pages"); return False
     return True
 
-@test("EVID.2: Check 3 gets an xfa_field receipt with the docket value")
+from core.checks.cross_document import check_attorney_docket, check_correspondence  # noqa: E402
+
+def _qc(**attrs):
+    qc = PatentFilingQC(str(SAMPLE_PDF.parent))
+    for k, v in attrs.items():
+        setattr(qc, k, v)
+    return qc
+
+_DOCKET = "MS1-9771USC3"  # a shape the engine's extract_docket_numbers recognizes
+
+@test("MIG3.1: native Check 3 PASS when ADS + Spec share a docket; xfa_field receipt")
 def t():
-    res = Result(folder="/f", generated_at=GEN_AT,
-                 ads_data={"docket_number": "LUM-0142US"},
-                 issues=[Issue(3, "Cross-Document Consistency",
-                               "Attorney Docket Number Consistency", "PASS", "ok")])
-    enrich(res, {})
-    xf = [e for e in res.issues[0].evidence if e.locator.type == "xfa_field"]
-    if not xf or xf[0].locator.field_path != "docket_number" or xf[0].actual != "LUM-0142US":
-        print(f"  ❌ xfa_field evidence wrong: {xf}"); return False
+    qc = _qc(ads_data={"docket_number": _DOCKET}, ads_text="", spec_text=f"Spec {_DOCKET} body",
+             declaration_text="", assignment_text="", documents={})
+    issue = check_attorney_docket(qc)
+    if issue.check_id != 3 or issue.severity != "PASS":
+        print(f"  ❌ {issue.check_id}/{issue.severity}: {issue.message[:60]}"); return False
+    xf = [e for e in issue.evidence if e.locator.type == "xfa_field"]
+    if not xf or xf[0].actual != _DOCKET:
+        print(f"  ❌ xfa_field wrong: {issue.evidence}"); return False
+    return True
+
+@test("MIG3.2: native Check 3 CRITICAL when dockets disagree")
+def t():
+    qc = _qc(ads_data={"docket_number": _DOCKET}, ads_text="",
+             spec_text="Spec XYZ9-8888USA1 body", declaration_text="", assignment_text="",
+             documents={})
+    issue = check_attorney_docket(qc)
+    if issue.severity != "CRITICAL":
+        print(f"  ❌ severity = {issue.severity} (expected CRITICAL)"); return False
+    return True
+
+@test("MIG4.1: native Check 4 PASS when ADS + POA customer numbers match")
+def t():
+    qc = _qc(ads_data={"customer_number": "142810"}, ads_text="",
+             poa_text="Customer Number: 142810", documents={})
+    issue = check_correspondence(qc)
+    if issue.check_id != 4 or issue.severity != "PASS":
+        print(f"  ❌ {issue.check_id}/{issue.severity}"); return False
+    xf = [e for e in issue.evidence if e.locator.type == "xfa_field"]
+    if not xf or xf[0].actual != "142810":
+        print(f"  ❌ xfa_field wrong: {issue.evidence}"); return False
+    return True
+
+@test("MIG4.2: native Check 4 CRITICAL on customer number mismatch")
+def t():
+    qc = _qc(ads_data={"customer_number": "142810"}, ads_text="",
+             poa_text="Customer Number: 999999", documents={})
+    issue = check_correspondence(qc)
+    if issue.severity != "CRITICAL":
+        print(f"  ❌ severity = {issue.severity} (expected CRITICAL)"); return False
     return True
 
 @test("MIG1.2: native Check 1 CRITICAL when an inventor is missing")
