@@ -30,6 +30,9 @@ from .power_of_attorney import check_poa  # noqa: F401
 from .formatting import check_formatting  # noqa: F401
 from .common_errors import check_common_errors  # noqa: F401
 from .file_quality import check_file_quality  # noqa: F401
+from .cross_references import check_cross_references  # noqa: F401
+from .priority import check_priority  # noqa: F401
+from .final_quality import check_final_quality  # noqa: F401
 
 CHECKS = [
     # Cross-Document Consistency (1-8)
@@ -57,6 +60,12 @@ CHECKS = [
     check_common_errors,
     # File Quality (55, 56, 58; 57 password check reads PDFs -> engine)
     check_file_quality,
+    # Cross-References (61, 62; 59-60 drafting-quality NLP -> engine)
+    check_cross_references,
+    # Priority Claims (63-65; 81 ODP network lookup -> engine)
+    check_priority,
+    # Final Quality (66-70)
+    check_final_quality,
 ]
 
 MIGRATED_IDS = {
@@ -71,4 +80,7 @@ MIGRATED_IDS = {
     45,                               # 49 (page numbering, reads PDF) left in engine
     50, 51,                           # 52-54 (drafting-quality heuristics) left in engine
     55, 56, 58,                       # 57 (password protection, reads PDFs) left in engine
+    61, 62,                           # 59, 60 (drafting-quality NLP) left in engine
+    63, 64, 65,                       # 81 (priority app number, ODP network) left in engine
+    66, 67, 68, 69, 70,
 }
