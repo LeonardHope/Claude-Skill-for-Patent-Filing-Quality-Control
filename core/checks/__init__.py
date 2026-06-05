@@ -25,6 +25,8 @@ from .specification import check_specification  # noqa: F401
 from .drawings import check_drawings  # noqa: F401
 from .ads import check_ads  # noqa: F401
 from .declaration import check_declaration  # noqa: F401
+from .assignment import check_assignment  # noqa: F401
+from .power_of_attorney import check_poa  # noqa: F401
 
 CHECKS = [
     # Cross-Document Consistency (1-8)
@@ -42,6 +44,10 @@ CHECKS = [
     check_ads,
     # Declaration (32-34; 35 date check OCRs signature pages -> engine)
     check_declaration,
+    # Assignment (36-38, 40; 39 execution date OCRs signature pages -> engine)
+    check_assignment,
+    # Power of Attorney (42, 44; 41 OCRs short POA forms -> engine)
+    check_poa,
 ]
 
 MIGRATED_IDS = {
@@ -51,4 +57,6 @@ MIGRATED_IDS = {
     22, 23, 24,                       # 25 (no-color, image analysis) left in engine
     27, 29, 31, 73,                   # 28 (first-named inventor, POA OCR) left in engine
     32, 33, 34,                       # 35 (declaration date, OCR) left in engine
+    36, 37, 38, 40,                   # 39 (assignment date, OCR) left in engine
+    42, 44,                           # 41 (POA practitioners, OCR) left in engine
 }
