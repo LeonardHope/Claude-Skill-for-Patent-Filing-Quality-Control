@@ -5,117 +5,239 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Newport IP — Patent Filing QC</title>
 <style>
-  /* Newport IP brand palette — dark navy + professional blue accent. */
-  :root { --bg:#0a1120; --panel:#101a2e; --line:#1e2b42; --text:#e6ebf3; --muted:#8493a8;
-          --accent:#2563eb; --accentTx:#ffffff; --brandblue:#3b82f6; }
+  :root {
+    /* surfaces (deep navy) */
+    --bg:#0a0f1c; --surface:#0e1525; --surface-2:#131c30; --surface-3:#1a2540;
+    --border:#1f2a40; --border-2:#2a3956;
+    /* text */
+    --text:#e9eef7; --muted:#94a3b8; --faint:#647387;
+    /* brand */
+    --accent:#3b82f6; --accent-2:#60a5fa; --brandblue:#60a5fa;
+    /* severity */
+    --critical:#fb7185; --warning:#fbbf24; --info:#60a5fa; --pass:#34d399;
+    --critical-bg:rgba(251,113,133,.13); --warning-bg:rgba(251,191,36,.13);
+    --info-bg:rgba(96,165,250,.13); --pass-bg:rgba(52,211,153,.13);
+    /* shape */
+    --r-sm:7px; --r:10px; --r-lg:14px;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 12px 32px rgba(0,0,0,.35);
+    --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,Inter,system-ui,sans-serif;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
   * { box-sizing:border-box; }
-  body { margin:0; font:14px/1.45 -apple-system,Segoe UI,Roboto,sans-serif; color:var(--text); background:var(--bg); }
-  button { font:inherit; }
-  header { padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel);
-           display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
-  header b { font-size:15px; } header .folder { color:var(--muted); font-size:12px; }
-  .counts span { font-weight:700; padding:2px 8px; border-radius:10px; margin-left:6px; font-size:12px; }
-  .hbtn { background:#18243d; color:var(--text); border:1px solid var(--line); border-radius:6px;
-          padding:4px 10px; font-size:12px; cursor:pointer; }
-  .hbtn:hover { border-color:var(--accent); }
-  .filters { margin-left:auto; display:flex; gap:6px; align-items:center; }
-  .filters button { background:#18243d; color:var(--text); border:1px solid var(--line);
-                    border-radius:6px; padding:3px 9px; font-size:12px; cursor:pointer; }
-  .filters button.on { background:#20304f; border-color:var(--accent); }
-  .wrap { display:grid; grid-template-columns:420px 1fr; height:calc(100vh - 49px); }
-  .checks { overflow:auto; border-right:1px solid var(--line); background:var(--panel); }
-  .viewer { overflow:auto; position:relative; padding:16px; }
-  .cattools { display:flex; gap:8px; padding:8px 14px; border-bottom:1px solid var(--line); background:var(--panel); }
-  .cattools button { background:#18243d; color:var(--muted); border:1px solid var(--line);
-                     border-radius:6px; padding:3px 9px; font-size:11px; cursor:pointer; }
-  .cattools button:hover { color:var(--text); border-color:var(--accent); }
-  .cat { position:sticky; top:0; z-index:1; background:var(--panel); padding:9px 14px;
-         border-bottom:1px solid var(--line); cursor:pointer; user-select:none;
-         display:flex; align-items:center; gap:9px; }
-  .cat:hover { background:#1b212b; }
-  .cat .chev { font-size:11px; color:var(--muted); flex:none; transition:transform .12s; display:inline-block; }
-  .cat.collapsed .chev { transform:rotate(-90deg); }
-  .cat .ctitle { font-weight:700; font-size:13px; }
-  .cat .ccount { color:var(--muted); font-size:12px; }
-  .cat .cdots { margin-left:auto; display:flex; gap:5px; }
-  .cat .cdots .badge { margin:0; }
-  .catbody.collapsed { display:none; }
-  .check { padding:11px 14px; border-bottom:1px solid var(--line); }
-  .badge { display:inline-block; font-size:11px; font-weight:700; padding:2px 7px; border-radius:10px; margin-right:8px; }
-  .PASS { background:#123524; color:#5ee08a; } .CRITICAL { background:#3a1418; color:#ff7a85; }
-  .WARNING { background:#3a2e10; color:#ffcf66; } .INFO { background:#10283a; color:#74b9ff; }
-  .cname { font-weight:600; } .cmsg { color:var(--muted); margin-top:4px; }
-  .ev { margin-top:8px; padding:7px 10px; background:#0c1426; border:1px solid var(--line);
-        border-radius:6px; font-size:13px; cursor:pointer; }
-  .ev:hover { border-color:var(--accent); }
-  .ev .tag { font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
-  .ev.match .tag { color:#5ee08a; } .ev.missing .tag, .ev.mismatch .tag { color:#ff7a85; }
-  .ev.document { background:transparent; border-style:dashed; padding:5px 10px; }
-  .ev.document .tag { color:var(--muted); }
-  .pagewrap { position:relative; margin:0 auto 16px; box-shadow:0 2px 18px rgba(0,0,0,.5); width:max-content; }
-  canvas { display:block; }
-  .hl { position:absolute; background:rgba(255,213,79,.32); outline:2px solid #ffd54f; border-radius:2px;
-        animation:pulse 1s ease-in-out 2; }
-  @keyframes pulse { 0%,100%{background:rgba(255,213,79,.30);} 50%{background:rgba(255,213,79,.62);} }
-  .card { max-width:560px; margin:8px auto; padding:18px 20px; background:var(--panel); border:1px solid var(--line); border-radius:10px; }
-  .card h3 { margin:0 0 10px; } .card .row { display:flex; gap:10px; margin:6px 0; }
-  .card .k { color:var(--muted); width:130px; flex:none; } .card code { color:#9ee6b4; }
-  .hint { color:var(--muted); text-align:center; margin-top:40px; }
-  /* Newport IP wordmark */
-  .wordmark { display:inline-flex; align-items:center; gap:9px; }
-  .wm-badge { width:26px; height:26px; border-radius:7px; flex:none; color:#fff;
-              background:linear-gradient(135deg,#3b82f6,#1e40af); font-weight:800; font-size:15px;
-              display:flex; align-items:center; justify-content:center; box-shadow:0 1px 6px rgba(37,99,235,.45); }
-  .wordmark b { font-size:15px; font-weight:700; letter-spacing:.01em; }
-  .wm-ip { color:var(--brandblue); margin-left:3px; }
-  .toolname { color:var(--muted); font-size:13px; border-left:1px solid var(--line); padding-left:12px; }
-  .viewtools { position:sticky; top:0; background:var(--bg); z-index:2; }
-  .docbar { display:flex; gap:6px; flex-wrap:wrap; align-items:center; padding-bottom:10px; }
-  .barlabel { color:var(--muted); font-size:12px; margin-right:4px; }
-  .docchip { background:#18243d; color:var(--text); border:1px solid var(--line); border-radius:14px;
-             padding:4px 12px; font-size:12px; cursor:pointer; }
-  .docchip:hover:enabled { border-color:var(--accent); }
-  .docchip.on { background:#20304f; border-color:var(--accent); color:var(--accentTx); }
-  .docchip:disabled { opacity:.45; cursor:default; }
-  .docchip .pg { color:var(--muted); margin-left:6px; font-size:11px; }
-  .pagenav { display:flex; align-items:center; gap:12px; padding-bottom:12px;
-             border-bottom:1px solid var(--line); margin-bottom:12px; }
-  .pagenav button { background:#18243d; color:var(--text); border:1px solid var(--line);
-                    border-radius:6px; padding:4px 12px; font-size:13px; cursor:pointer; }
-  .pagenav button:disabled { opacity:.4; cursor:default; }
-  .pagenav .ind { color:var(--muted); font-size:13px; }
-
-  /* ---- landing ---- */
-  #landing { height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
-  .land { width:540px; max-width:100%; background:var(--panel); border:1px solid var(--line);
-          border-radius:14px; padding:34px 36px; text-align:center; }
-  .land-brand { display:inline-flex; align-items:center; gap:13px; margin-bottom:22px; }
-  .land-brand .wm-badge { width:44px; height:44px; border-radius:11px; font-size:24px; }
-  .land-brand .wm-name { font-size:22px; font-weight:700; text-align:left; line-height:1.1; }
-  .land-brand .wm-sub { font-size:12px; color:var(--muted); text-align:left; letter-spacing:.12em;
-                        text-transform:uppercase; margin-top:3px; }
-  .land h1 { margin:8px 0 6px; font-size:26px; }
-  .land p { color:var(--muted); margin:0 auto 22px; max-width:420px; }
-  .land-foot { margin-top:22px; font-size:11.5px; color:var(--muted); }
-  .land-foot .lock { color:var(--brandblue); }
-  .open { display:inline-flex; align-items:center; gap:9px; background:var(--accent); color:var(--accentTx);
-          border:none; border-radius:9px; padding:13px 26px; font-size:15px; font-weight:600; cursor:pointer; }
-  .open:hover { filter:brightness(1.12); }
-  .open svg { width:18px; height:18px; }
-  .manual { margin-top:22px; padding-top:18px; border-top:1px solid var(--line); }
-  .manual .lbl { font-size:12px; color:var(--muted); margin-bottom:8px; }
-  .manual .grp { display:flex; gap:8px; }
-  .manual input { flex:1; background:#0c1426; color:var(--text); border:1px solid var(--line);
-                  border-radius:7px; padding:9px 11px; font-size:13px; font-family:ui-monospace,monospace; }
-  .manual button { background:#18243d; color:var(--text); border:1px solid var(--line); border-radius:7px;
-                   padding:9px 16px; cursor:pointer; }
-  .status { margin-top:18px; min-height:20px; font-size:13px; }
-  .status.err { color:#ff7a85; } .status.busy { color:var(--muted); }
-  .spin { display:inline-block; width:13px; height:13px; margin-right:8px; vertical-align:-2px;
-          border:2px solid var(--line); border-top-color:var(--accentTx); border-radius:50%;
-          animation:rot .8s linear infinite; }
-  @keyframes rot { to { transform:rotate(360deg); } }
+  html,body { height:100%; }
+  body { margin:0; font:14px/1.5 var(--font); color:var(--text); background:var(--bg);
+         -webkit-font-smoothing:antialiased; }
+  button { font:inherit; color:inherit; cursor:pointer; }
+  h1,h2 { margin:0; font-weight:650; letter-spacing:-.01em; }
+  code { font-family:var(--mono); }
+  ::selection { background:rgba(59,130,246,.32); }
+  /* thin scrollbars */
+  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar-thumb { background:#22304b; border-radius:6px; border:2px solid var(--bg); }
+  ::-webkit-scrollbar-thumb:hover { background:#2c3c5c; }
   .hidden { display:none !important; }
+  .spin { display:inline-block; width:14px; height:14px; vertical-align:-2px; margin-right:8px;
+          border:2px solid var(--border-2); border-top-color:var(--accent-2); border-radius:50%;
+          animation:rot .7s linear infinite; }
+  @keyframes rot { to { transform:rotate(360deg); } }
+
+  /* ===== Newport IP wordmark ===== */
+  .wordmark { display:inline-flex; align-items:center; gap:10px; }
+  .wm-badge { width:28px; height:28px; border-radius:8px; flex:none; color:#fff;
+              background:linear-gradient(140deg,#60a5fa,#2563eb); font-weight:800; font-size:15px;
+              display:flex; align-items:center; justify-content:center;
+              box-shadow:0 2px 8px rgba(37,99,235,.5); }
+  .wordmark b { font-size:15px; font-weight:700; letter-spacing:.005em; }
+  .wm-ip { color:var(--brandblue); margin-left:3px; }
+
+  /* ====================== LANDING ====================== */
+  #landing { min-height:100%; display:flex; align-items:center; justify-content:center; padding:24px;
+             background:radial-gradient(1200px 600px at 50% -10%, #11203b 0%, var(--bg) 60%); }
+  .land { width:560px; max-width:100%; background:var(--surface); border:1px solid var(--border);
+          border-radius:var(--r-lg); padding:40px 42px; text-align:center; box-shadow:var(--shadow); }
+  .land-brand { display:inline-flex; align-items:center; gap:14px; margin-bottom:26px; }
+  .land-brand .wm-badge { width:46px; height:46px; border-radius:12px; font-size:25px; }
+  .land-brand .wm-name { font-size:23px; font-weight:700; text-align:left; line-height:1.05; }
+  .land-brand .wm-sub { font-size:11px; color:var(--muted); text-align:left; letter-spacing:.14em;
+                        text-transform:uppercase; margin-top:4px; }
+  .land h1 { font-size:27px; margin-bottom:8px; }
+  .land p { color:var(--muted); margin:0 auto 26px; max-width:430px; }
+  .open { display:inline-flex; align-items:center; gap:10px; background:var(--accent); color:#fff;
+          border:none; border-radius:var(--r); padding:14px 28px; font-size:15px; font-weight:600;
+          box-shadow:0 4px 14px rgba(37,99,235,.4); transition:.15s; }
+  .open:hover { background:var(--accent-2); transform:translateY(-1px); }
+  .open svg { width:18px; height:18px; }
+  .manual { margin-top:26px; padding-top:22px; border-top:1px solid var(--border); }
+  .manual .lbl { font-size:12px; color:var(--faint); margin-bottom:9px; }
+  .manual .grp { display:flex; gap:9px; }
+  .manual input { flex:1; background:var(--bg); color:var(--text); border:1px solid var(--border);
+                  border-radius:var(--r-sm); padding:10px 12px; font-size:13px; font-family:var(--mono); }
+  .manual input:focus { outline:none; border-color:var(--accent); }
+  .manual button { background:var(--surface-2); border:1px solid var(--border-2); border-radius:var(--r-sm);
+                   padding:10px 18px; font-weight:550; transition:.15s; }
+  .manual button:hover { border-color:var(--accent); }
+  .status { margin-top:20px; min-height:20px; font-size:13px; }
+  .status.err { color:var(--critical); } .status.busy { color:var(--muted); }
+  .status code { color:var(--accent-2); }
+  .land-foot { margin-top:24px; font-size:11.5px; color:var(--faint); }
+  .land-foot .lock { color:var(--pass); }
+
+  /* ====================== APP SHELL ====================== */
+  #app { display:flex; flex-direction:column; height:100%; }
+  header { display:flex; align-items:center; gap:16px; padding:0 18px; height:54px; flex:none;
+           background:var(--surface); border-bottom:1px solid var(--border); }
+  .toolname { color:var(--muted); font-size:13px; padding-left:14px; border-left:1px solid var(--border-2); }
+  .crumb { color:var(--faint); font-size:12px; font-family:var(--mono); white-space:nowrap;
+           overflow:hidden; text-overflow:ellipsis; max-width:30vw; }
+  .spacer { flex:1; }
+  .hbtn { display:inline-flex; align-items:center; gap:6px; background:var(--surface-2); color:var(--text);
+          border:1px solid var(--border-2); border-radius:var(--r-sm); padding:6px 12px; font-size:12.5px;
+          font-weight:550; transition:.15s; }
+  .hbtn:hover { border-color:var(--accent); background:var(--surface-3); }
+
+  /* ===== filter / count bar (one place: colored + selectable) ===== */
+  .toolbar { display:flex; align-items:center; gap:7px; padding:10px 18px; flex:none;
+             background:var(--surface); border-bottom:1px solid var(--border); flex-wrap:wrap; }
+  .fchip { display:inline-flex; align-items:center; gap:7px; background:transparent; color:var(--muted);
+           border:1px solid var(--border-2); border-radius:999px; padding:5px 13px; font-size:12.5px;
+           font-weight:550; transition:.13s; }
+  .fchip .dot { width:8px; height:8px; border-radius:50%; background:currentColor; opacity:.9; }
+  .fchip .n { font-weight:700; color:var(--text); font-variant-numeric:tabular-nums; }
+  .fchip:hover { border-color:var(--border-2); background:var(--surface-2); }
+  .fchip.sev-CRITICAL { color:var(--critical); } .fchip.sev-WARNING { color:var(--warning); }
+  .fchip.sev-INFO { color:var(--info); } .fchip.sev-PASS { color:var(--pass); }
+  .fchip.on { color:var(--text); border-color:transparent; box-shadow:0 0 0 1.5px var(--accent) inset;
+              background:var(--surface-3); }
+  .fchip.on.sev-CRITICAL { box-shadow:0 0 0 1.5px var(--critical) inset; background:var(--critical-bg); }
+  .fchip.on.sev-WARNING { box-shadow:0 0 0 1.5px var(--warning) inset; background:var(--warning-bg); }
+  .fchip.on.sev-INFO { box-shadow:0 0 0 1.5px var(--info) inset; background:var(--info-bg); }
+  .fchip.on.sev-PASS { box-shadow:0 0 0 1.5px var(--pass) inset; background:var(--pass-bg); }
+
+  .wrap { flex:1; min-height:0; display:grid; grid-template-columns:minmax(360px,30%) 1fr; }
+
+  /* ===== left: checks master list ===== */
+  .checks { min-height:0; overflow:auto; border-right:1px solid var(--border); background:var(--surface); }
+  .cattools { position:sticky; top:0; z-index:3; display:flex; gap:8px; padding:9px 14px;
+              background:var(--surface); border-bottom:1px solid var(--border); }
+  .cattools button { background:transparent; color:var(--faint); border:1px solid var(--border);
+                     border-radius:var(--r-sm); padding:4px 10px; font-size:11px; font-weight:550; transition:.13s; }
+  .cattools button:hover { color:var(--text); border-color:var(--accent); }
+
+  .cat { position:sticky; top:39px; z-index:2; display:flex; align-items:center; gap:10px;
+         padding:11px 15px; background:var(--surface); border-bottom:1px solid var(--border);
+         cursor:pointer; user-select:none; }
+  .cat:hover { background:var(--surface-2); }
+  .cat .chev { width:9px; height:9px; flex:none; border-right:2px solid var(--faint);
+               border-bottom:2px solid var(--faint); transform:rotate(-45deg); transition:transform .15s;
+               margin-left:2px; }
+  .cat.open .chev { transform:rotate(45deg); }
+  .cat .cname { font-weight:650; font-size:13px; flex:1; }
+  .cat .cmini { display:flex; gap:5px; }
+  .cmini .mp { display:inline-flex; align-items:center; gap:4px; font-size:11px; font-weight:700;
+               font-variant-numeric:tabular-nums; }
+  .mp .dot { width:7px; height:7px; border-radius:50%; }
+
+  .catbody.collapsed { display:none; }
+  .item { display:flex; align-items:flex-start; gap:11px; padding:11px 15px 11px 14px; cursor:pointer;
+          border-bottom:1px solid var(--border); border-left:3px solid transparent; transition:background .12s; }
+  .item:hover { background:var(--surface-2); }
+  .item.sel { background:var(--surface-3); }
+  .item.s-CRITICAL { border-left-color:var(--critical); }
+  .item.s-WARNING { border-left-color:var(--warning); }
+  .item.s-INFO { border-left-color:var(--info); }
+  .item.s-PASS { border-left-color:var(--pass); }
+  .item .ico { margin-top:1px; flex:none; }
+  .item .it-body { min-width:0; flex:1; }
+  .item .it-name { font-size:13px; font-weight:600; line-height:1.35; }
+  .item .it-id { color:var(--faint); font-weight:600; font-variant-numeric:tabular-nums; margin-right:7px; }
+  .item .it-msg { color:var(--muted); font-size:12px; margin-top:3px; overflow:hidden;
+                  text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+  .item .it-pin { margin-top:2px; color:var(--accent-2); flex:none; opacity:.85; }
+  .item .it-pin svg { width:14px; height:14px; }
+
+  /* status icon (filled circle w/ glyph) */
+  .sico { width:17px; height:17px; border-radius:50%; display:inline-flex; align-items:center;
+          justify-content:center; font-size:11px; font-weight:800; color:#0a0f1c; flex:none; }
+  .sico.CRITICAL { background:var(--critical); } .sico.WARNING { background:var(--warning); }
+  .sico.INFO { background:var(--info); } .sico.PASS { background:var(--pass); }
+
+  /* ===== right: detail / source ===== */
+  .detail { min-height:0; display:flex; flex-direction:column; background:var(--bg); }
+  .vp-empty { margin:auto; max-width:340px; text-align:center; color:var(--faint); }
+  .vp-empty svg { width:42px; height:42px; opacity:.4; margin-bottom:14px; }
+  .vp { min-height:0; display:flex; flex-direction:column; flex:1; }
+  .vp-head { flex:none; display:flex; align-items:center; gap:12px; padding:16px 22px 14px;
+             border-bottom:1px solid var(--border); background:var(--surface); }
+  .verdict { display:inline-flex; align-items:center; gap:7px; padding:5px 11px; border-radius:999px;
+             font-size:11.5px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; }
+  .verdict.CRITICAL { color:var(--critical); background:var(--critical-bg); }
+  .verdict.WARNING { color:var(--warning); background:var(--warning-bg); }
+  .verdict.INFO { color:var(--info); background:var(--info-bg); }
+  .verdict.PASS { color:var(--pass); background:var(--pass-bg); }
+  .vp-title { min-width:0; }
+  .vp-title h2 { font-size:16px; }
+  .vp-title .vid { font-size:11.5px; color:var(--faint); font-weight:600; }
+  .vp-scroll { flex:1; min-height:0; overflow:auto; padding:20px 22px 40px; }
+  .vp-msg { font-size:14px; color:var(--text); margin:0 0 4px; }
+  .vp-why { font-size:13px; color:var(--muted); white-space:pre-wrap; line-height:1.55;
+            background:var(--surface); border:1px solid var(--border); border-left:3px solid var(--border-2);
+            border-radius:var(--r-sm); padding:12px 14px; margin-top:14px; }
+  .sect { margin-top:24px; }
+  .sect-h { font-size:11px; font-weight:700; letter-spacing:.09em; text-transform:uppercase;
+            color:var(--faint); margin-bottom:11px; }
+
+  /* receipts (evidence rows) — human readable */
+  .receipt { display:flex; align-items:flex-start; gap:11px; padding:11px 13px; margin-bottom:8px;
+             background:var(--surface); border:1px solid var(--border); border-radius:var(--r);
+             transition:.13s; text-align:left; width:100%; }
+  .receipt:hover { border-color:var(--accent); background:var(--surface-2); transform:translateY(-1px); }
+  .receipt.active { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
+  .receipt .r-ico { width:30px; height:30px; border-radius:8px; flex:none; display:flex; align-items:center;
+                    justify-content:center; background:var(--surface-3); color:var(--muted); }
+  .receipt.match .r-ico { color:var(--pass); background:var(--pass-bg); }
+  .receipt.mismatch .r-ico, .receipt.missing .r-ico { color:var(--critical); background:var(--critical-bg); }
+  .receipt.value .r-ico { color:var(--info); background:var(--info-bg); }
+  .receipt .r-ico svg { width:16px; height:16px; }
+  .receipt .r-main { min-width:0; flex:1; }
+  .receipt .r-label { font-size:13px; font-weight:550; color:var(--text); }
+  .receipt .r-meta { font-size:11.5px; color:var(--faint); margin-top:2px; }
+  .receipt .r-go { color:var(--faint); align-self:center; flex:none; }
+  .receipt:hover .r-go { color:var(--accent-2); }
+  .no-evidence { color:var(--faint); font-size:12.5px; font-style:italic; }
+
+  /* source: relevant docs + page nav + render */
+  .srcbar { display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-bottom:14px; }
+  .docbar { display:flex; gap:7px; flex-wrap:wrap; align-items:center; }
+  .barlabel { color:var(--faint); font-size:11px; font-weight:700; letter-spacing:.07em;
+              text-transform:uppercase; margin-right:3px; }
+  .docchip { display:inline-flex; align-items:center; gap:7px; background:var(--surface); color:var(--text);
+             border:1px solid var(--border-2); border-radius:999px; padding:5px 13px; font-size:12px; transition:.13s; }
+  .docchip:hover:enabled { border-color:var(--accent); }
+  .docchip.on { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  .docchip:disabled { opacity:.4; cursor:default; }
+  .docchip .pg { color:var(--faint); font-size:11px; }
+  .docchip.on .pg { color:rgba(255,255,255,.75); }
+  .pagenav { display:inline-flex; align-items:center; gap:10px; }
+  .pagenav button { background:var(--surface); color:var(--text); border:1px solid var(--border-2);
+                    border-radius:var(--r-sm); padding:5px 12px; font-size:12.5px; transition:.13s; }
+  .pagenav button:hover:enabled { border-color:var(--accent); }
+  .pagenav button:disabled { opacity:.35; cursor:default; }
+  .pagenav .ind { color:var(--muted); font-size:12.5px; font-variant-numeric:tabular-nums; }
+
+  .pagewrap { position:relative; margin:0 auto; width:max-content; border-radius:6px; overflow:hidden;
+              box-shadow:var(--shadow); }
+  canvas { display:block; }
+  .hl { position:absolute; background:rgba(96,165,250,.28); outline:2px solid var(--accent-2);
+        border-radius:2px; animation:pulse 1.1s ease-in-out 2; box-shadow:0 0 0 4px rgba(96,165,250,.12); }
+  @keyframes pulse { 0%,100%{ background:rgba(96,165,250,.22);} 50%{ background:rgba(96,165,250,.5);} }
+  .stage-hint { color:var(--faint); font-size:12.5px; text-align:center; padding:30px 10px; }
+
+  /* xfa data card */
+  .card { max-width:520px; background:var(--surface); border:1px solid var(--border); border-radius:var(--r);
+          padding:18px 20px; }
+  .card .row { display:flex; gap:12px; margin:9px 0; font-size:13px; }
+  .card .k { color:var(--faint); width:90px; flex:none; }
+  .card .v code { color:var(--pass); }
 </style>
 </head>
 <body>
@@ -153,12 +275,12 @@
   <header>
     <span class="wordmark"><span class="wm-badge">N</span><b>Newport <span class="wm-ip">IP</span></b></span>
     <span class="toolname">Patent Filing QC</span>
-    <span class="folder" id="folder"></span>
+    <span class="crumb" id="folder"></span>
+    <span class="spacer"></span>
     <button class="hbtn" id="rerunBtn" title="Re-run the checks (after editing files)">Re-run</button>
     <button class="hbtn" id="changeBtn">Open another folder</button>
-    <span class="counts" id="counts"></span>
-    <div class="filters" id="filters"></div>
   </header>
+  <div class="toolbar" id="filters"></div>
   <div class="wrap">
     <div class="checks" id="checks">
       <div class="cattools">
@@ -167,29 +289,56 @@
       </div>
       <div id="checklist"></div>
     </div>
-    <div class="viewer" id="viewer">
-      <div class="viewtools" id="viewtools">
-        <div class="docbar" id="docbar"></div>
-        <div class="pagenav hidden" id="pagenav"></div>
+    <div class="detail" id="detail">
+      <div class="vp-empty" id="vpEmpty">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M9 11l3 3 8-8"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg>
+        <div>Select a check on the left to see exactly why it passed or failed — and the source it came from.</div>
       </div>
-      <div class="stage" id="stage"><div class="hint">Select a check on the left, or open a document above.</div></div>
+      <div class="vp hidden" id="vp">
+        <div class="vp-head">
+          <span class="verdict" id="dVerdict"></span>
+          <div class="vp-title"><div class="vid" id="dId"></div><h2 id="dName"></h2></div>
+        </div>
+        <div class="vp-scroll">
+          <p class="vp-msg" id="dMsg"></p>
+          <div class="vp-why hidden" id="dWhy"></div>
+          <div class="sect">
+            <div class="sect-h">Evidence</div>
+            <div id="dEvidence"></div>
+          </div>
+          <div class="sect hidden" id="dSourceSect">
+            <div class="sect-h">Source document</div>
+            <div class="srcbar"><span class="barlabel">Relevant</span><div class="docbar" id="docbar"></div>
+                 <div class="pagenav hidden" id="pagenav"></div></div>
+            <div class="stage" id="stage"></div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
 
 <script src="/static/vendor/pdfjs/pdf.min.js"></script>
 <script>
-// PDF.js is vendored locally (app/static/vendor/pdfjs) — no external/CDN calls,
-// so the tool runs fully offline and nothing about a filing leaves the machine.
 pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/vendor/pdfjs/pdf.worker.min.js";
 
-const VIEW_W = 780;
+const VIEW_W = 720;
 let pdfCache = {};
 let RESULT = null, FILTER = "receipts", FOLDER = null, COLLAPSED = {};
-let VIEW = { doc: null, page: 0, pages: 0 };   // current document being viewed
+let SELECTED = null;                       // currently selected issue
+let VIEW = { doc:null, page:0, pages:0 };  // document currently rendered
 
 const $ = id => document.getElementById(id);
 const qF = () => "folder=" + encodeURIComponent(FOLDER || "");
+const esc = s => String(s==null?"":s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+const ICON = {
+  pin:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 21s-6-5.686-6-10a6 6 0 1 1 12 0c0 4.314-6 10-6 10z"/><circle cx="12" cy="11" r="2.2"/></svg>',
+  file:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>',
+  data:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v12c0 1.66 3.13 3 7 3s7-1.34 7-3V6"/><path d="M5 12c0 1.66 3.13 3 7 3s7-1.34 7-3"/></svg>',
+  go:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><path d="M9 6l6 6-6 6"/></svg>',
+};
+const SEV_GLYPH = { CRITICAL:"!", WARNING:"!", INFO:"i", PASS:"✓" };
 
 /* ---------- folder selection / loading ---------- */
 function setStatus(msg, cls) { const s=$("status"); s.className="status "+(cls||""); s.innerHTML=msg; }
@@ -206,7 +355,7 @@ async function pick() {
 
 async function loadFolder(folder, refresh) {
   FOLDER = folder; pdfCache = {};
-  setStatus('<span class="spin"></span>Running quality checks on<br><code>'+folder+'</code>…', "busy");
+  setStatus('<span class="spin"></span>Running quality checks on<br><code>'+esc(folder)+'</code>…', "busy");
   try {
     const r = await fetch("/api/result?" + qF() + (refresh ? "&refresh=1" : ""));
     const d = await r.json();
@@ -218,40 +367,45 @@ async function loadFolder(folder, refresh) {
 function enterApp() {
   $("landing").classList.add("hidden");
   $("app").classList.remove("hidden");
-  VIEW = { doc: null, page: 0, pages: 0 };
-  $("pagenav").classList.add("hidden");
-  $("stage").innerHTML = '<div class="hint">Select a check on the left, or open a document above.</div>';
+  SELECTED = null; VIEW = { doc:null, page:0, pages:0 };
+  $("vp").classList.add("hidden"); $("vpEmpty").classList.remove("hidden");
   setup();
 }
-
 function backToLanding() {
   $("app").classList.add("hidden");
   $("landing").classList.remove("hidden");
   setStatus("", "");
 }
 
-/* ---------- PDF rendering ---------- */
+/* ---------- documents ---------- */
+function docList() { return (RESULT && RESULT.documents) || []; }
+function docRef(t) { return docList().find(d => d.doc_type === t); }
+function viewable(t) { const d = docRef(t); return d && d.source === "pdf"; }
+
 async function loadPdf(docType) {
   if (pdfCache[docType]) return pdfCache[docType];
   const buf = await (await fetch(`/api/pdf/${encodeURIComponent(docType)}?` + qF())).arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-  pdfCache[docType] = pdf;
-  return pdf;
+  pdfCache[docType] = pdf; return pdf;
 }
 
-function docList() { return (RESULT && RESULT.documents) || []; }
-function docRef(docType) { return docList().find(d => d.doc_type === docType); }
-function viewable(d) { return d && d.source === "pdf"; }
+/* relevant docs for the selected check = doc_types referenced by its evidence */
+function relevantDocs(issue) {
+  const seen = [];
+  (issue.evidence||[]).forEach(e => { if (e.doc_type && !seen.includes(e.doc_type)) seen.push(e.doc_type); });
+  return seen;
+}
 
-function renderDocBar() {
-  const bar = $("docbar"); bar.innerHTML = '<span class="barlabel">Documents:</span>';
-  docList().forEach(d => {
+function renderDocBar(docs, activeDoc) {
+  const bar = $("docbar"); bar.innerHTML = "";
+  docs.forEach(t => {
+    const d = docRef(t);
     const b = document.createElement("button");
-    b.className = "docchip" + (VIEW.doc === d.doc_type ? " on" : "");
-    const pages = d.page_count ? `${d.page_count}p` : (viewable(d) ? "" : "not PDF");
-    b.innerHTML = `${d.doc_type}<span class="pg">${pages}</span>`;
-    if (viewable(d)) b.onclick = () => openDoc(d.doc_type);
-    else { b.disabled = true; b.title = `${d.filename} is not a PDF — open it directly to view`; }
+    b.className = "docchip" + (t === activeDoc ? " on" : "");
+    const pages = d && d.page_count ? `${d.page_count}p` : (viewable(t) ? "" : "not PDF");
+    b.innerHTML = `${esc(t)}${pages?`<span class="pg">${pages}</span>`:""}`;
+    if (viewable(t)) b.onclick = () => openDoc(t);
+    else { b.disabled = true; b.title = "Not a PDF — open it directly to view"; }
     bar.appendChild(b);
   });
 }
@@ -261,35 +415,37 @@ function updatePageNav() {
   if (!VIEW.doc || VIEW.pages <= 0) { nav.classList.add("hidden"); return; }
   nav.classList.remove("hidden"); nav.innerHTML = "";
   const prev = document.createElement("button"); prev.textContent = "‹ Prev";
-  prev.disabled = VIEW.page <= 0; prev.onclick = () => renderPage(VIEW.doc, VIEW.page - 1, null);
+  prev.disabled = VIEW.page <= 0; prev.onclick = () => renderPage(VIEW.doc, VIEW.page-1, null);
   const ind = document.createElement("span"); ind.className = "ind";
-  ind.textContent = `${VIEW.doc} — page ${VIEW.page + 1} of ${VIEW.pages}`;
+  ind.textContent = `Page ${VIEW.page+1} of ${VIEW.pages}`;
   const next = document.createElement("button"); next.textContent = "Next ›";
-  next.disabled = VIEW.page >= VIEW.pages - 1; next.onclick = () => renderPage(VIEW.doc, VIEW.page + 1, null);
+  next.disabled = VIEW.page >= VIEW.pages-1; next.onclick = () => renderPage(VIEW.doc, VIEW.page+1, null);
   nav.append(prev, ind, next);
 }
 
-async function openDoc(docType) { await renderPage(docType, 0, null); }
+async function openDoc(t) { await renderPage(t, 0, null); refreshDocActive(); }
+function refreshDocActive() {
+  [...$("docbar").children].forEach(c => c.classList.toggle("on", c.textContent.startsWith(VIEW.doc||"\0")));
+}
 
 async function renderPage(docType, page, bbox) {
-  VIEW = { doc: docType, page, pages: VIEW.pages };
+  $("dSourceSect").classList.remove("hidden");
+  VIEW = { doc:docType, page, pages:VIEW.pages };
   const stage = $("stage");
-  stage.innerHTML = '<div class="hint"><span class="spin"></span> Loading…</div>';
+  stage.innerHTML = '<div class="stage-hint"><span class="spin"></span>Loading…</div>';
   let pdf;
   try { pdf = await loadPdf(docType); }
-  catch (e) {
-    stage.innerHTML = `<div class="hint">Can't display ${docType} (not a PDF or unreadable).</div>`;
-    VIEW.pages = 0; updatePageNav(); renderDocBar(); return;
-  }
+  catch (e) { stage.innerHTML = `<div class="stage-hint">Can't display ${esc(docType)} (not a PDF or unreadable).</div>`;
+              VIEW.pages = 0; updatePageNav(); return; }
   VIEW.pages = pdf.numPages;
-  const p = await pdf.getPage(page + 1);
-  const scale = VIEW_W / p.getViewport({ scale: 1 }).width;
-  const vp = p.getViewport({ scale });
+  const p = await pdf.getPage(page+1);
+  const scale = VIEW_W / p.getViewport({scale:1}).width;
+  const vp = p.getViewport({scale});
   stage.innerHTML = "";
   const wrap = document.createElement("div"); wrap.className = "pagewrap";
   const canvas = document.createElement("canvas");
   canvas.width = vp.width; canvas.height = vp.height; wrap.appendChild(canvas);
-  if (bbox && (bbox[2] - bbox[0]) > 0) {
+  if (bbox && (bbox[2]-bbox[0]) > 0) {
     const hl = document.createElement("div"); hl.className = "hl";
     hl.style.left = bbox[0]*scale+"px"; hl.style.top = bbox[1]*scale+"px";
     hl.style.width = (bbox[2]-bbox[0])*scale+"px"; hl.style.height = (bbox[3]-bbox[1])*scale+"px";
@@ -297,23 +453,43 @@ async function renderPage(docType, page, bbox) {
   }
   stage.appendChild(wrap);
   await p.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
+  updatePageNav(); refreshDocActive();
   const hl = wrap.querySelector(".hl"); if (hl) hl.scrollIntoView({ block:"center", behavior:"smooth" });
-  updatePageNav(); renderDocBar();
 }
 
 function showCard(ev) {
-  VIEW = { doc: null, page: 0, pages: 0 }; updatePageNav(); renderDocBar();
-  const L = ev.locator;
+  $("dSourceSect").classList.remove("hidden");
+  VIEW = { doc:null, page:0, pages:0 }; updatePageNav();
+  const L = ev.locator || {};
   $("stage").innerHTML = `
-    <div class="card"><h3>Structured data receipt</h3>
-      <div class="row"><div class="k">Document</div><div>${ev.doc_type} (XFA — no page geometry)</div></div>
-      <div class="row"><div class="k">Field</div><div><code>${L.field_path||""}</code></div></div>
-      <div class="row"><div class="k">Value</div><div><code>${ev.actual ?? "—"}</code></div></div>
-      <div class="row"><div class="k">Expected</div><div><code>${ev.expected ?? "—"}</code></div></div>
-      <div class="row"><div class="k">Verdict</div><div>${ev.kind}</div></div>
-      <div class="row"><div class="k">Note</div><div>${ev.label||""}</div></div></div>`;
+    <div class="card">
+      <div class="row"><div class="k">Document</div><div class="v">${esc(ev.doc_type)} — structured form field</div></div>
+      <div class="row"><div class="k">Field</div><div class="v"><code>${esc(L.field_path||"")}</code></div></div>
+      <div class="row"><div class="k">Value</div><div class="v"><code>${esc(ev.actual ?? "—")}</code></div></div>
+      ${ev.expected!=null?`<div class="row"><div class="k">Expected</div><div class="v"><code>${esc(ev.expected)}</code></div></div>`:""}
+    </div>`;
 }
 
+/* ---------- receipts ---------- */
+function evIcon(ev) {
+  const t = ev.locator && ev.locator.type;
+  if (t === "xfa_field") return ICON.data;
+  if (t === "pdf_page") return ICON.file;
+  return ICON.pin;
+}
+function evLabel(ev) {
+  if (ev.label) return ev.label;
+  const t = ev.locator && ev.locator.type;
+  if (t === "pdf_page") return `Open ${ev.doc_type}`;
+  return ev.doc_type || "Evidence";
+}
+function evMeta(ev) {
+  const L = ev.locator || {};
+  if (L.type === "pdf_region") return `${ev.doc_type} · page ${(L.page||0)+1}`;
+  if (L.type === "pdf_page")   return `${ev.doc_type} · open document`;
+  if (L.type === "xfa_field")  return `${ev.doc_type} · ${L.field_path||"form field"}`;
+  return ev.doc_type || "";
+}
 function activate(ev) {
   const L = ev.locator || {};
   if (L.type === "pdf_region") renderPage(ev.doc_type, L.page||0, L.bbox);
@@ -321,27 +497,72 @@ function activate(ev) {
   else if (L.type === "xfa_field") showCard(ev);
 }
 
-/* ---------- checks list ---------- */
-function checkEl(issue) {
-  const el = document.createElement("div"); el.className = "check";
-  el.innerHTML = `<div><span class="badge ${issue.severity}">${issue.severity}</span>
-    <span class="cname">${issue.check_id}. ${issue.check_name}</span></div>
-    <div class="cmsg">${issue.message}</div>`;
-  (issue.evidence||[]).forEach(ev => {
-    const e = document.createElement("div"); e.className = "ev " + (ev.kind||"");
-    const tag = ev.kind === "document" ? "view" : `${ev.locator.type} · ${ev.kind}`;
-    e.innerHTML = `<div class="tag">${tag}</div><div>${ev.label||ev.snippet||""}</div>`;
-    e.onclick = () => activate(ev);
-    el.appendChild(e);
+/* ---------- selection / detail ---------- */
+function selectCheck(issue, targetEv) {
+  SELECTED = issue;
+  document.querySelectorAll(".item.sel").forEach(n => n.classList.remove("sel"));
+  const node = document.querySelector(`.item[data-cid="${issue._uid}"]`);
+  if (node) node.classList.add("sel");
+
+  $("vpEmpty").classList.add("hidden"); $("vp").classList.remove("hidden");
+  $("dVerdict").className = "verdict " + issue.severity; $("dVerdict").textContent = issue.severity;
+  $("dId").textContent = "Check " + issue.check_id + " · " + (issue.category||"");
+  $("dName").textContent = issue.check_name;
+  $("dMsg").textContent = issue.message || "";
+  const why = $("dWhy");
+  if (issue.details && issue.details.trim()) { why.textContent = issue.details; why.classList.remove("hidden"); }
+  else why.classList.add("hidden");
+
+  // evidence rows
+  const ev = $("dEvidence"); ev.innerHTML = "";
+  const evs = issue.evidence || [];
+  if (!evs.length) {
+    ev.innerHTML = `<div class="no-evidence">This check is a cross-document assessment — its reasoning is shown above; there is no single source location to highlight.</div>`;
+  }
+  evs.forEach(e => {
+    const b = document.createElement("button");
+    b.className = "receipt " + (e.kind || "");
+    b.innerHTML = `<span class="r-ico">${evIcon(e)}</span>
+      <span class="r-main"><span class="r-label">${esc(evLabel(e))}</span>
+      <span class="r-meta">${esc(evMeta(e))}</span></span><span class="r-go">${ICON.go}</span>`;
+    b.onclick = () => { document.querySelectorAll(".receipt.active").forEach(n=>n.classList.remove("active"));
+                        b.classList.add("active"); activate(e); };
+    ev.appendChild(b);
   });
-  return el;
+
+  // relevant documents
+  const docs = relevantDocs(issue);
+  const vdocs = docs.filter(viewable);
+  renderDocBar(docs, null);
+
+  // auto-open the primary located evidence
+  const primary = evs.find(e => e.locator && e.locator.type === "pdf_region")
+               || evs.find(e => e.locator && e.locator.type === "xfa_field")
+               || evs.find(e => e.locator && e.locator.type === "pdf_page");
+  VIEW = { doc:null, page:0, pages:0 };
+  if (primary) {
+    const row = [...ev.children].find(c => true); // first receipt
+    if (primary.locator.type !== "pdf_page" && ev.firstChild) ev.firstChild.classList.add("active");
+    activate(primary);
+  } else {
+    $("dSourceSect").classList.add("hidden");
+    $("stage").innerHTML = "";
+  }
 }
 
-// A "real" receipt is a located one (pdf_region / xfa_field); a pdf_page
-// document link is a navigation aid, not counted as a receipt.
+/* ---------- master list ---------- */
 function hasReceipt(issue) {
-  return (issue.evidence||[]).some(e =>
-    e.locator && (e.locator.type === "pdf_region" || e.locator.type === "xfa_field"));
+  return (issue.evidence||[]).some(e => e.locator && (e.locator.type==="pdf_region" || e.locator.type==="xfa_field"));
+}
+function itemEl(issue) {
+  const el = document.createElement("div");
+  el.className = "item s-" + issue.severity; el.dataset.cid = issue._uid;
+  el.innerHTML = `<span class="sico ${issue.severity}">${SEV_GLYPH[issue.severity]||""}</span>
+    <span class="it-body"><span class="it-name"><span class="it-id">${issue.check_id}</span>${esc(issue.check_name)}</span>
+    <span class="it-msg">${esc(issue.message||"")}</span></span>
+    ${hasReceipt(issue)?`<span class="it-pin" title="Has a located receipt">${ICON.pin}</span>`:""}`;
+  el.onclick = () => selectCheck(issue);
+  return el;
 }
 
 function render() {
@@ -350,50 +571,54 @@ function render() {
     FILTER === "all" ? true :
     FILTER === "receipts" ? hasReceipt(i) :
     i.severity === FILTER);
-  if (!issues.length) { root.innerHTML = `<div class="hint">No checks match this filter.</div>`; return; }
+  if (!issues.length) { root.innerHTML = `<div class="stage-hint">No checks match this filter.</div>`; return; }
 
   const order = [], byCat = {};
-  issues.forEach(i => { const c = i.category || "Other";
-    if (!(c in byCat)) { byCat[c] = []; order.push(c); } byCat[c].push(i); });
+  issues.forEach(i => { const c = i.category||"Other"; if (!(c in byCat)){ byCat[c]=[]; order.push(c);} byCat[c].push(i); });
 
   order.forEach(cat => {
     const list = byCat[cat], collapsed = !!COLLAPSED[cat];
-    const counts = {}; list.forEach(i => counts[i.severity] = (counts[i.severity]||0)+1);
-    const pills = ["CRITICAL","WARNING","INFO","PASS"].filter(s=>counts[s])
-      .map(s=>`<span class="badge ${s}">${counts[s]}</span>`).join("");
+    const counts = {}; list.forEach(i => counts[i.severity]=(counts[i.severity]||0)+1);
+    const mini = ["CRITICAL","WARNING","INFO","PASS"].filter(s=>counts[s]).map(s =>
+      `<span class="mp" style="color:var(--${s.toLowerCase()})"><span class="dot" style="background:var(--${s.toLowerCase()})"></span>${counts[s]}</span>`).join("");
     const head = document.createElement("div");
-    head.className = "cat" + (collapsed ? " collapsed" : "");
-    head.innerHTML = `<span class="chev">▾</span><span class="ctitle">${cat}</span>
-      <span class="ccount">${list.length}</span><span class="cdots">${pills}</span>`;
+    head.className = "cat" + (collapsed ? "" : " open");
+    head.innerHTML = `<span class="chev"></span><span class="cname">${esc(cat)}</span><span class="cmini">${mini}</span>`;
     const body = document.createElement("div");
     body.className = "catbody" + (collapsed ? " collapsed" : "");
-    list.forEach(issue => body.appendChild(checkEl(issue)));
+    list.forEach(i => body.appendChild(itemEl(i)));
     head.onclick = () => { COLLAPSED[cat] = !COLLAPSED[cat];
-      head.classList.toggle("collapsed"); body.classList.toggle("collapsed"); };
+      head.classList.toggle("open"); body.classList.toggle("collapsed"); };
     root.appendChild(head); root.appendChild(body);
+  });
+}
+
+/* ---------- filter / count bar ---------- */
+function renderFilters() {
+  const counts = {}; RESULT.issues.forEach(i => counts[i.severity]=(counts[i.severity]||0)+1);
+  const withEv = RESULT.issues.filter(hasReceipt).length;
+  const f = $("filters"); f.innerHTML = "";
+  const chips = [
+    ["receipts","Receipts",withEv,""], ["CRITICAL","Critical",counts.CRITICAL||0,"CRITICAL"],
+    ["WARNING","Warning",counts.WARNING||0,"WARNING"], ["INFO","Info",counts.INFO||0,"INFO"],
+    ["PASS","Pass",counts.PASS||0,"PASS"], ["all","All checks",RESULT.issues.length,""],
+  ];
+  chips.forEach(([k,label,n,sev]) => {
+    const b = document.createElement("button");
+    b.className = "fchip" + (sev?` sev-${sev}`:"") + (k===FILTER?" on":"");
+    b.innerHTML = `${sev?'<span class="dot"></span>':''}${label} <span class="n">${n}</span>`;
+    b.onclick = () => { FILTER=k; [...f.children].forEach(c=>c.classList.remove("on")); b.classList.add("on"); render(); };
+    f.appendChild(b);
   });
 }
 
 function setup() {
   $("folder").textContent = RESULT.folder;
-  const counts = {}; RESULT.issues.forEach(i => counts[i.severity]=(counts[i.severity]||0)+1);
-  $("counts").innerHTML =
-    ["CRITICAL","WARNING","INFO","PASS"].filter(s=>counts[s])
-      .map(s=>`<span class="badge ${s}">${counts[s]} ${s}</span>`).join("");
-  const withEv = RESULT.issues.filter(hasReceipt).length;
-  const f = $("filters"); f.innerHTML = "";
-  [["receipts",`Receipts (${withEv})`],["all","All"],["CRITICAL","Critical"],
-   ["WARNING","Warning"],["INFO","Info"],["PASS","Pass"]].forEach(([k,lbl])=>{
-    const b=document.createElement("button"); b.textContent=lbl;
-    if(k===FILTER) b.className="on";
-    b.onclick=()=>{FILTER=k; [...f.children].forEach(c=>c.classList.remove("on")); b.classList.add("on"); render();};
-    f.appendChild(b);
-  });
+  RESULT.issues.forEach((i,ix) => { i._uid = ix; });          // stable id for selection
+  renderFilters();
   $("expandAll").onclick = () => { COLLAPSED = {}; render(); };
   $("collapseAll").onclick = () => { RESULT.issues.forEach(i => COLLAPSED[i.category||"Other"]=true); render(); };
-  // Start with every category collapsed on first load (one row per category).
-  RESULT.issues.forEach(i => { COLLAPSED[i.category || "Other"] = true; });
-  renderDocBar();
+  RESULT.issues.forEach(i => { COLLAPSED[i.category||"Other"] = true; });  // collapsed on first load
   render();
 }
 
@@ -404,16 +629,14 @@ $("pathInput").addEventListener("keydown", e => { if(e.key==="Enter"){ const p=e
 $("changeBtn").onclick = backToLanding;
 $("rerunBtn").onclick = () => { backToLanding(); loadFolder(FOLDER, true); };
 
-// Arrow keys page through the open document (ignored while typing in a field).
 document.addEventListener("keydown", e => {
   if ($("app").classList.contains("hidden")) return;
   if (e.target && /^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return;
   if (!VIEW.doc || VIEW.pages <= 0) return;
-  if (e.key === "ArrowRight" && VIEW.page < VIEW.pages - 1) { e.preventDefault(); renderPage(VIEW.doc, VIEW.page + 1, null); }
-  if (e.key === "ArrowLeft"  && VIEW.page > 0)              { e.preventDefault(); renderPage(VIEW.doc, VIEW.page - 1, null); }
+  if (e.key === "ArrowRight" && VIEW.page < VIEW.pages-1) { e.preventDefault(); renderPage(VIEW.doc, VIEW.page+1, null); }
+  if (e.key === "ArrowLeft"  && VIEW.page > 0)            { e.preventDefault(); renderPage(VIEW.doc, VIEW.page-1, null); }
 });
 
-// If the server was started with a folder argument, skip the landing screen.
 fetch("/api/config").then(r=>r.json()).then(c=>{ if (c.preselected) loadFolder(c.preselected); });
 </script>
 </body>
