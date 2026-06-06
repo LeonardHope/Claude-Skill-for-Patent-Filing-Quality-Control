@@ -2,6 +2,7 @@
 import re
 
 from ..result import Issue
+from ._ev import region
 
 _CAT = "Final Quality"
 _MONTHS = (r"(?:January|February|March|April|May|June|July|August|September|October|"
@@ -154,8 +155,15 @@ def _figure_format(qc) -> Issue:
     if refs:
         formats = {r.split()[0].upper() for r in refs}
         if len(formats) == 1:
-            return Issue(70, _CAT, name, "PASS",
-                         f"Figure references use consistent format: {list(formats)[0]}")
-        return Issue(70, _CAT, name, "WARNING",
-                     f"Mixed figure reference formats detected: {formats}")
+            issue = Issue(70, _CAT, name, "PASS",
+                          f"Figure references use consistent format: {list(formats)[0]}")
+        else:
+            issue = Issue(70, _CAT, name, "WARNING",
+                          f"Mixed figure reference formats detected: {formats}")
+        sp = (getattr(qc, "documents", {}) or {}).get("Specification")
+        e = region("Specification", sp, refs[0], kind="match",
+                   label=f"Figure reference '{refs[0]}' in Specification")
+        if e:
+            issue.evidence = [e]
+        return issue
     return Issue(70, _CAT, name, "INFO", "No figure references detected")

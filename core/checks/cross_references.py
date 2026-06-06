@@ -5,8 +5,23 @@ claims) are intricate drafting-quality NLP heuristics, left engine-emitted.
 import re
 
 from ..result import Issue
+from ._ev import region
 
 _CAT = "Cross-References"
+
+
+def _claims_anchor(qc):
+    """A pdf_region receipt at the claims-section header in the spec, if locatable."""
+    spec = getattr(qc, "spec_text", "") or ""
+    sp = (getattr(qc, "documents", {}) or {}).get("Specification")
+    for m in (re.search(r"What is claimed", spec, re.IGNORECASE),
+              re.search(r"(?:^|\n)\s*CLAIMS?\b", spec, re.IGNORECASE)):
+        if m:
+            e = region("Specification", sp, m.group(0).strip(), kind="match",
+                       label="Claims section")
+            if e:
+                return [e]
+    return []
 
 
 def _fig_sort_key(fid):
@@ -59,8 +74,10 @@ def _claim_count(qc) -> Issue:
         nums.extend(re.findall(pat, claims_text, re.IGNORECASE))
     if nums:
         uniq = sorted({int(n) for n in nums if 1 <= int(n) <= 100})
-        return Issue(62, _CAT, name, "PASS",
-                     f"Total claims detected: {len(uniq)} (Claims 1-{max(uniq)})")
+        issue = Issue(62, _CAT, name, "PASS",
+                      f"Total claims detected: {len(uniq)} (Claims 1-{max(uniq)})")
+        issue.evidence = _claims_anchor(qc)
+        return issue
     simple = []
     for pat in (r"(?:^|\n)\s*(\d+)\.\s+", r"(?:\.\s+|\;\s+|:\s+)(\d+)\.\s+",
                 r"\s{2,}(\d+)\.\s+", r"^\s*(\d+)\.\s+", r"\s+\d{2,3}\s+(\d+)\.\s+"):

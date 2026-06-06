@@ -718,6 +718,21 @@ def t():
     return True
 
 
+@test("RCPT.1: claim-count (62) and figure-format (70) carry pdf_region receipts")
+def t():
+    from core.build import run
+    r = run(str(SAMPLE_PDF.parent), generated_at=GEN_AT)
+    def snip(cid):
+        return next((e.snippet for i in r.issues if i.check_id == cid
+                     for e in i.evidence if e.locator.type == "pdf_region"), None)
+    s62, s70 = snip(62), snip(70)
+    if not s62 or "claimed" not in s62.lower():
+        print(f"  ❌ check 62 receipt: {s62!r}"); return False
+    if not s70 or "FIG" not in (s70 or "").upper():
+        print(f"  ❌ check 70 receipt: {s70!r}"); return False
+    return True
+
+
 # ---- read-only guarantee: the QC run must never touch the filing folder -----
 @test("READONLY: core.run() creates, modifies, or deletes nothing in the folder")
 def t():
