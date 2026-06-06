@@ -266,15 +266,25 @@ from the engine rather than skipped.*
   HTML report re-pointed at it. No check-behavior change. Tests green.
 - **Phase 2 — Modularize + evidence rollout.** Move check categories into
   `core/checks/*` one PR at a time; upgrade each to emit evidence as it moves.
-- **Phase 3 — App frontend.** Full viewer UX over the `--serve` API: all docs,
-  receipts panel, click-to-highlight, severity filtering, navigation.
-- **Phase 4 — Packaging / deployment.** Per-desktop launcher and/or internal
-  host; optional desktop wrap. Decide deploy shape based on firm IT posture.
+- **Phase 3 — App frontend.** *(largely done — `app/server.py` + `app/static`)*
+  Interactive folder selection (native picker + paste-path), per-folder result
+  cache, receipts panel with collapsible category groups + severity filters,
+  click-to-highlight (`pdf_region`) and XFA data cards (`xfa_field`), and an
+  in-viewer document switcher with page navigation (open/page any filing doc).
+  PDF.js vendored locally (fully offline). Read-only on the filing folder
+  (enforced by a test). Remaining: more receipts for engine-emitted checks;
+  optional branding.
+- **Phase 4 — Packaging / deployment.** *(in progress)* **Decided: per-desktop
+  launcher.** Double-click `Patent Filing QC.bat` (Windows — primary) /
+  `.command` (macOS) bootstrap a private `.venv` + deps on first run, then
+  serve. Windows folder picker uses a PowerShell dialog (subprocess). Remaining:
+  test the Windows path on a real Windows box; guidance to install the tool
+  outside OneDrive so the `.venv` doesn't sync; optional desktop wrap.
 
 ## 9. Deferred / open decisions
 
-- **Deploy shape** (per-desktop vs internal-hosted) — deferred to Phase 4; the
-  architecture supports both.
+- **Deploy shape** — **decided: per-desktop launcher** (Windows-primary firm).
+  The native folder picker runs on the user's own machine; nothing is uploaded.
 - **Frontend stack** — start minimal (vanilla JS + PDF.js, no heavy build
   tooling); revisit a framework only if the UI grows enough to need it.
 - **Repo rename** — optional; the GitHub repo can be renamed to a product-level
