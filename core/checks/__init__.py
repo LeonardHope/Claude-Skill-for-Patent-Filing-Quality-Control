@@ -84,7 +84,7 @@ MIGRATED_IDS = {
     50, 51, 52, 53, 54,               # common errors incl. drafting-quality heuristics
     55, 56, 57, 58,                   # file quality incl. password protection
     59, 60, 61, 62,                   # cross-references incl. drafting-quality NLP
-    63, 64, 65,                       # 81 (priority app number, ODP network) left in engine
+    63, 64, 65, 81,                   # priority; 81 = offline path (ODP network left to skill)
     66, 67, 68, 70,                   # 69 (claim numerals vs spec) removed — wrong
                                       # premise; Check 59 is the real claim->spec check
     76, 77, 78, 79, 80,               # 71 (authoritative-source x-check), 74-75 (dup/unknown
