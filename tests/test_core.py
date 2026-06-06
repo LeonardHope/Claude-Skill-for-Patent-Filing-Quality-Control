@@ -697,6 +697,27 @@ def t():
     return True
 
 
+@test("DOCLINK.1: receiptless per-doc checks get a 'view document' link; others don't")
+def t():
+    from core.build import run
+    r = run(str(SAMPLE_PDF.parent), generated_at=GEN_AT)
+    is_doclink = lambda cid, dt: any(
+        e.kind == "document" and e.doc_type == dt
+        for i in r.issues if i.check_id == cid for e in i.evidence)
+    has_doclink = lambda cid: any(
+        e.kind == "document" for i in r.issues if i.check_id == cid for e in i.evidence)
+    # a Drawings check (present doc, no precise receipt) -> Drawings doc link
+    if not is_doclink(22, "Drawings"):
+        print("  ❌ check 22 missing Drawings doc link"); return False
+    # check 50 already has a precise receipt -> no redundant doc link
+    if has_doclink(50):
+        print("  ❌ check 50 should not get a doc link"); return False
+    # check 9 is cross-cutting (Document Completeness) -> no doc link
+    if has_doclink(9):
+        print("  ❌ check 9 (cross-cutting) should not get a doc link"); return False
+    return True
+
+
 # ---- read-only guarantee: the QC run must never touch the filing folder -----
 @test("READONLY: core.run() creates, modifies, or deletes nothing in the folder")
 def t():

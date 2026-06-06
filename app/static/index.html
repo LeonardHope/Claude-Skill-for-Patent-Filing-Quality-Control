@@ -49,6 +49,8 @@
   .ev:hover { border-color:var(--accent); }
   .ev .tag { font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
   .ev.match .tag { color:#5ee08a; } .ev.missing .tag, .ev.mismatch .tag { color:#ff7a85; }
+  .ev.document { background:transparent; border-style:dashed; padding:5px 10px; }
+  .ev.document .tag { color:var(--muted); }
   .pagewrap { position:relative; margin:0 auto 16px; box-shadow:0 2px 18px rgba(0,0,0,.5); width:max-content; }
   canvas { display:block; }
   .hl { position:absolute; background:rgba(255,213,79,.32); outline:2px solid #ffd54f; border-radius:2px;
@@ -305,18 +307,26 @@ function checkEl(issue) {
     <div class="cmsg">${issue.message}</div>`;
   (issue.evidence||[]).forEach(ev => {
     const e = document.createElement("div"); e.className = "ev " + (ev.kind||"");
-    e.innerHTML = `<div class="tag">${ev.locator.type} · ${ev.kind}</div><div>${ev.label||ev.snippet||""}</div>`;
+    const tag = ev.kind === "document" ? "view" : `${ev.locator.type} · ${ev.kind}`;
+    e.innerHTML = `<div class="tag">${tag}</div><div>${ev.label||ev.snippet||""}</div>`;
     e.onclick = () => activate(ev);
     el.appendChild(e);
   });
   return el;
 }
 
+// A "real" receipt is a located one (pdf_region / xfa_field); a pdf_page
+// document link is a navigation aid, not counted as a receipt.
+function hasReceipt(issue) {
+  return (issue.evidence||[]).some(e =>
+    e.locator && (e.locator.type === "pdf_region" || e.locator.type === "xfa_field"));
+}
+
 function render() {
   const root = $("checklist"); root.innerHTML = "";
   const issues = RESULT.issues.filter(i =>
     FILTER === "all" ? true :
-    FILTER === "receipts" ? (i.evidence && i.evidence.length) :
+    FILTER === "receipts" ? hasReceipt(i) :
     i.severity === FILTER);
   if (!issues.length) { root.innerHTML = `<div class="hint">No checks match this filter.</div>`; return; }
 
@@ -348,7 +358,7 @@ function setup() {
   $("counts").innerHTML =
     ["CRITICAL","WARNING","INFO","PASS"].filter(s=>counts[s])
       .map(s=>`<span class="badge ${s}">${counts[s]} ${s}</span>`).join("");
-  const withEv = RESULT.issues.filter(i=>i.evidence&&i.evidence.length).length;
+  const withEv = RESULT.issues.filter(hasReceipt).length;
   const f = $("filters"); f.innerHTML = "";
   [["receipts",`Receipts (${withEv})`],["all","All"],["CRITICAL","Critical"],
    ["WARNING","Warning"],["INFO","Info"],["PASS","Pass"]].forEach(([k,lbl])=>{
