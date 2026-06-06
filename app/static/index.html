@@ -58,6 +58,21 @@
   .card h3 { margin:0 0 10px; } .card .row { display:flex; gap:10px; margin:6px 0; }
   .card .k { color:var(--muted); width:130px; flex:none; } .card code { color:#9ee6b4; }
   .hint { color:var(--muted); text-align:center; margin-top:40px; }
+  .viewtools { position:sticky; top:0; background:var(--bg); z-index:2; }
+  .docbar { display:flex; gap:6px; flex-wrap:wrap; align-items:center; padding-bottom:10px; }
+  .barlabel { color:var(--muted); font-size:12px; margin-right:4px; }
+  .docchip { background:#1d2430; color:var(--text); border:1px solid var(--line); border-radius:14px;
+             padding:4px 12px; font-size:12px; cursor:pointer; }
+  .docchip:hover:enabled { border-color:var(--accent); }
+  .docchip.on { background:#2a3340; border-color:var(--accent); color:var(--accentTx); }
+  .docchip:disabled { opacity:.45; cursor:default; }
+  .docchip .pg { color:var(--muted); margin-left:6px; font-size:11px; }
+  .pagenav { display:flex; align-items:center; gap:12px; padding-bottom:12px;
+             border-bottom:1px solid var(--line); margin-bottom:12px; }
+  .pagenav button { background:#1d2430; color:var(--text); border:1px solid var(--line);
+                    border-radius:6px; padding:4px 12px; font-size:13px; cursor:pointer; }
+  .pagenav button:disabled { opacity:.4; cursor:default; }
+  .pagenav .ind { color:var(--muted); font-size:13px; }
 
   /* ---- landing ---- */
   #landing { height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
@@ -128,7 +143,13 @@
       </div>
       <div id="checklist"></div>
     </div>
-    <div class="viewer" id="viewer"><div class="hint">Select a check with a receipt on the left.</div></div>
+    <div class="viewer" id="viewer">
+      <div class="viewtools" id="viewtools">
+        <div class="docbar" id="docbar"></div>
+        <div class="pagenav hidden" id="pagenav"></div>
+      </div>
+      <div class="stage" id="stage"><div class="hint">Select a check on the left, or open a document above.</div></div>
+    </div>
   </div>
 </div>
 
@@ -141,6 +162,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/vendor/pdfjs/pdf.worker.min.js
 const VIEW_W = 780;
 let pdfCache = {};
 let RESULT = null, FILTER = "receipts", FOLDER = null, COLLAPSED = {};
+let VIEW = { doc: null, page: 0, pages: 0 };   // current document being viewed
 
 const $ = id => document.getElementById(id);
 const qF = () => "folder=" + encodeURIComponent(FOLDER || "");
@@ -172,7 +194,9 @@ async function loadFolder(folder, refresh) {
 function enterApp() {
   $("landing").classList.add("hidden");
   $("app").classList.remove("hidden");
-  $("viewer").innerHTML = '<div class="hint">Select a check with a receipt on the left.</div>';
+  VIEW = { doc: null, page: 0, pages: 0 };
+  $("pagenav").classList.add("hidden");
+  $("stage").innerHTML = '<div class="hint">Select a check on the left, or open a document above.</div>';
   setup();
 }
 
@@ -191,13 +215,53 @@ async function loadPdf(docType) {
   return pdf;
 }
 
-async function showRegion(docType, page, bbox) {
-  const v = $("viewer"); v.innerHTML = "Loading…";
-  const pdf = await loadPdf(docType);
+function docList() { return (RESULT && RESULT.documents) || []; }
+function docRef(docType) { return docList().find(d => d.doc_type === docType); }
+function viewable(d) { return d && d.source === "pdf"; }
+
+function renderDocBar() {
+  const bar = $("docbar"); bar.innerHTML = '<span class="barlabel">Documents:</span>';
+  docList().forEach(d => {
+    const b = document.createElement("button");
+    b.className = "docchip" + (VIEW.doc === d.doc_type ? " on" : "");
+    const pages = d.page_count ? `${d.page_count}p` : (viewable(d) ? "" : "not PDF");
+    b.innerHTML = `${d.doc_type}<span class="pg">${pages}</span>`;
+    if (viewable(d)) b.onclick = () => openDoc(d.doc_type);
+    else { b.disabled = true; b.title = `${d.filename} is not a PDF — open it directly to view`; }
+    bar.appendChild(b);
+  });
+}
+
+function updatePageNav() {
+  const nav = $("pagenav");
+  if (!VIEW.doc || VIEW.pages <= 0) { nav.classList.add("hidden"); return; }
+  nav.classList.remove("hidden"); nav.innerHTML = "";
+  const prev = document.createElement("button"); prev.textContent = "‹ Prev";
+  prev.disabled = VIEW.page <= 0; prev.onclick = () => renderPage(VIEW.doc, VIEW.page - 1, null);
+  const ind = document.createElement("span"); ind.className = "ind";
+  ind.textContent = `${VIEW.doc} — page ${VIEW.page + 1} of ${VIEW.pages}`;
+  const next = document.createElement("button"); next.textContent = "Next ›";
+  next.disabled = VIEW.page >= VIEW.pages - 1; next.onclick = () => renderPage(VIEW.doc, VIEW.page + 1, null);
+  nav.append(prev, ind, next);
+}
+
+async function openDoc(docType) { await renderPage(docType, 0, null); }
+
+async function renderPage(docType, page, bbox) {
+  VIEW = { doc: docType, page, pages: VIEW.pages };
+  const stage = $("stage");
+  stage.innerHTML = '<div class="hint"><span class="spin"></span> Loading…</div>';
+  let pdf;
+  try { pdf = await loadPdf(docType); }
+  catch (e) {
+    stage.innerHTML = `<div class="hint">Can't display ${docType} (not a PDF or unreadable).</div>`;
+    VIEW.pages = 0; updatePageNav(); renderDocBar(); return;
+  }
+  VIEW.pages = pdf.numPages;
   const p = await pdf.getPage(page + 1);
   const scale = VIEW_W / p.getViewport({ scale: 1 }).width;
   const vp = p.getViewport({ scale });
-  v.innerHTML = "";
+  stage.innerHTML = "";
   const wrap = document.createElement("div"); wrap.className = "pagewrap";
   const canvas = document.createElement("canvas");
   canvas.width = vp.width; canvas.height = vp.height; wrap.appendChild(canvas);
@@ -207,14 +271,16 @@ async function showRegion(docType, page, bbox) {
     hl.style.width = (bbox[2]-bbox[0])*scale+"px"; hl.style.height = (bbox[3]-bbox[1])*scale+"px";
     wrap.appendChild(hl);
   }
-  v.appendChild(wrap);
+  stage.appendChild(wrap);
   await p.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
   const hl = wrap.querySelector(".hl"); if (hl) hl.scrollIntoView({ block:"center", behavior:"smooth" });
+  updatePageNav(); renderDocBar();
 }
 
 function showCard(ev) {
+  VIEW = { doc: null, page: 0, pages: 0 }; updatePageNav(); renderDocBar();
   const L = ev.locator;
-  $("viewer").innerHTML = `
+  $("stage").innerHTML = `
     <div class="card"><h3>Structured data receipt</h3>
       <div class="row"><div class="k">Document</div><div>${ev.doc_type} (XFA — no page geometry)</div></div>
       <div class="row"><div class="k">Field</div><div><code>${L.field_path||""}</code></div></div>
@@ -226,8 +292,8 @@ function showCard(ev) {
 
 function activate(ev) {
   const L = ev.locator || {};
-  if (L.type === "pdf_region") showRegion(ev.doc_type, L.page||0, L.bbox);
-  else if (L.type === "pdf_page") showRegion(ev.doc_type, L.page||0, null);
+  if (L.type === "pdf_region") renderPage(ev.doc_type, L.page||0, L.bbox);
+  else if (L.type === "pdf_page") renderPage(ev.doc_type, L.page||0, null);
   else if (L.type === "xfa_field") showCard(ev);
 }
 
@@ -293,6 +359,7 @@ function setup() {
   });
   $("expandAll").onclick = () => { COLLAPSED = {}; render(); };
   $("collapseAll").onclick = () => { RESULT.issues.forEach(i => COLLAPSED[i.category||"Other"]=true); render(); };
+  renderDocBar();
   render();
 }
 
@@ -302,6 +369,15 @@ $("runBtn").onclick = () => { const p=$("pathInput").value.trim(); if(p) loadFol
 $("pathInput").addEventListener("keydown", e => { if(e.key==="Enter"){ const p=e.target.value.trim(); if(p) loadFolder(p); }});
 $("changeBtn").onclick = backToLanding;
 $("rerunBtn").onclick = () => { backToLanding(); loadFolder(FOLDER, true); };
+
+// Arrow keys page through the open document (ignored while typing in a field).
+document.addEventListener("keydown", e => {
+  if ($("app").classList.contains("hidden")) return;
+  if (e.target && /^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return;
+  if (!VIEW.doc || VIEW.pages <= 0) return;
+  if (e.key === "ArrowRight" && VIEW.page < VIEW.pages - 1) { e.preventDefault(); renderPage(VIEW.doc, VIEW.page + 1, null); }
+  if (e.key === "ArrowLeft"  && VIEW.page > 0)              { e.preventDefault(); renderPage(VIEW.doc, VIEW.page - 1, null); }
+});
 
 // If the server was started with a folder argument, skip the landing screen.
 fetch("/api/config").then(r=>r.json()).then(c=>{ if (c.preselected) loadFolder(c.preselected); });
