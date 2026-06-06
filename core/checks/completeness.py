@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 
 from ..result import Issue
+from ._ev import region
 
 _CAT = "Document Completeness"
 _SIG_PATTERNS = (r"/s/\s*[A-Z]", r"/[A-Z][^/\n]{2,40}/")
@@ -96,12 +97,18 @@ def check_ads_fields(qc) -> Issue:
 
 def _signature_check(qc, check_id, doc_type, text, img_key, missing_msg, missing_fn):
     if text:
-        sig = any(re.search(p, text) for p in _SIG_PATTERNS)
+        sig_m = next((m for p in _SIG_PATTERNS for m in (re.search(p, text),) if m), None)
         img = (getattr(qc, "image_only_pages", {}) or {}).get(img_key, 0)
         name = f"{doc_type} Signatures Present"
-        if sig:
-            return Issue(check_id, _CAT, name, "PASS",
-                         f"{doc_type} has signature markers (/s/ or /Name/)")
+        if sig_m:
+            issue = Issue(check_id, _CAT, name, "PASS",
+                          f"{doc_type} has signature markers (/s/ or /Name/)")
+            sp = (getattr(qc, "documents", {}) or {}).get(doc_type)
+            e = region(doc_type, sp, sig_m.group(0).strip(), kind="match",
+                       label=f"Signature marker in {doc_type.lower()}")
+            if e:
+                issue.evidence = [e]
+            return issue
         if img:
             return Issue(check_id, _CAT, name, "INFO",
                          f"No text-based signatures detected, but the "
