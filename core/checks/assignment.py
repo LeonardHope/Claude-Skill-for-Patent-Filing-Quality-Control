@@ -7,6 +7,7 @@ and handles the assignment-missing fallback (36-38, 40; 39 is the engine's).
 import re
 
 from ..result import Issue
+from ._ev import data
 
 _CAT = "Assignment"
 _IDS = (36, 37, 38, 40)
@@ -45,8 +46,12 @@ def _assignors(qc, text) -> Issue:
             continue
         missing.append(nm)
     if not missing:
-        return Issue(36, _CAT, name, "PASS",
-                     f"All {len(names)} inventors from ADS appear in the assignment")
+        issue = Issue(36, _CAT, name, "PASS",
+                      f"All {len(names)} inventors from ADS appear in the assignment")
+        issue.evidence = [data("ADS inventors found in assignment",
+                               actual=f"{len(names)} of {len(names)}", kind="match",
+                               doc_type="Assignment")]
+        return issue
     img = (getattr(qc, "image_only_pages", {}) or {}).get("Assignment", 0)
     img_note, sev = "", "CRITICAL"
     if img and len(missing) <= img:
@@ -55,18 +60,27 @@ def _assignors(qc, text) -> Issue:
                     f"Open the assignment and confirm those pages cover the missing "
                     f"inventor(s).")
         sev = "WARNING"
-    return Issue(36, _CAT, name, sev,
-                 f"{len(missing)} of {len(names)} ADS inventor(s) not found in "
-                 f"assignment text." + img_note,
-                 details="Not found in extracted assignment text:\n" +
-                         "\n".join(f"  • {n}" for n in missing))
+    issue = Issue(36, _CAT, name, sev,
+                  f"{len(missing)} of {len(names)} ADS inventor(s) not found in "
+                  f"assignment text." + img_note,
+                  details="Not found in extracted assignment text:\n" +
+                          "\n".join(f"  • {n}" for n in missing))
+    issue.evidence = [data(f"Not found in assignment: {n}", actual="missing", kind="missing",
+                           doc_type="Assignment") for n in missing[:6]]
+    return issue
 
 
 def _assignee(text) -> Issue:
     name = "Assignment Identifies Assignee"
     if re.search(r"assignee", text, re.IGNORECASE):
-        return Issue(37, _CAT, name, "PASS", "Assignee appears to be identified")
-    return Issue(37, _CAT, name, "WARNING", "Assignee not clearly identified")
+        issue = Issue(37, _CAT, name, "PASS", "Assignee appears to be identified")
+        issue.evidence = [data("Assignee", actual="identified in assignment", kind="match",
+                               doc_type="Assignment")]
+        return issue
+    issue = Issue(37, _CAT, name, "WARNING", "Assignee not clearly identified")
+    issue.evidence = [data("Assignee", actual="not clearly identified", kind="mismatch",
+                           doc_type="Assignment")]
+    return issue
 
 
 def _references_app(qc, text) -> Issue:
@@ -95,10 +109,16 @@ def _references_app(qc, text) -> Issue:
             title_in = True
 
     if matched:
-        return Issue(38, _CAT, name, "PASS", f"Assignment contains expected docket: {matched}")
+        issue = Issue(38, _CAT, name, "PASS", f"Assignment contains expected docket: {matched}")
+        issue.evidence = [data("Docket in assignment", actual=matched, kind="match",
+                               doc_type="Assignment")]
+        return issue
     if title_in:
-        return Issue(38, _CAT, name, "PASS",
-                     "Assignment references the application title from the ADS")
+        issue = Issue(38, _CAT, name, "PASS",
+                      "Assignment references the application title from the ADS")
+        issue.evidence = [data("Application title in assignment", actual="matches ADS title",
+                               kind="match", doc_type="Assignment")]
+        return issue
     if qc._is_continuation_filing():
         return Issue(38, _CAT, name, "INFO",
                      "Could not match this child application's docket/title in the "
@@ -115,5 +135,11 @@ def _rights(text) -> Issue:
             r"assign.*transfer.*convey", r"right.*(?:title|7tle).*interest",
             r"ASSIGNOR.*ASSIGNEE")
     if any(re.search(p, text, re.IGNORECASE | re.DOTALL) for p in pats):
-        return Issue(40, _CAT, name, "PASS", "Assignment language appears to transfer rights")
-    return Issue(40, _CAT, name, "WARNING", "Standard assignment language not clearly detected")
+        issue = Issue(40, _CAT, name, "PASS", "Assignment language appears to transfer rights")
+        issue.evidence = [data("Rights-transfer language", actual="present", kind="match",
+                               doc_type="Assignment")]
+        return issue
+    issue = Issue(40, _CAT, name, "WARNING", "Standard assignment language not clearly detected")
+    issue.evidence = [data("Rights-transfer language", actual="not clearly detected",
+                           kind="mismatch", doc_type="Assignment")]
+    return issue

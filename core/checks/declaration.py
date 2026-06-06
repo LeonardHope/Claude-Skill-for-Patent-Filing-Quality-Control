@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 from ..result import Issue
+from ._ev import data
 
 _CAT = "Declaration"
 _IDS = (32, 33, 34)
@@ -58,8 +59,12 @@ def _inventors_named(qc, decl) -> Issue:
             continue
         missing.append(inv_name)
     if not missing:
-        return Issue(32, _CAT, name, "PASS",
-                     f"All {len(names)} ADS inventors appear in the declaration")
+        issue = Issue(32, _CAT, name, "PASS",
+                      f"All {len(names)} ADS inventors appear in the declaration")
+        issue.evidence = [data("ADS inventors found in declaration",
+                               actual=f"{len(names)} of {len(names)}", kind="match",
+                               doc_type="Declaration")]
+        return issue
     cont_note = ""
     if qc._is_continuation_filing():
         cont_note = (" Note: this is a continuation filing — if inventorship changed, "
@@ -71,21 +76,32 @@ def _inventors_named(qc, decl) -> Issue:
                     f"inventor(s) may be on those pages but could not be verified by text "
                     f"extraction. Open the declaration and confirm those pages cover the "
                     f"missing inventor(s).")
-    return Issue(32, _CAT, name, "WARNING",
-                 f"{len(missing)} of {len(names)} ADS inventor(s) not found in "
-                 f"declaration text." + img_note + cont_note,
-                 details="Not found in extracted declaration text:\n" +
-                         "\n".join(f"  • {n}" for n in missing))
+    issue = Issue(32, _CAT, name, "WARNING",
+                  f"{len(missing)} of {len(names)} ADS inventor(s) not found in "
+                  f"declaration text." + img_note + cont_note,
+                  details="Not found in extracted declaration text:\n" +
+                          "\n".join(f"  • {n}" for n in missing))
+    issue.evidence = [data(f"Not found in declaration: {n}", actual="missing", kind="missing",
+                           doc_type="Declaration") for n in missing[:6]]
+    return issue
 
 
 def _oath_format(decl) -> Issue:
     name = "Oath vs Declaration Format"
     pats = (r"\bswear", r"\boaths?\b", r"declare", r"declara",
             r"under penalty of perjury", r"37\s*CFR\s*1\.63")
-    if any(re.search(p, decl, re.IGNORECASE) for p in pats):
-        return Issue(33, _CAT, name, "PASS", "Declaration/oath language detected")
-    return Issue(33, _CAT, name, "WARNING",
-                 "Standard oath/declaration language not clearly detected")
+    hit = next((re.search(p, decl, re.IGNORECASE) for p in pats
+                if re.search(p, decl, re.IGNORECASE)), None)
+    if hit:
+        issue = Issue(33, _CAT, name, "PASS", "Declaration/oath language detected")
+        issue.evidence = [data("Oath/declaration language", actual=f"“{hit.group(0)}”",
+                               kind="match", doc_type="Declaration")]
+        return issue
+    issue = Issue(33, _CAT, name, "WARNING",
+                  "Standard oath/declaration language not clearly detected")
+    issue.evidence = [data("Oath/declaration language", actual="not clearly detected",
+                           kind="mismatch", doc_type="Declaration")]
+    return issue
 
 
 def _references_app(qc, decl) -> Issue:
@@ -115,11 +131,16 @@ def _references_app(qc, decl) -> Issue:
             title_in = True
 
     if matched:
-        return Issue(34, _CAT, name, "PASS",
-                     f"Declaration contains expected docket: {matched}")
+        issue = Issue(34, _CAT, name, "PASS", f"Declaration contains expected docket: {matched}")
+        issue.evidence = [data("Docket in declaration", actual=matched, kind="match",
+                               doc_type="Declaration")]
+        return issue
     if title_in:
-        return Issue(34, _CAT, name, "PASS",
-                     "Declaration references the application title from the ADS")
+        issue = Issue(34, _CAT, name, "PASS",
+                      "Declaration references the application title from the ADS")
+        issue.evidence = [data("Application title in declaration", actual="matches ADS title",
+                               kind="match", doc_type="Declaration")]
+        return issue
     if qc._is_continuation_filing():
         return Issue(34, _CAT, name, "INFO",
                      "Could not match this child application's docket/title in the "
