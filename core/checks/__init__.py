@@ -74,7 +74,7 @@ CHECKS = [
 MIGRATED_IDS = {
     1, 2, 3, 4, 5, 6, 7, 8,
     9, 10, 11, 12,
-    13, 14, 15, 17, 18, 19, 20, 21,   # 16 (reference-numeral consistency) left in engine
+    13, 14, 15, 16, 17, 18, 19, 20, 21,
     22, 23, 24,                       # 25 (no-color, image analysis) left in engine
     27, 29, 31, 73,                   # 28 (first-named inventor, POA OCR) left in engine
     32, 33, 34,                       # 35 (declaration date, OCR) left in engine

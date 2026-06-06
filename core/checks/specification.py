@@ -1,10 +1,8 @@
 """Specification checks (13-21), migrated to core. Mirrors the engine verbatim.
 
-Check 16 (reference-numeral consistency) is intentionally NOT migrated — its
-~130 lines of inline element-grouping / acronym-matching logic carry high
-replication risk for little evidence value, so it stays engine-emitted and
-still appears in the Result. check_specification(qc) returns the list of issues
-for 13, 14, 15, 17, 18, 19, 20, 21.
+Check 16 (reference-numeral consistency) is migrated too — copied verbatim,
+calling the engine helpers qc._extract_reference_numerals[_from_drawings].
+check_specification(qc) returns issues for 13-21.
 """
 import re
 
@@ -18,11 +16,14 @@ _SPEC_IDS = (13, 14, 15, 17, 18, 19, 20, 21)
 def check_specification(qc):
     spec = getattr(qc, "spec_text", "") or ""
     if not spec:
-        return [Issue(i, _CAT, f"Check {i}", "CRITICAL", "Specification not found")
-                for i in _SPEC_IDS]
+        out = [Issue(i, _CAT, f"Check {i}", "CRITICAL", "Specification not found")
+               for i in _SPEC_IDS]
+        out.append(_reference_numerals(qc))   # 16 emits INFO when spec is absent
+        return out
     sp = (getattr(qc, "documents", {}) or {}).get("Specification")
     out = [_claim_numbering(qc, spec), _claim_dependency(qc, spec),
-           _figure_refs(qc, spec), _abstract(spec, sp), _background(spec, sp),
+           _figure_refs(qc, spec), _reference_numerals(qc),
+           _abstract(spec, sp), _background(spec, sp),
            _brief_description(spec, sp), _detailed_description(spec, sp),
            _claims_section(spec, sp)]
     return out
@@ -266,3 +267,91 @@ def _claims_section(spec, spec_path=None) -> Issue:
             return _located(Issue(21, _CAT, name, "PASS", "Claims section found"),
                             spec_path, m.group(0).strip(), "Claims section")
     return Issue(21, _CAT, name, "CRITICAL", "Claims section not clearly identified")
+
+
+# ---- Check 16: reference numeral consistency (migrated verbatim) -------------
+def _reference_numerals(qc):
+    name = "Reference Numeral Consistency"
+    spec = getattr(qc, "spec_text", "") or ""
+    spec_refs = qc._extract_reference_numerals(spec) if spec else {}
+    draw = getattr(qc, "drawings_text", "") or ""
+    drawings_refs = qc._extract_reference_numerals_from_drawings(draw) if draw else set()
+    if not spec_refs:
+        issue = Issue(16, _CAT, name, "INFO",
+                      "Unable to extract reference numerals - manual review recommended")
+        issue.evidence = [data("Reference numerals", actual="none extracted", kind="value",
+                               doc_type="Specification")]
+        return issue
+
+    modifiers = ['target', 'source', 'primary', 'secondary', 'main', 'new', 'old', 'current',
+                 'next', 'previous', 'updated', 'original', 'modified', 'first', 'second',
+                 'third', 'specific', 'particular', 'given', 'respective', 'corresponding',
+                 'associated', 'related']
+
+    def get_core_name(desc):
+        words = desc.lower().split()
+        core = [w for w in words if w not in modifiers]
+        if not core and words:
+            core = [words[-1]]
+        return ' '.join(core)
+
+    def is_acronym_of(short, lng):
+        short = short.replace(' ', '').lower()
+        words = lng.split()
+        if len(short) == len(words) and len(words) >= 2:
+            return ''.join(w[0].lower() for w in words if w) == short
+        return False
+
+    def is_same_element(d1, d2):
+        c1, c2 = get_core_name(d1), get_core_name(d2)
+        if c1 == c2 or c1 in c2 or c2 in c1:
+            return True
+        if c1.split()[-1] == c2.split()[-1]:
+            return True
+        if is_acronym_of(c1, c2) or is_acronym_of(c2, c1):
+            return True
+        return re.sub(r"\s", "", c1.lower()) == re.sub(r"\s", "", c2.lower())
+
+    warnings = []
+    for num, rd in spec_refs.items():
+        descs = rd['descriptions']
+        if len(descs) > 1:
+            desc_list = list(descs)
+            groups, used = [], set()
+            for i, d1 in enumerate(desc_list):
+                if i in used:
+                    continue
+                group = [d1]; used.add(i)
+                for j, d2 in enumerate(desc_list):
+                    if j not in used and is_same_element(d1, d2):
+                        group.append(d2); used.add(j)
+                groups.append(group)
+            if len(groups) > 1:
+                reps = [g[0] for g in groups]
+                warnings.append(f"Ref {num} may have inconsistent descriptions: {reps[:3]}")
+
+    if drawings_refs:
+        spec_ref_nums = set(spec_refs.keys())
+        truly_missing = [n for n in sorted(drawings_refs - spec_ref_nums)
+                         if not re.search(rf"\b{re.escape(n)}\b", spec)]
+        if truly_missing:
+            warnings.append(f"Reference numerals in drawings may need verification: {truly_missing}")
+
+    total_refs = len(spec_refs)
+    total_occ = sum(rd['count'] for rd in spec_refs.values())
+    if warnings:
+        ws = "; ".join(warnings[:3])
+        if len(warnings) > 3:
+            ws += f" (and {len(warnings) - 3} more)"
+        issue = Issue(16, _CAT, name, "WARNING", f"Potential inconsistencies: {ws}",
+                      details=f"Total reference numerals: {total_refs}. Manual review recommended.")
+        issue.evidence = [data(w.split(":")[0], actual="inconsistent", kind="mismatch",
+                               doc_type="Specification") for w in warnings[:5]]
+        return issue
+    issue = Issue(16, _CAT, name, "PASS",
+                  f"Reference numerals appear consistent ({total_refs} unique numerals, "
+                  f"{total_occ} total occurrences)")
+    issue.evidence = [data("Reference numerals",
+                           actual=f"{total_refs} unique, {total_occ} occurrences — consistent",
+                           kind="match", doc_type="Specification")]
+    return issue
