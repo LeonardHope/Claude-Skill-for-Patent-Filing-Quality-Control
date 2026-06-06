@@ -335,7 +335,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/vendor/pdfjs/pdf.worker.min.js
 
 const VIEW_W = 720;
 let pdfCache = {};
-let RESULT = null, FILTER = "receipts", FOLDER = null, COLLAPSED = {};
+let RESULT = null, FILTER = "all", FOLDER = null, COLLAPSED = {};
 let SELECTED = null;                       // currently selected issue
 let VIEW = { doc:null, page:0, pages:0 };  // document currently rendered
 
@@ -596,10 +596,7 @@ function itemEl(issue) {
 
 function render() {
   const root = $("checklist"); root.innerHTML = "";
-  const issues = RESULT.issues.filter(i =>
-    FILTER === "all" ? true :
-    FILTER === "receipts" ? hasReceipt(i) :
-    i.severity === FILTER);
+  const issues = RESULT.issues.filter(i => FILTER === "all" ? true : i.severity === FILTER);
   if (!issues.length) { root.innerHTML = `<div class="stage-hint">No checks match this filter.</div>`; return; }
 
   const order = [], byCat = {};
@@ -625,12 +622,11 @@ function render() {
 /* ---------- filter / count bar ---------- */
 function renderFilters() {
   const counts = {}; RESULT.issues.forEach(i => counts[i.severity]=(counts[i.severity]||0)+1);
-  const withEv = RESULT.issues.filter(hasReceipt).length;
   const f = $("filters"); f.innerHTML = "";
   const chips = [
-    ["receipts","Receipts",withEv,""], ["CRITICAL","Critical",counts.CRITICAL||0,"CRITICAL"],
+    ["all","All checks",RESULT.issues.length,""], ["CRITICAL","Critical",counts.CRITICAL||0,"CRITICAL"],
     ["WARNING","Warning",counts.WARNING||0,"WARNING"], ["INFO","Info",counts.INFO||0,"INFO"],
-    ["PASS","Pass",counts.PASS||0,"PASS"], ["all","All checks",RESULT.issues.length,""],
+    ["PASS","Pass",counts.PASS||0,"PASS"],
   ];
   chips.forEach(([k,label,n,sev]) => {
     const b = document.createElement("button");
