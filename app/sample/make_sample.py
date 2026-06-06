@@ -69,6 +69,10 @@ def build_spec():
     pdf.cell(0, 14, "BACKGROUND")
     pdf.set_xy(72, 162)
     pdf.cell(0, 14, "Modern systems require efficient inference.")
+    pdf.set_xy(72, 184)
+    # A leftover drafting placeholder — Check 50 should flag this and the viewer
+    # highlight exactly where it sits.
+    pdf.cell(0, 14, "[INSERT DESCRIPTION OF PRIOR ART]")
     out = HERE / "Specification.pdf"
     pdf.output(str(out)); print(f"wrote {out}")
 

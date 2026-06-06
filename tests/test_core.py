@@ -411,12 +411,15 @@ def t():
         print(f"  ❌ bbox missing in JSON"); return False
     return True
 
-@test("EVID.5: run(folder, enrich=False) attaches no evidence")
+@test("EVID.5: native receipts are emitted regardless of the (no-op) enrich flag")
 def t():
+    # Evidence is now emitted natively by core/checks, not by the (stub) enricher,
+    # so it must be present even with enrich=False (e.g. the sample spec's
+    # leftover placeholder yields a Check 50 receipt).
     from core.build import run
     res = run(str(SAMPLE_PDF.parent), generated_at=GEN_AT, enrich=False)
-    if any(i.evidence for i in res.issues):
-        print(f"  ❌ evidence present despite enrich=False"); return False
+    if not any(i.evidence for i in res.issues):
+        print("  ❌ expected native evidence even with enrich=False"); return False
     return True
 
 SPEC_PDF = SAMPLE_PDF.parent / "Specification.pdf"
@@ -659,6 +662,23 @@ def t():
     qc2._extract_acroform_fields = lambda _p: {"Signature": "", "Name PrintTyped": ""}
     if _by_id(check_ids(qc2), 80).severity != "WARNING":
         print("  ❌ unsigned != WARNING"); return False
+    return True
+
+
+# ---- receipts: placeholder text highlights where it sits --------------------
+@test("MIG50.1: Check 50 CRITICAL + pdf_region receipt on the placeholder")
+def t():
+    from core.checks.common_errors import check_common_errors
+    qc = _qc(spec_text="Some Title\n[INSERT DESCRIPTION OF PRIOR ART]\nbody text",
+             ads_text="", declaration_text="", assignment_text="",
+             documents={"Specification": SPEC_PDF})
+    c50 = next(i for i in check_common_errors(qc) if i.check_id == 50)
+    if c50.severity != "CRITICAL":
+        print(f"  ❌ severity {c50.severity}"); return False
+    regions = [e for e in c50.evidence if e.locator.type == "pdf_region"]
+    if not regions or "INSERT" not in (regions[0].snippet or ""):
+        print(f"  ❌ no placeholder receipt: {[(e.locator.type, e.snippet) for e in c50.evidence]}")
+        return False
     return True
 
 
