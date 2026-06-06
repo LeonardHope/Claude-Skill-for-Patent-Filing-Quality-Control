@@ -1220,12 +1220,12 @@ def t():
         return False
     return True
 
-@test("LW17.6: skip set is exactly the documented 18 IDs")
+@test("LW17.6: skip set is exactly the documented 17 IDs")
 def t():
-    if len(LIGHTWEIGHT_SKIP_IDS) != 18:
-        print(f"  ❌ expected 18 skip IDs, got {len(LIGHTWEIGHT_SKIP_IDS)}: "
+    if len(LIGHTWEIGHT_SKIP_IDS) != 17:
+        print(f"  ❌ expected 17 skip IDs, got {len(LIGHTWEIGHT_SKIP_IDS)}: "
               f"{sorted(LIGHTWEIGHT_SKIP_IDS)}"); return False
-    expected = {16,17,18,19,20,24,25,45,49,52,53,54,59,60,66,68,69,70}
+    expected = {16,17,18,19,20,24,25,45,49,52,53,54,59,60,66,68,70}
     if set(LIGHTWEIGHT_SKIP_IDS) != expected:
         print(f"  ❌ skip set mismatch: {sorted(LIGHTWEIGHT_SKIP_IDS)}"); return False
     return True

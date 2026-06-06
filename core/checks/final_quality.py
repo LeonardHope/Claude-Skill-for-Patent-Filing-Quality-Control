@@ -10,8 +10,10 @@ _MONTHS = (r"(?:January|February|March|April|May|June|July|August|September|Octo
 
 
 def check_final_quality(qc):
-    return [_typos(qc), _dates(qc), _long_claims(qc), _refs_all_claims(qc),
-            _figure_format(qc)]
+    # Check 69 (claim reference numerals vs spec) was removed — its premise was
+    # wrong (US claims carry no reference numerals) and the real claim-element →
+    # specification support check is Check 59 (Cross-References).
+    return [_typos(qc), _dates(qc), _long_claims(qc), _figure_format(qc)]
 
 
 def _typos(qc) -> Issue:
@@ -105,45 +107,6 @@ def _long_claims(qc) -> Issue:
         return Issue(68, _CAT, name, "PASS",
                      f"No excessively long claims detected ({len(claims)} claims checked)")
     return Issue(68, _CAT, name, "INFO", "Unable to parse individual claims for length check")
-
-
-def _refs_all_claims(qc) -> Issue:
-    name = "Specification References All Claims"
-    spec = getattr(qc, "spec_text", "") or ""
-    if not spec:
-        return Issue(69, _CAT, name, "WARNING", "Specification not found")
-    claims_text = None
-    for pat in (r"CLAIMS\s+What is claimed[^:]*:\s*(.*?)(?:ABSTRACT|$)",
-                r"What is claimed[^:]*:\s*(.*?)(?:ABSTRACT|$)",
-                r"(?:CLAIMS?\s*\n|What is claimed[^\n]*\n)(.*?)(?:ABSTRACT|$)"):
-        m = re.search(pat, spec, re.DOTALL | re.IGNORECASE)
-        if m:
-            claims_text = m.group(1)
-            break
-    dm = re.search(r"(?:DETAILED\s+DESCRIPTION|DESCRIPTION\s+OF.*?EMBODIMENTS?)(.*?)"
-                   r"(?:CLAIMS|What is claimed)", spec, re.DOTALL | re.IGNORECASE)
-    desc = dm.group(1) if dm else ""
-    if claims_text and desc:
-        valid = {n for n in set(re.findall(r"\b(\d{2,3})\b", claims_text))
-                 if re.search(r"(?:a|an|the|said)\s+[\w\-]+(?:\s+[\w\-]+){0,2}\s+" + n + r"\b",
-                              claims_text, re.IGNORECASE)}
-        if valid:
-            missing = [n for n in valid if n not in desc]
-            if not missing:
-                return Issue(69, _CAT, name, "PASS",
-                             f"All {len(valid)} claim reference numerals found in specification")
-            if len(missing) <= 2:
-                return Issue(69, _CAT, name, "PASS",
-                             f"Most claim elements referenced in specification "
-                             f"({len(valid) - len(missing)}/{len(valid)})")
-            return Issue(69, _CAT, name, "WARNING",
-                         f"{len(missing)} claim reference numerals not found in "
-                         f"specification: {', '.join(sorted(missing)[:5])}")
-        return Issue(69, _CAT, name, "INFO",
-                     "No reference numerals detected in claims — cannot verify "
-                     "claim-to-specification element references. Manual review recommended.")
-    return Issue(69, _CAT, name, "INFO",
-                 "Could not isolate claims and description for cross-reference")
 
 
 def _figure_format(qc) -> Issue:

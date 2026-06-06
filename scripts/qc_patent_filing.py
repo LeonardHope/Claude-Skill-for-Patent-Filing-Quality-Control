@@ -144,7 +144,7 @@ LIGHTWEIGHT_SKIP_IDS = {
     45, 49,               # USPTO formatting: line numbering, page numbering
     52, 53, 54,           # common errors: claim terminology, antecedent basis, undefined terms
     59, 60,               # cross-references: claims↔spec elements, summary↔claims
-    66, 68, 69, 70,       # final quality: typos, long claims, spec-references-all-claims, figure-ref format
+    66, 68, 70,           # final quality: typos, long claims, figure-ref format
 }
 
 
@@ -6111,80 +6111,6 @@ class PatentFilingQC:
         else:
             self.report.add_issue(
                 68, "Final Quality", "No Excessively Long Claims",
-                Severity.WARNING, "Specification not found"
-            )
-        
-        # Check 69: Specification references all claims
-        if self.spec_text:
-            # Extract claims section
-            claims_section_patterns = [
-                r'CLAIMS\s+What is claimed[^:]*:\s*(.*?)(?:ABSTRACT|$)',
-                r'What is claimed[^:]*:\s*(.*?)(?:ABSTRACT|$)',
-                r'(?:CLAIMS?\s*\n|What is claimed[^\n]*\n)(.*?)(?:ABSTRACT|$)',
-            ]
-            claims_text_69 = None
-            for pattern in claims_section_patterns:
-                m = re.search(pattern, self.spec_text, re.DOTALL | re.IGNORECASE)
-                if m:
-                    claims_text_69 = m.group(1)
-                    break
-
-            # Get description text (everything before claims)
-            desc_match = re.search(
-                r'(?:DETAILED\s+DESCRIPTION|DESCRIPTION\s+OF.*?EMBODIMENTS?)(.*?)(?:CLAIMS|What is claimed)',
-                self.spec_text, re.DOTALL | re.IGNORECASE
-            )
-            desc_text_69 = desc_match.group(1) if desc_match else ""
-
-            if claims_text_69 and desc_text_69:
-                # Extract reference numerals from claims
-                claim_numerals = set(re.findall(r'\b(\d{2,3})\b', claims_text_69))
-                # Filter to actual reference numerals (those used with element descriptions)
-                valid_numerals = set()
-                for num in claim_numerals:
-                    if re.search(r'(?:a|an|the|said)\s+[\w\-]+(?:\s+[\w\-]+){0,2}\s+' + num + r'\b',
-                                claims_text_69, re.IGNORECASE):
-                        valid_numerals.add(num)
-
-                if valid_numerals:
-                    # Check which numerals appear in the detailed description
-                    missing = [n for n in valid_numerals if n not in desc_text_69]
-                    if not missing:
-                        self.report.add_issue(
-                            69, "Final Quality", "Specification References All Claims",
-                            Severity.PASS, f"All {len(valid_numerals)} claim reference numerals found in specification"
-                        )
-                    elif len(missing) <= 2:
-                        self.report.add_issue(
-                            69, "Final Quality", "Specification References All Claims",
-                            Severity.PASS, f"Most claim elements referenced in specification ({len(valid_numerals) - len(missing)}/{len(valid_numerals)})"
-                        )
-                    else:
-                        self.report.add_issue(
-                            69, "Final Quality", "Specification References All Claims",
-                            Severity.WARNING, f"{len(missing)} claim reference numerals not found in specification: {', '.join(sorted(missing)[:5])}"
-                        )
-                else:
-                    # No reference numerals in claims to verify against the
-                    # specification. We deliberately do NOT fall back to a
-                    # word-coverage heuristic here — that's Check 60's job and
-                    # would just produce duplicate noise under a misleading
-                    # name (this check's name is "References All Claims",
-                    # not "term coverage").
-                    self.report.add_issue(
-                        69, "Final Quality", "Specification References All Claims",
-                        Severity.INFO,
-                        "No reference numerals detected in claims — cannot verify "
-                        "claim-to-specification element references. Manual review recommended."
-                    )
-            else:
-                self.report.add_issue(
-                    69, "Final Quality", "Specification References All Claims",
-                    Severity.INFO, "Could not isolate claims and description for cross-reference"
-                )
-        else:
-            self.report.add_issue(
-                69, "Final Quality", "Specification References All Claims",
                 Severity.WARNING, "Specification not found"
             )
         
