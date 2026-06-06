@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 
 from ..result import Issue
-from ._ev import region
+from ._ev import region, data
 
 _CAT = "Document Completeness"
 _SIG_PATTERNS = (r"/s/\s*[A-Z]", r"/[A-Z][^/\n]{2,40}/")
@@ -33,21 +33,26 @@ def check_required_documents(qc):
     CRITICAL and a missing-parts WARNING/CRITICAL)."""
     name = "All Required Documents Present"
     files_found = qc.report.files_found
-    missing = [d for d in ("Specification", "Drawings", "ADS", "Declaration")
-               if not files_found.get(d)]
+    required = ("Specification", "Drawings", "ADS", "Declaration")
+    missing = [d for d in required if not files_found.get(d)]
     if not missing:
-        return [Issue(9, _CAT, name, "PASS", "All required documents found")]
+        issue = Issue(9, _CAT, name, "PASS", "All required documents found")
+        issue.evidence = [data("Required documents present",
+                               actual=", ".join(required), kind="match")]
+        return [issue]
 
     eligible = {"Declaration"}
     blocking = [d for d in missing if d not in eligible]
     optional = [d for d in missing if d in eligible]
     issues = []
     if blocking:
-        issues.append(Issue(
+        iss = Issue(
             9, _CAT, name, "CRITICAL",
             f"Missing required documents: {', '.join(blocking)}",
             details="These documents must be in the filing folder. They are not "
-                    "eligible for the missing-parts procedure under 37 CFR §1.53(f)."))
+                    "eligible for the missing-parts procedure under 37 CFR §1.53(f).")
+        iss.evidence = [data(f"{d}", actual="not found", kind="missing") for d in blocking]
+        issues.append(iss)
     if optional:
         declar = _declar_candidates(qc)
         if declar:
@@ -86,13 +91,21 @@ def check_ads_fields(qc) -> Issue:
     name = "ADS Required Fields Complete"
     ads = getattr(qc, "ads_text", "") or ""
     if not ads:
-        return Issue(10, _CAT, name, "CRITICAL", "ADS not found")
+        issue = Issue(10, _CAT, name, "CRITICAL", "ADS not found")
+        issue.evidence = [data("ADS", actual="not found", kind="missing")]
+        return issue
     tl = ads.lower()
-    missing = [f for f in ("title", "inventor", "correspondence") if f not in tl]
+    fields = ("title", "inventor", "correspondence")
+    missing = [f for f in fields if f not in tl]
     if not missing:
-        return Issue(10, _CAT, name, "PASS", "ADS appears to have required fields")
-    return Issue(10, _CAT, name, "WARNING",
-                 f"ADS may be missing fields: {', '.join(missing)}")
+        issue = Issue(10, _CAT, name, "PASS", "ADS appears to have required fields")
+        issue.evidence = [data("Required ADS fields present",
+                               actual=", ".join(fields), kind="match", doc_type="ADS")]
+        return issue
+    issue = Issue(10, _CAT, name, "WARNING", f"ADS may be missing fields: {', '.join(missing)}")
+    issue.evidence = [data("Possibly missing ADS field", actual=f, kind="mismatch",
+                           doc_type="ADS") for f in missing]
+    return issue
 
 
 def _signature_check(qc, check_id, doc_type, text, img_key, missing_msg, missing_fn):

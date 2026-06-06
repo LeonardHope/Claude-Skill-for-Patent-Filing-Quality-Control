@@ -5,6 +5,7 @@ encryption and is left engine-emitted.
 import re
 
 from ..result import Issue
+from ._ev import data
 
 _CAT = "File Quality"
 
@@ -28,10 +29,15 @@ def _searchable(qc) -> Issue:
         if qc.report.files_found.get(dt):
             (searchable if text and len(text.strip()) > 100 else non).append(dt)
     if non:
-        return Issue(55, _CAT, name, "WARNING",
-                     f"Limited text extraction from: {', '.join(non)}")
-    return Issue(55, _CAT, name, "PASS",
-                 f"All {len(searchable)} PDFs are text-searchable")
+        issue = Issue(55, _CAT, name, "WARNING",
+                      f"Limited text extraction from: {', '.join(non)}")
+        issue.evidence = [data(f"Limited text from {dt}", actual="not text-searchable",
+                               kind="mismatch", doc_type=dt) for dt in non]
+        return issue
+    issue = Issue(55, _CAT, name, "PASS", f"All {len(searchable)} PDFs are text-searchable")
+    issue.evidence = [data("Text-searchable documents", actual=", ".join(searchable),
+                           kind="match")]
+    return issue
 
 
 def _naming(qc) -> Issue:
@@ -51,19 +57,31 @@ def _naming(qc) -> Issue:
             if not has and dockets:
                 issues.append(f"{dt}: missing docket number")
     if issues:
-        return Issue(56, _CAT, name, "INFO",
-                     f"Naming suggestions: {'; '.join(issues[:3])}")
-    return Issue(56, _CAT, name, "PASS",
-                 "File names follow good conventions (contain docket number)")
+        issue = Issue(56, _CAT, name, "INFO", f"Naming suggestions: {'; '.join(issues[:3])}")
+        issue.evidence = [data(s, kind="mismatch") for s in issues[:5]]
+        return issue
+    issue = Issue(56, _CAT, name, "PASS",
+                  "File names follow good conventions (contain docket number)")
+    issue.evidence = [data("Docket number in file names",
+                           actual=", ".join(sorted(d for d in dockets if d)) or "present",
+                           kind="match")]
+    return issue
 
 
 def _file_size(qc) -> Issue:
     name = "File Size Reasonable"
+    checked = 0
     for path in (getattr(qc, "documents", {}) or {}).values():
         if path:
             try:
+                checked += 1
                 if path.stat().st_size == 0:
-                    return Issue(58, _CAT, name, "CRITICAL", f"{path.name} has 0 bytes")
+                    issue = Issue(58, _CAT, name, "CRITICAL", f"{path.name} has 0 bytes")
+                    issue.evidence = [data(path.name, actual="0 bytes", kind="mismatch")]
+                    return issue
             except Exception:
                 pass
-    return Issue(58, _CAT, name, "PASS", "All files have reasonable sizes")
+    issue = Issue(58, _CAT, name, "PASS", "All files have reasonable sizes")
+    issue.evidence = [data("Files checked for size", actual=f"{checked} — all non-empty",
+                           kind="match")]
+    return issue
