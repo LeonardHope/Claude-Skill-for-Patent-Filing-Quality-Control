@@ -9,6 +9,7 @@ for 13, 14, 15, 17, 18, 19, 20, 21.
 import re
 
 from ..result import Issue
+from ._ev import region
 
 _CAT = "Specification"
 _SPEC_IDS = (13, 14, 15, 17, 18, 19, 20, 21)
@@ -19,11 +20,22 @@ def check_specification(qc):
     if not spec:
         return [Issue(i, _CAT, f"Check {i}", "CRITICAL", "Specification not found")
                 for i in _SPEC_IDS]
+    sp = (getattr(qc, "documents", {}) or {}).get("Specification")
     out = [_claim_numbering(qc, spec), _claim_dependency(qc, spec),
-           _figure_refs(qc, spec), _abstract(spec), _background(spec),
-           _brief_description(spec), _detailed_description(spec),
-           _claims_section(spec)]
+           _figure_refs(qc, spec), _abstract(spec, sp), _background(spec, sp),
+           _brief_description(spec, sp), _detailed_description(spec, sp),
+           _claims_section(spec, sp)]
     return out
+
+
+def _located(issue, spec_path, phrase, label):
+    """Attach a pdf_region receipt pointing at `phrase` (a found section header)
+    in the specification PDF, when locatable. No-op if the spec is a .docx or the
+    header can't be located. Returns the issue for chaining."""
+    e = region("Specification", spec_path, phrase, label=label, kind="match")
+    if e:
+        issue.evidence = [e]
+    return issue
 
 
 # ---- Check 13: claim numbering sequential ----------------------------------
@@ -154,7 +166,7 @@ def _figure_refs(qc, spec) -> Issue:
 
 
 # ---- Check 17: abstract present and length ---------------------------------
-def _abstract(spec) -> Issue:
+def _abstract(spec, spec_path=None) -> Issue:
     name = "Abstract Present and Length Compliant"
     m = re.search(
         r"\bABSTRACT\b\s*(?:OF\s+THE\s+(?:DISCLOSURE|INVENTION))?\s*[:\n]+"
@@ -172,42 +184,49 @@ def _abstract(spec) -> Issue:
     cleaned = re.sub(r"\b(?:US|U\.S\.)\s*\d{4}/\d+\s*A\d?\b", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     wc = len(cleaned.split())
+    tag = lambda issue: _located(issue, spec_path, "ABSTRACT", "Abstract section")
     if wc == 0:
-        return Issue(17, _CAT, name, "WARNING",
-                     "Abstract heading found but body could not be extracted")
+        return tag(Issue(17, _CAT, name, "WARNING",
+                         "Abstract heading found but body could not be extracted"))
     if wc <= 150:
-        return Issue(17, _CAT, name, "PASS", f"Abstract found ({wc} words, limit is 150)")
+        return tag(Issue(17, _CAT, name, "PASS", f"Abstract found ({wc} words, limit is 150)"))
     preview = (cleaned[:240] + "…") if len(cleaned) > 240 else cleaned
-    return Issue(17, _CAT, name, "WARNING",
-                 f"Abstract may be too long ({wc} words, limit is 150)",
-                 details=(f"Extracted text used for the count (verify against the source "
-                          f".docx, as PDF text extraction can splice in page-header/footer "
-                          f"artifacts):\n\n{preview}"))
+    return tag(Issue(17, _CAT, name, "WARNING",
+                     f"Abstract may be too long ({wc} words, limit is 150)",
+                     details=(f"Extracted text used for the count (verify against the source "
+                              f".docx, as PDF text extraction can splice in page-header/footer "
+                              f"artifacts):\n\n{preview}")))
 
 
-def _background(spec) -> Issue:
+def _background(spec, spec_path=None) -> Issue:
     name = "Background Section Present"
-    if re.search(r"BACKGROUND|FIELD OF (?:THE )?INVENTION", spec, re.IGNORECASE):
-        return Issue(18, _CAT, name, "PASS", "Background/Field section found")
+    m = re.search(r"BACKGROUND|FIELD OF (?:THE )?INVENTION", spec, re.IGNORECASE)
+    if m:
+        return _located(Issue(18, _CAT, name, "PASS", "Background/Field section found"),
+                        spec_path, m.group(0), "Background/Field section")
     return Issue(18, _CAT, name, "WARNING", "Background/Field section not clearly identified")
 
 
-def _brief_description(spec) -> Issue:
+def _brief_description(spec, spec_path=None) -> Issue:
     name = "Brief Description of Drawings Present"
-    if re.search(r"BRIEF DESCRIPTION OF (?:THE )?DRAWINGS", spec, re.IGNORECASE):
-        return Issue(19, _CAT, name, "PASS", "Brief Description of Drawings section found")
+    m = re.search(r"BRIEF DESCRIPTION OF (?:THE )?DRAWINGS", spec, re.IGNORECASE)
+    if m:
+        return _located(Issue(19, _CAT, name, "PASS", "Brief Description of Drawings section found"),
+                        spec_path, m.group(0), "Brief Description of Drawings section")
     return Issue(19, _CAT, name, "WARNING",
                  "Brief Description of Drawings section not clearly identified")
 
 
-def _detailed_description(spec) -> Issue:
+def _detailed_description(spec, spec_path=None) -> Issue:
     name = "Detailed Description Present"
-    if re.search(r"DETAILED DESCRIPTION", spec, re.IGNORECASE):
-        return Issue(20, _CAT, name, "PASS", "Detailed Description section found")
+    m = re.search(r"DETAILED DESCRIPTION", spec, re.IGNORECASE)
+    if m:
+        return _located(Issue(20, _CAT, name, "PASS", "Detailed Description section found"),
+                        spec_path, m.group(0), "Detailed Description section")
     return Issue(20, _CAT, name, "CRITICAL", "Detailed Description section not clearly identified")
 
 
-def _claims_section(spec) -> Issue:
+def _claims_section(spec, spec_path=None) -> Issue:
     name = "Claims Section Present"
     pats = (r"(?:^|\n)\s*CLAIMS?\s*(?:\n|$)", r"(?:^|\n)\s*What is claimed",
             r"(?:^|\n)\s*I\s+claim", r"(?:^|\n)\s*We\s+claim",
@@ -215,6 +234,9 @@ def _claims_section(spec) -> Issue:
             r"(?:^|[^A-Z])CLAIMS(?:[^A-Z]|$)", r"What\s+is\s+claimed",
             r"What\s*is\s*claimed", r"1\.\s*A\s+computer-implemented",
             r"1\.\s*A\s+method", r"1\.\s*A\s+system", r"1\.\s*An?\s+apparatus")
-    if any(re.search(p, spec, re.IGNORECASE | re.MULTILINE) for p in pats):
-        return Issue(21, _CAT, name, "PASS", "Claims section found")
+    for p in pats:
+        m = re.search(p, spec, re.IGNORECASE | re.MULTILINE)
+        if m:
+            return _located(Issue(21, _CAT, name, "PASS", "Claims section found"),
+                            spec_path, m.group(0).strip(), "Claims section")
     return Issue(21, _CAT, name, "CRITICAL", "Claims section not clearly identified")
