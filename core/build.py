@@ -135,4 +135,39 @@ def run(folder: str, *, generated_at: Optional[str] = None,
         from .evidence import enrich as _enrich
         doc_paths = {k: v for k, v in (getattr(qc, "documents", {}) or {}).items() if v}
         _enrich(result, doc_paths)
+    _backfill_doc_links(result)
     return result
+
+
+# A check's category names the single document it is about. Cross-cutting
+# categories (consistency / completeness / cross-references / priority / final
+# quality / file quality / formatting) span documents and are intentionally
+# absent — those checks get no document link.
+_CATEGORY_DOC = {
+    "Specification": "Specification",
+    "Drawings": "Drawings",
+    "Declaration": "Declaration",
+    "Assignment": "Assignment",
+    "Power of Attorney": "Power of Attorney",
+    "ADS": "ADS",
+    "IDS": "IDS",
+}
+
+
+def _backfill_doc_links(result: Result) -> None:
+    """Give every check that lacks a precise receipt a 'view document' affordance
+    — a `pdf_page` locator to the single document its category is about, when
+    that document is present as a PDF. Checks that already carry a located
+    receipt (pdf_region / xfa_field), and cross-cutting categories, are left
+    untouched. This is a navigation aid, not located evidence, so it uses
+    kind='document' and the frontend keeps it distinct from real receipts."""
+    pdf_docs = {d.doc_type for d in result.documents if d.source == "pdf"}
+    precise = {"pdf_region", "xfa_field"}
+    for issue in result.issues:
+        if any(e.locator and e.locator.type in precise for e in issue.evidence):
+            continue
+        doc = _CATEGORY_DOC.get(issue.category)
+        if doc and doc in pdf_docs:
+            issue.evidence.append(Evidence(
+                doc_type=doc, locator=Locator(type="pdf_page", page=0),
+                snippet="", kind="document", label=f"Open {doc}"))
