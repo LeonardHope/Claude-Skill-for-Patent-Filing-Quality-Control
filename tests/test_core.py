@@ -682,6 +682,21 @@ def t():
     return True
 
 
+@test("MIG18.1: Check 18 Background PASS carries a pdf_region receipt on the header")
+def t():
+    from core.checks.specification import check_specification
+    qc = _qc(spec_text="A TITLE\nBACKGROUND\nModern systems require efficient inference.\n",
+             documents={"Specification": SPEC_PDF})
+    c18 = next(i for i in check_specification(qc) if i.check_id == 18)
+    if c18.severity != "PASS":
+        print(f"  ❌ severity {c18.severity}"); return False
+    reg = [e for e in c18.evidence if e.locator.type == "pdf_region"]
+    if not reg or "BACKGROUND" not in (reg[0].snippet or "").upper():
+        print(f"  ❌ no header receipt: {[(e.locator.type, e.snippet) for e in c18.evidence]}")
+        return False
+    return True
+
+
 # ---- read-only guarantee: the QC run must never touch the filing folder -----
 @test("READONLY: core.run() creates, modifies, or deletes nothing in the folder")
 def t():
