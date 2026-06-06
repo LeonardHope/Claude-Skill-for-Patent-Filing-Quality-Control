@@ -9,7 +9,7 @@ for 13, 14, 15, 17, 18, 19, 20, 21.
 import re
 
 from ..result import Issue
-from ._ev import region
+from ._ev import region, data
 
 _CAT = "Specification"
 _SPEC_IDS = (13, 14, 15, 17, 18, 19, 20, 21)
@@ -69,14 +69,25 @@ def _claim_numbering(qc, spec) -> Issue:
     if claim_matches:
         nums = sorted({int(n) for n in claim_matches if 1 <= int(n) <= 100})
         expected = list(range(1, max(nums) + 1))
+        found_ev = data("Claim numbers found", actual=", ".join(map(str, nums)),
+                        kind="match", doc_type="Specification")
         if nums == expected:
-            return Issue(13, _CAT, name, "PASS", f"Claims numbered sequentially (1-{len(nums)})")
+            issue = Issue(13, _CAT, name, "PASS", f"Claims numbered sequentially (1-{len(nums)})")
+            issue.evidence = [found_ev]
+            return issue
         missing = set(expected) - set(nums)
         if missing:
-            return Issue(13, _CAT, name, "CRITICAL",
-                         f"Claims not numbered sequentially - missing: {sorted(missing)}",
-                         details=f"Found: {nums}")
-        return Issue(13, _CAT, name, "PASS", f"Claims numbered sequentially (1-{max(nums)})")
+            issue = Issue(13, _CAT, name, "CRITICAL",
+                          f"Claims not numbered sequentially - missing: {sorted(missing)}",
+                          details=f"Found: {nums}")
+            found_ev.kind = "mismatch"
+            issue.evidence = [found_ev,
+                              data("Missing claim numbers",
+                                   actual=", ".join(map(str, sorted(missing))), kind="mismatch")]
+            return issue
+        issue = Issue(13, _CAT, name, "PASS", f"Claims numbered sequentially (1-{max(nums)})")
+        issue.evidence = [found_ev]
+        return issue
 
     simple = []
     for pat in (r"(?:^|\n)\s*(\d+)\.\s+", r"(?:\.\s+|\;\s+|:\s+)(\d+)\.\s+",
@@ -111,13 +122,22 @@ def _claim_dependency(qc, spec) -> Issue:
                  if int(c) != int(d) and 1 <= int(c) <= 100 and 1 <= int(d) <= 100]
         invalid = [(c, d) for c, d in valid if int(c) <= int(d)]
         if not invalid and valid:
-            return Issue(14, _CAT, name, "PASS",
-                         f"Dependent claims reference lower-numbered claims "
-                         f"({len(valid)} dependencies found)")
+            issue = Issue(14, _CAT, name, "PASS",
+                          f"Dependent claims reference lower-numbered claims "
+                          f"({len(valid)} dependencies found)")
+            issue.evidence = [data("Dependencies found",
+                                   actual=", ".join(f"claim {c}→{d}" for c, d in valid[:10]),
+                                   kind="match", doc_type="Specification")]
+            return issue
         if invalid:
-            return Issue(14, _CAT, name, "CRITICAL",
-                         "Invalid claim dependencies found - claims reference same or "
-                         "higher numbered claims", details=str(invalid))
+            issue = Issue(14, _CAT, name, "CRITICAL",
+                          "Invalid claim dependencies found - claims reference same or "
+                          "higher numbered claims", details=str(invalid))
+            issue.evidence = [data(f"Claim {c} depends on claim {d}",
+                                   actual="references a same/higher-numbered claim",
+                                   kind="mismatch", doc_type="Specification")
+                              for c, d in invalid[:5]]
+            return issue
         return Issue(14, _CAT, name, "INFO",
                      "No valid dependent claims detected after filtering")
 
@@ -146,15 +166,21 @@ def _figure_refs(qc, spec) -> Issue:
         return ", ".join(str(n) for n in sorted(s))
 
     if not qc._drawings_text_extractable() and spec_figs:
-        return Issue(15, _CAT, name, "INFO",
-                     f"Drawings PDF appears to be image-only — cannot verify FIG. labels "
-                     f"by text extraction. Spec references: FIG. {fl(spec_figs)}. "
-                     f"Manually verify each is present in the drawings.")
+        issue = Issue(15, _CAT, name, "INFO",
+                      f"Drawings PDF appears to be image-only — cannot verify FIG. labels "
+                      f"by text extraction. Spec references: FIG. {fl(spec_figs)}. "
+                      f"Manually verify each is present in the drawings.")
+        issue.evidence = [data("Figures referenced in specification",
+                               actual=f"FIG. {fl(spec_figs)}", kind="value", doc_type="Specification")]
+        return issue
     if spec_figs and draw_figs:
         missing = spec_figs - draw_figs
         if not missing:
-            return Issue(15, _CAT, name, "PASS",
-                         f"All referenced figures exist in drawings (FIG. {fl(spec_figs)})")
+            issue = Issue(15, _CAT, name, "PASS",
+                          f"All referenced figures exist in drawings (FIG. {fl(spec_figs)})")
+            issue.evidence = [data("Figures in spec & drawings", actual=f"FIG. {fl(spec_figs)}",
+                                   kind="match", doc_type="Specification")]
+            return issue
         return Issue(15, _CAT, name, "CRITICAL",
                      f"Specification references figures not in drawings: FIG. {fl(missing)}")
     if spec_figs:
