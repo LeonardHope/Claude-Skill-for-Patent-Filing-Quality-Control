@@ -6,6 +6,7 @@ PASS (76) and stop. check_ids(qc) returns the list of IDS issues.
 import re
 
 from ..result import Issue
+from ._ev import data
 
 _CAT = "IDS"
 
@@ -26,9 +27,12 @@ def check_ids(qc):
     ids_text = getattr(qc, "ids_text", "") or ""
 
     if not ids_path and not wa_path:
-        return [Issue(76, _CAT, "IDS Documents Present", "PASS",
+        issue = Issue(76, _CAT, "IDS Documents Present", "PASS",
                       "No IDS documents present — IDS is optional under MPEP 609. "
-                      "Skipping IDS-specific checks.")]
+                      "Skipping IDS-specific checks.")
+        issue.evidence = [data("IDS documents", actual="none (optional under MPEP 609)",
+                               kind="match")]
+        return [issue]
 
     out = []
     found = []
@@ -36,9 +40,11 @@ def check_ids(qc):
         found.append(f"IDS form: {ids_path.name}")
     if wa_path:
         found.append(f"Written Assertion (SB/08c): {wa_path.name}")
-    out.append(Issue(76, _CAT, "IDS Documents Present", "INFO",
-                     f"{len(found)} IDS-related document(s) found.",
-                     details="\n".join(f"  • {s}" for s in found)))
+    i76 = Issue(76, _CAT, "IDS Documents Present", "INFO",
+                f"{len(found)} IDS-related document(s) found.",
+                details="\n".join(f"  • {s}" for s in found))
+    i76.evidence = [data("IDS documents found", actual="; ".join(found), kind="value")]
+    out.append(i76)
 
     if ids_path:
         out.append(_ids_signed(ids_text))
@@ -57,14 +63,22 @@ def _ids_signed(ids_text) -> Issue:
     sig = sm.group(1).strip() if sm else ""
     reg = rm.group(1).strip() if rm else ""
     if sig and reg:
-        return Issue(77, _CAT, name, "PASS", f"IDS appears signed: '{sig}' (Reg. No. {reg}).")
+        issue = Issue(77, _CAT, name, "PASS", f"IDS appears signed: '{sig}' (Reg. No. {reg}).")
+        issue.evidence = [data("IDS signature", actual=f"{sig} · Reg. {reg}", kind="match",
+                               doc_type="IDS")]
+        return issue
     if sig or reg:
-        return Issue(77, _CAT, name, "WARNING",
-                     f"Partial signature data on IDS — signature='{sig or '(empty)'}', "
-                     f"reg no='{reg or '(empty)'}'. Confirm the form is properly signed.")
-    return Issue(77, _CAT, name, "WARNING",
-                 "IDS form has no filled signature or practitioner registration number. "
-                 "Sign before filing.")
+        issue = Issue(77, _CAT, name, "WARNING",
+                      f"Partial signature data on IDS — signature='{sig or '(empty)'}', "
+                      f"reg no='{reg or '(empty)'}'. Confirm the form is properly signed.")
+        issue.evidence = [data("IDS signature", actual=f"signature={sig or '—'}, reg={reg or '—'}",
+                               kind="mismatch", doc_type="IDS")]
+        return issue
+    issue = Issue(77, _CAT, name, "WARNING",
+                  "IDS form has no filled signature or practitioner registration number. "
+                  "Sign before filing.")
+    issue.evidence = [data("IDS signature", actual="not signed", kind="mismatch", doc_type="IDS")]
+    return issue
 
 
 def _ids_reference_counts(ids_text) -> Issue:
@@ -77,16 +91,23 @@ def _ids_reference_counts(ids_text) -> Issue:
                           ids_text, re.IGNORECASE)
     total = us_pat + us_pub + fp + npl
     if total > 0:
-        return Issue(78, _CAT, name, "INFO",
-                     f"IDS lists {total} reference(s): {us_pat} US patent(s), {us_pub} US "
-                     f"publication(s), {fp} foreign document(s), {npl} NPL item(s). Verify "
-                     f"each cited reference is accompanied by a copy or covered by a "
-                     f"§1.98(a)(2) exception.",
-                     details=("Cited US patent doc numbers (first 20): "
-                              + ", ".join(doc_nums[:20])) if doc_nums else "")
-    return Issue(78, _CAT, name, "WARNING",
-                 "IDS form has no filled reference citations. Either the form is empty or "
-                 "the extractor missed them — verify manually before filing.")
+        issue = Issue(78, _CAT, name, "INFO",
+                      f"IDS lists {total} reference(s): {us_pat} US patent(s), {us_pub} US "
+                      f"publication(s), {fp} foreign document(s), {npl} NPL item(s). Verify "
+                      f"each cited reference is accompanied by a copy or covered by a "
+                      f"§1.98(a)(2) exception.",
+                      details=("Cited US patent doc numbers (first 20): "
+                               + ", ".join(doc_nums[:20])) if doc_nums else "")
+        issue.evidence = [data("References cited in IDS",
+                               actual=f"{total} ({us_pat} US pat, {us_pub} US pub, {fp} foreign, {npl} NPL)",
+                               kind="value", doc_type="IDS")]
+        return issue
+    issue = Issue(78, _CAT, name, "WARNING",
+                  "IDS form has no filled reference citations. Either the form is empty or "
+                  "the extractor missed them — verify manually before filing.")
+    issue.evidence = [data("References cited in IDS", actual="none found", kind="mismatch",
+                           doc_type="IDS")]
+    return issue
 
 
 def _wa_selection(qc, wa_path) -> Issue:
@@ -99,17 +120,26 @@ def _wa_selection(qc, wa_path) -> Issue:
     if len(checked) == 1:
         m = re.search(r"(\d)", checked[0])
         meaning = meanings.get(m.group(1), "?") if m else "?"
-        return Issue(79, _CAT, name, "PASS",
-                     f"Written Assertion has one selection: {checked[0]} (asserts: {meaning}).")
+        issue = Issue(79, _CAT, name, "PASS",
+                      f"Written Assertion has one selection: {checked[0]} (asserts: {meaning}).")
+        issue.evidence = [data("§1.17(v) selection", actual=f"{checked[0]} — {meaning}",
+                               kind="match", doc_type="IDS Written Assertion")]
+        return issue
     if len(checked) > 1:
-        return Issue(79, _CAT, name, "CRITICAL",
-                     f"Written Assertion has {len(checked)} boxes checked, but only one is "
-                     f"allowed per §1.17(v). Checked: {', '.join(checked)}.")
+        issue = Issue(79, _CAT, name, "CRITICAL",
+                      f"Written Assertion has {len(checked)} boxes checked, but only one is "
+                      f"allowed per §1.17(v). Checked: {', '.join(checked)}.")
+        issue.evidence = [data("§1.17(v) selection", actual=f"{len(checked)} boxes checked",
+                               kind="mismatch", doc_type="IDS Written Assertion")]
+        return issue
     if cb:
-        return Issue(79, _CAT, name, "CRITICAL",
-                     "Written Assertion has NO §1.17(v) box checked. The form will be "
-                     "treated as no assertion made. Check exactly one of the four options "
-                     "before filing.")
+        issue = Issue(79, _CAT, name, "CRITICAL",
+                      "Written Assertion has NO §1.17(v) box checked. The form will be "
+                      "treated as no assertion made. Check exactly one of the four options "
+                      "before filing.")
+        issue.evidence = [data("§1.17(v) selection", actual="no box checked", kind="mismatch",
+                               doc_type="IDS Written Assertion")]
+        return issue
     return Issue(79, _CAT, name, "INFO",
                  "Could not read AcroForm checkbox fields. Manually verify exactly one "
                  "§1.17(v) option is selected.")
@@ -123,12 +153,22 @@ def _wa_signed(qc, wa_path) -> Issue:
     reg = fields.get("Practitioner Registration Number if applicable", "").strip()
     date = fields.get("Date", "").strip()
     if sig and (nm or reg):
-        return Issue(80, _CAT, name, "PASS",
-                     f"Written Assertion signed: '{sig}' (name: {nm or 'n/a'}, "
-                     f"reg no: {reg or 'n/a'}, date: {date or 'n/a'}).")
+        issue = Issue(80, _CAT, name, "PASS",
+                      f"Written Assertion signed: '{sig}' (name: {nm or 'n/a'}, "
+                      f"reg no: {reg or 'n/a'}, date: {date or 'n/a'}).")
+        issue.evidence = [data("Written Assertion signature",
+                               actual=f"{sig} (name: {nm or 'n/a'}, reg: {reg or 'n/a'})",
+                               kind="match", doc_type="IDS Written Assertion")]
+        return issue
     if sig:
-        return Issue(80, _CAT, name, "WARNING",
-                     f"Written Assertion has a signature ('{sig}') but name/reg no fields "
-                     f"are empty. Confirm signature is valid.")
-    return Issue(80, _CAT, name, "WARNING",
-                 "Written Assertion has no filled signature field. Sign before filing.")
+        issue = Issue(80, _CAT, name, "WARNING",
+                      f"Written Assertion has a signature ('{sig}') but name/reg no fields "
+                      f"are empty. Confirm signature is valid.")
+        issue.evidence = [data("Written Assertion signature", actual=f"{sig} (name/reg empty)",
+                               kind="mismatch", doc_type="IDS Written Assertion")]
+        return issue
+    issue = Issue(80, _CAT, name, "WARNING",
+                  "Written Assertion has no filled signature field. Sign before filing.")
+    issue.evidence = [data("Written Assertion signature", actual="not signed", kind="mismatch",
+                           doc_type="IDS Written Assertion")]
+    return issue

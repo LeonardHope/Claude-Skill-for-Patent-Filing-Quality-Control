@@ -6,7 +6,7 @@ risk and low evidence value, so they stay engine-emitted.
 import re
 
 from ..result import Issue
-from ._ev import region
+from ._ev import region, data
 
 _CAT = "Common Errors"
 
@@ -44,11 +44,16 @@ def check_common_errors(qc):
         placeholder.evidence = _placeholder_evidence(qc)
 
     indicators = [i for i in _TRACK if i in all_text]
-    track = (Issue(51, _CAT, "No Track Changes or Comments Visible", "PASS",
-                   "No track change indicators detected")
-             if not indicators else
-             Issue(51, _CAT, "No Track Changes or Comments Visible", "WARNING",
-                   f"Possible track change indicators: {', '.join(indicators)}"))
+    if not indicators:
+        track = Issue(51, _CAT, "No Track Changes or Comments Visible", "PASS",
+                      "No track change indicators detected")
+        track.evidence = [data("Track-change / comment markers", actual="none detected",
+                               kind="match")]
+    else:
+        track = Issue(51, _CAT, "No Track Changes or Comments Visible", "WARNING",
+                      f"Possible track change indicators: {', '.join(indicators)}")
+        track.evidence = [data(f"Marker: {ind}", actual="present", kind="mismatch")
+                          for ind in indicators]
     return [placeholder, track]
 
 

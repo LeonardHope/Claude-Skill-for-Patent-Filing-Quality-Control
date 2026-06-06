@@ -5,7 +5,7 @@ calls the USPTO ODP network API and builds verification links.
 import re
 
 from ..result import Issue
-from ._ev import region
+from ._ev import region, data
 
 _CAT = "Priority Claims"
 
@@ -83,8 +83,14 @@ def _foreign(foreign) -> Issue:
     name = "Foreign Priority Documents"
     if foreign:
         countries = sorted({(e.get("country") or "?").upper() for e in foreign})
-        return Issue(65, _CAT, name, "INFO",
-                     f"{len(foreign)} foreign priority claim(s) in ADS "
-                     f"({', '.join(countries)}). Verify that certified copies of the "
-                     f"foreign priority documents are on file or being filed.")
-    return Issue(65, _CAT, name, "PASS", "No foreign priority claims in ADS")
+        issue = Issue(65, _CAT, name, "INFO",
+                      f"{len(foreign)} foreign priority claim(s) in ADS "
+                      f"({', '.join(countries)}). Verify that certified copies of the "
+                      f"foreign priority documents are on file or being filed.")
+        issue.evidence = [data("Foreign priority claims (ADS)",
+                               actual=f"{len(foreign)} — {', '.join(countries)}", kind="value",
+                               doc_type="ADS")]
+        return issue
+    issue = Issue(65, _CAT, name, "PASS", "No foreign priority claims in ADS")
+    issue.evidence = [data("Foreign priority claims (ADS)", actual="none", kind="match")]
+    return issue

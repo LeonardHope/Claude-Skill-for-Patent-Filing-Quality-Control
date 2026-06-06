@@ -5,7 +5,7 @@ claims) are intricate drafting-quality NLP heuristics, left engine-emitted.
 import re
 
 from ..result import Issue
-from ._ev import region
+from ._ev import region, data
 
 _CAT = "Cross-References"
 
@@ -39,26 +39,38 @@ def _figure_count(qc) -> Issue:
     draw = getattr(qc, "drawings_text", "") or ""
     if not qc._drawings_text_extractable():
         spec_figs = qc._extract_figure_identities(spec) if spec else []
-        return Issue(61, _CAT, name, "INFO",
-                     f"Drawings PDF appears to be image-only — figure count not "
-                     f"verifiable by text extraction. Spec references {len(spec_figs)} "
-                     f"figure(s)" + (f" (FIG. {', '.join(spec_figs)})" if spec_figs else "")
-                     + ". Manually verify drawings contain matching figures.")
+        issue = Issue(61, _CAT, name, "INFO",
+                      f"Drawings PDF appears to be image-only — figure count not "
+                      f"verifiable by text extraction. Spec references {len(spec_figs)} "
+                      f"figure(s)" + (f" (FIG. {', '.join(spec_figs)})" if spec_figs else "")
+                      + ". Manually verify drawings contain matching figures.")
+        issue.evidence = [data("Figures referenced in specification",
+                               actual=(f"FIG. {', '.join(spec_figs)}" if spec_figs else "none"),
+                               kind="value", doc_type="Specification")]
+        return issue
     if spec and draw:
         sf = set(qc._extract_figure_identities(spec))
         df = set(qc._extract_figure_identities(draw))
+        sl = ", ".join(sorted(sf, key=_fig_sort_key))
+        dl = ", ".join(sorted(df, key=_fig_sort_key))
         if sf == df:
-            return Issue(61, _CAT, name, "PASS",
-                         f"Figure numbers match: {len(sf)} figures "
-                         f"(FIG. {', '.join(sorted(sf, key=_fig_sort_key))})")
-        if len(sf) == len(df):
-            return Issue(61, _CAT, name, "WARNING",
-                         f"Same figure count ({len(sf)}) but different numbers. "
-                         f"Spec: {sorted(sf, key=_fig_sort_key)}, "
-                         f"Drawings: {sorted(df, key=_fig_sort_key)}")
-        return Issue(61, _CAT, name, "WARNING",
-                     f"Figure count mismatch: Spec references {len(sf)} figures, "
-                     f"Drawings has {len(df)} figures")
+            issue = Issue(61, _CAT, name, "PASS",
+                          f"Figure numbers match: {len(sf)} figures (FIG. {sl})")
+            issue.evidence = [data("Figures in spec & drawings", actual=f"{len(sf)}: FIG. {sl}",
+                                   kind="match", doc_type="Specification")]
+            return issue
+        issue = (Issue(61, _CAT, name, "WARNING",
+                       f"Same figure count ({len(sf)}) but different numbers. "
+                       f"Spec: {sorted(sf, key=_fig_sort_key)}, Drawings: {sorted(df, key=_fig_sort_key)}")
+                 if len(sf) == len(df) else
+                 Issue(61, _CAT, name, "WARNING",
+                       f"Figure count mismatch: Spec references {len(sf)} figures, "
+                       f"Drawings has {len(df)} figures"))
+        issue.evidence = [data("Figures in specification", actual=f"FIG. {sl}",
+                               kind="mismatch", doc_type="Specification"),
+                          data("Figures in drawings", actual=f"FIG. {dl}",
+                               kind="mismatch", doc_type="Drawings")]
+        return issue
     return Issue(61, _CAT, name, "INFO", "Unable to compare figure counts")
 
 
