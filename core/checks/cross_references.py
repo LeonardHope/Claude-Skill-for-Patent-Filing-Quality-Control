@@ -30,7 +30,8 @@ def _fig_sort_key(fid):
 
 
 def check_cross_references(qc):
-    return [_figure_count(qc), _claim_count(qc)]
+    return [_claims_reference_spec(qc), _summary_matches_claims(qc),
+            _figure_count(qc), _claim_count(qc)]
 
 
 def _figure_count(qc) -> Issue:
@@ -101,3 +102,135 @@ def _claim_count(qc) -> Issue:
                      f"(manual verification recommended)")
     return Issue(62, _CAT, name, "WARNING",
                  "Unable to count claims - claims section may use non-standard format")
+
+
+# ---- Check 59: claims reference specification elements (migrated verbatim) ---
+_STOPWORDS = {'method', 'system', 'apparatus', 'device', 'medium', 'product', 'invention',
+              'embodiment', 'present', 'following', 'above', 'said', 'wherein', 'thereof',
+              'therein', 'further', 'least', 'one', 'more', 'each', 'plurality', 'time',
+              'use', 'set', 'first', 'second', 'third', 'fourth', 'fifth', 'at'}
+_TAIL_TRIM = {'and', 'or', 'but', 'nor', 'yet', 'to', 'for', 'with', 'by', 'from', 'in',
+              'on', 'at', 'of', 'through', 'into', 'onto', 'further', 'thereby', 'whereby', 'wherein'}
+_CLAIM_ONLY = {'non-transitory'}
+_NP = r"\b(?:a|an|the|said)\s+([a-z][\w\-]*\s+[\w\-]+(?:\s+[\w\-]+)?)\b"
+
+
+def _claims_reference_spec(qc):
+    name = "Claims Reference Specification Elements"
+    spec = getattr(qc, "spec_text", "") or ""
+    if not spec:
+        issue = Issue(59, _CAT, name, "WARNING", "Specification not found")
+        issue.evidence = [data("Specification", actual="not found", kind="missing")]
+        return issue
+    claims_text = qc._extract_claims_section()
+    corpus = spec.replace(claims_text, "") if (claims_text and claims_text in spec) else spec
+    if not claims_text:
+        issue = Issue(59, _CAT, name, "INFO",
+                      "Could not isolate claims section for cross-reference check")
+        issue.evidence = [data("Claim elements", actual="claims not isolated", kind="value",
+                               doc_type="Specification")]
+        return issue
+    terms = set()
+    for m in re.finditer(_NP, claims_text, re.IGNORECASE):
+        words = re.sub(r"\s+", " ", m.group(1).strip().lower()).split()
+        if not words or words[0] in _STOPWORDS:
+            continue
+        changed = True
+        while changed and words:
+            changed = False
+            if words[-1] in _TAIL_TRIM:
+                words.pop(); changed = True; continue
+            if len(words) > 1 and words[-1].endswith(("ing", "ed")):
+                words.pop(); changed = True
+        if len(words) >= 2:
+            terms.add(" ".join(words))
+    if not terms:
+        issue = Issue(59, _CAT, name, "PASS", "Claim elements cross-referenced with specification")
+        issue.evidence = [data("Claim elements", actual="cross-referenced", kind="match",
+                               doc_type="Specification")]
+        return issue
+    desc_lower = re.sub(r"\s+", " ", corpus.lower())
+
+    def supported(t):
+        if t in desc_lower:
+            return True
+        stripped = " ".join(w for w in t.split() if w not in _CLAIM_ONLY)
+        if stripped and stripped != t and stripped in desc_lower:
+            return True
+        cw = [w for w in t.split() if w not in _STOPWORDS and w not in _CLAIM_ONLY]
+        return len(cw) >= 2 and all(re.search(rf"\b{re.escape(w)}\b", desc_lower) for w in cw)
+
+    missing = [t for t in terms if not supported(t)]
+    if not missing:
+        issue = Issue(59, _CAT, name, "PASS",
+                      f"All {len(terms)} claim elements found in specification")
+        issue.evidence = [data("Claim elements supported in spec",
+                               actual=f"{len(terms)} of {len(terms)}", kind="match",
+                               doc_type="Specification")]
+        return issue
+    if len(missing) <= 3:
+        issue = Issue(59, _CAT, name, "PASS",
+                      f"Most claim elements found in specification "
+                      f"({len(terms) - len(missing)}/{len(terms)})")
+        issue.evidence = [data(f"'{t}'", actual="not clearly found in spec", kind="mismatch",
+                               doc_type="Specification") for t in list(missing)[:5]]
+        return issue
+    issue = Issue(59, _CAT, name, "WARNING",
+                  f"{len(missing)} claim elements not clearly found in specification",
+                  details=f"Missing: {', '.join(list(missing)[:5])}")
+    issue.evidence = [data(f"'{t}'", actual="not found in specification", kind="mismatch",
+                           doc_type="Specification") for t in list(missing)[:5]]
+    return issue
+
+
+# ---- Check 60: specification summary matches claims (migrated verbatim) ------
+_SUM_STOP = {'comprising', 'including', 'wherein', 'thereof', 'therein', 'configured',
+             'coupled', 'connected', 'having', 'being', 'first', 'second', 'third', 'method',
+             'system', 'apparatus', 'each', 'said', 'claim', 'further', 'least', 'with',
+             'from', 'that', 'which', 'where', 'when', 'into', 'upon', 'between'}
+
+
+def _summary_matches_claims(qc):
+    name = "Specification Summary Matches Claims"
+    spec = getattr(qc, "spec_text", "") or ""
+    if not spec:
+        issue = Issue(60, _CAT, name, "WARNING", "Specification not found")
+        issue.evidence = [data("Specification", actual="not found", kind="missing")]
+        return issue
+    sm = re.search(r"(?:SUMMARY|BRIEF\s+SUMMARY)(.*?)"
+                   r"(?:BRIEF\s+DESCRIPTION\s+OF|DETAILED\s+DESCRIPTION|DRAWINGS)",
+                   spec, re.DOTALL | re.IGNORECASE)
+    cm = re.search(r"(?:What is claimed[^:]*:\s*|CLAIMS\s+).*?1\.\s+(A.*?)"
+                   r"(?:\s{2,}\d+\.\s+|\.\s+\d+\.\s+)", spec, re.DOTALL | re.IGNORECASE)
+    if not (sm and cm):
+        issue = Issue(60, _CAT, name, "INFO",
+                      "Could not isolate both summary and claims for comparison")
+        issue.evidence = [data("Summary vs claims", actual="could not isolate both",
+                               kind="value", doc_type="Specification")]
+        return issue
+    summary_text = sm.group(1).lower()
+    key_terms = set(re.findall(r"\b([a-z]{4,})\b", cm.group(1).lower())) - _SUM_STOP
+    if not key_terms:
+        issue = Issue(60, _CAT, name, "PASS", "Summary and claims present")
+        issue.evidence = [data("Summary & claims", actual="present", kind="match",
+                               doc_type="Specification")]
+        return issue
+    found = sum(1 for t in key_terms if t in summary_text)
+    coverage = found / len(key_terms)
+    if coverage >= 0.5:
+        issue = Issue(60, _CAT, name, "PASS",
+                      f"Summary covers {found}/{len(key_terms)} key claim terms "
+                      f"({coverage:.0%} coverage)")
+        issue.evidence = [data("Summary covers claim 1 terms",
+                               actual=f"{found}/{len(key_terms)} ({coverage:.0%})",
+                               kind="match", doc_type="Specification")]
+        return issue
+    issue = Issue(60, _CAT, name, "INFO",
+                  f"Heuristic: summary covers only {coverage:.0%} of claim 1 word tokens "
+                  f"({found}/{len(key_terms)}). Drafters often use different vocabulary "
+                  f"in the summary; this is best verified manually rather than "
+                  f"flagged as a finding.")
+    issue.evidence = [data("Summary covers claim 1 terms",
+                           actual=f"{found}/{len(key_terms)} ({coverage:.0%}) — verify manually",
+                           kind="value", doc_type="Specification")]
+    return issue
