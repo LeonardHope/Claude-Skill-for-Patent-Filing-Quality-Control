@@ -1,8 +1,8 @@
-"""File-quality checks. 55 (text-searchable), 56 (file naming), 58 (file size)
-are migrated. Check 57 (password protection) opens each PDF with PyPDF2 to test
-encryption and is left engine-emitted.
+"""File-quality checks. 55 (text-searchable), 56 (file naming), 57 (password
+protection), 58 (file size) are migrated. All are read-only.
 """
 import re
+from pathlib import Path
 
 from ..result import Issue
 from ._ev import data
@@ -11,7 +11,33 @@ _CAT = "File Quality"
 
 
 def check_file_quality(qc):
-    return [_searchable(qc), _naming(qc), _file_size(qc)]
+    return [_searchable(qc), _naming(qc), _file_size(qc), _password(qc)]
+
+
+def _password(qc) -> Issue:
+    name = "No Password Protection"
+    import PyPDF2
+    folder = Path(qc.folder_path)
+    protected, checked = [], 0
+    for filename in (qc.report.files_found or {}).values():
+        if filename and filename.endswith(".pdf"):
+            try:
+                with open(folder / filename, "rb") as f:
+                    checked += 1
+                    if PyPDF2.PdfReader(f).is_encrypted:
+                        protected.append(filename)
+            except Exception:
+                pass
+    if protected:
+        issue = Issue(57, _CAT, name, "CRITICAL",
+                      f"Password-protected PDFs detected: {', '.join(protected)}")
+        issue.evidence = [data(fn, actual="password-protected", kind="mismatch")
+                          for fn in protected]
+        return issue
+    issue = Issue(57, _CAT, name, "PASS", "No password-protected PDFs detected")
+    issue.evidence = [data("PDFs checked for encryption",
+                           actual=f"{checked} — none password-protected", kind="match")]
+    return issue
 
 
 def _searchable(qc) -> Issue:
