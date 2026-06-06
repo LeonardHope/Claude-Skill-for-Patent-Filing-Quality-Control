@@ -249,11 +249,10 @@ The skill performs 70+ quality control checks across these categories:
 - Related application references match
 - Foreign priority documentation
 
-### Final Quality (5 checks)
+### Final Quality (4 checks)
 - No obvious typos in critical fields
 - Dates properly formatted
 - No excessively long claims
-- Specification supports all claims
 - Consistent figure reference format
 
 ## Understanding Check Results
