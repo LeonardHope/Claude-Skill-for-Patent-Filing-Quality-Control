@@ -5,6 +5,7 @@ calls the USPTO ODP network API and builds verification links.
 import re
 
 from ..result import Issue
+from ._ev import region
 
 _CAT = "Priority Claims"
 
@@ -28,9 +29,14 @@ def check_priority(qc):
     spec = getattr(qc, "spec_text", "") or ""
     spec_priority = next((re.search(p, spec, re.IGNORECASE).group(0)
                           for p in _SPEC_PRIORITY if re.search(p, spec, re.IGNORECASE)), None)
-    return [_consistency(dom, foreign, spec_priority),
-            _related(qc, dom, foreign, spec_priority, spec),
-            _foreign(foreign)]
+    sp = (getattr(qc, "documents", {}) or {}).get("Specification")
+    c63 = _consistency(dom, foreign, spec_priority)
+    if spec_priority:
+        e = region("Specification", sp, spec_priority, kind="match",
+                   label="Priority language in Specification")
+        if e:
+            c63.evidence = [e]
+    return [c63, _related(qc, dom, foreign, spec_priority, spec, sp), _foreign(foreign)]
 
 
 def _consistency(dom, foreign, spec_priority) -> Issue:
@@ -53,13 +59,19 @@ def _consistency(dom, foreign, spec_priority) -> Issue:
                  "No priority claims detected in specification or ADS")
 
 
-def _related(qc, dom, foreign, spec_priority, spec) -> Issue:
+def _related(qc, dom, foreign, spec_priority, spec, sp=None) -> Issue:
     name = "Related Application References"
     if dom or foreign or spec_priority:
-        related = any(re.search(p, spec, re.IGNORECASE) for p in _SPEC_RELATED) if spec else False
-        if related:
-            return Issue(64, _CAT, name, "PASS",
-                         "Related-application cross-reference language found in specification")
+        hit = next((re.search(p, spec, re.IGNORECASE) for p in _SPEC_RELATED
+                    if spec and re.search(p, spec, re.IGNORECASE)), None)
+        if hit:
+            issue = Issue(64, _CAT, name, "PASS",
+                          "Related-application cross-reference language found in specification")
+            e = region("Specification", sp, hit.group(0), kind="match",
+                       label="Related-application reference")
+            if e:
+                issue.evidence = [e]
+            return issue
         return Issue(64, _CAT, name, "WARNING",
                      "Priority claims present but no Cross-Reference / Related Applications "
                      "section found in specification. Verify the spec includes proper "
