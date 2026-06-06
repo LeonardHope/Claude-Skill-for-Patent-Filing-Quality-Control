@@ -162,9 +162,8 @@ def _backfill_doc_links(result: Result) -> None:
     untouched. This is a navigation aid, not located evidence, so it uses
     kind='document' and the frontend keeps it distinct from real receipts."""
     pdf_docs = {d.doc_type for d in result.documents if d.source == "pdf"}
-    precise = {"pdf_region", "xfa_field"}
     for issue in result.issues:
-        if any(e.locator and e.locator.type in precise for e in issue.evidence):
+        if issue.evidence:                       # already carries its own receipt(s)
             continue
         doc = _CATEGORY_DOC.get(issue.category)
         if doc and doc in pdf_docs:
