@@ -81,7 +81,7 @@ MIGRATED_IDS = {
     36, 37, 38, 40,                   # 39 (assignment date, OCR) left in engine
     42, 44,                           # 41 (POA practitioners, OCR) left in engine
     45, 49,                           # USPTO formatting (line + page numbering)
-    50, 51,                           # 52-54 (drafting-quality heuristics) left in engine
+    50, 51, 52, 53, 54,               # common errors incl. drafting-quality heuristics
     55, 56, 57, 58,                   # file quality incl. password protection
     61, 62,                           # 59, 60 (drafting-quality NLP) left in engine
     63, 64, 65,                       # 81 (priority app number, ODP network) left in engine
