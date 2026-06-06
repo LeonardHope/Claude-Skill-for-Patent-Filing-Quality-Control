@@ -113,7 +113,10 @@
   .fchip.on.sev-INFO { box-shadow:0 0 0 1.5px var(--info) inset; background:var(--info-bg); }
   .fchip.on.sev-PASS { box-shadow:0 0 0 1.5px var(--pass) inset; background:var(--pass-bg); }
 
-  .wrap { flex:1; min-height:0; display:grid; grid-template-columns:minmax(360px,30%) 1fr; }
+  .wrap { flex:1; min-height:0; display:grid; grid-template-columns:var(--leftw,30%) 6px 1fr; }
+  .resizer { position:relative; cursor:col-resize; background:var(--border); transition:background .12s; }
+  .resizer::after { content:""; position:absolute; inset:0 -4px; }   /* widen hit area */
+  .resizer:hover, .resizer.dragging { background:var(--accent); }
 
   /* ===== left: checks master list ===== */
   .checks { min-height:0; overflow:auto; border-right:1px solid var(--border); background:var(--surface); }
@@ -296,6 +299,7 @@
       </div>
       <div id="checklist"></div>
     </div>
+    <div class="resizer" id="resizer" title="Drag to resize"></div>
     <div class="detail" id="detail">
       <div class="vp-empty" id="vpEmpty">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M9 11l3 3 8-8"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg>
@@ -661,6 +665,31 @@ document.addEventListener("keydown", e => {
   if (e.key === "ArrowRight" && VIEW.page < VIEW.pages-1) { e.preventDefault(); renderPage(VIEW.doc, VIEW.page+1, null); }
   if (e.key === "ArrowLeft"  && VIEW.page > 0)            { e.preventDefault(); renderPage(VIEW.doc, VIEW.page-1, null); }
 });
+
+// Draggable splitter — resize the checks pane; width persists across sessions.
+(function () {
+  const wrap = document.querySelector(".wrap"), r = $("resizer"), KEY = "qc_leftw";
+  const saved = localStorage.getItem(KEY);
+  if (saved) wrap.style.setProperty("--leftw", saved);
+  let dragging = false;
+  r.addEventListener("mousedown", e => {
+    dragging = true; r.classList.add("dragging");
+    document.body.style.cursor = "col-resize"; document.body.style.userSelect = "none";
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", e => {
+    if (!dragging) return;
+    const left = wrap.getBoundingClientRect().left;
+    const w = Math.max(280, Math.min(e.clientX - left, window.innerWidth * 0.7));
+    wrap.style.setProperty("--leftw", w + "px");
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false; r.classList.remove("dragging");
+    document.body.style.cursor = ""; document.body.style.userSelect = "";
+    localStorage.setItem(KEY, wrap.style.getPropertyValue("--leftw"));
+  });
+})();
 
 fetch("/api/config").then(r=>r.json()).then(c=>{ if (c.preselected) loadFolder(c.preselected); });
 </script>
