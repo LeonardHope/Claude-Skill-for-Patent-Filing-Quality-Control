@@ -8,6 +8,7 @@ engine's).
 import re
 
 from ..result import Issue
+from ._ev import data
 
 _CAT = "ADS"
 
@@ -49,12 +50,18 @@ def _inventor_addresses(qc, ads_text) -> Issue:
             else:
                 complete += 1
         if incomplete:
-            return Issue(27, _CAT, name, "WARNING",
-                         f"{len(incomplete)} of {len(ads['inventors'])} inventor mailing "
-                         f"addresses are incomplete in the ADS",
-                         details="\n".join(f"  • {ln}" for ln in incomplete))
-        return Issue(27, _CAT, name, "PASS",
-                     f"All {complete} inventor mailing addresses are complete in the ADS")
+            issue = Issue(27, _CAT, name, "WARNING",
+                          f"{len(incomplete)} of {len(ads['inventors'])} inventor mailing "
+                          f"addresses are incomplete in the ADS",
+                          details="\n".join(f"  • {ln}" for ln in incomplete))
+            issue.evidence = [data(ln.split(":")[0], actual=ln.split(":", 1)[1].strip(),
+                                   kind="mismatch", doc_type="ADS") for ln in incomplete[:6]]
+            return issue
+        issue = Issue(27, _CAT, name, "PASS",
+                      f"All {complete} inventor mailing addresses are complete in the ADS")
+        issue.evidence = [data("Inventor addresses complete (ADS)",
+                               actual=f"{complete} of {complete}", kind="match", doc_type="ADS")]
+        return issue
 
     sections = [s for s in re.split(r"(?=Inventor\s+\d+)", ads_text, flags=re.IGNORECASE)
                 if re.match(r"Inventor\s+\d+", s, re.IGNORECASE)]
@@ -93,18 +100,29 @@ def _inventor_addresses(qc, ads_text) -> Issue:
 
 def _entity_status(ads_text) -> Issue:
     name = "Entity Status Specified"
-    if re.search(r"entity status|small entity|micro entity|large entity", ads_text, re.IGNORECASE):
-        return Issue(29, _CAT, name, "PASS", "Entity status appears to be specified")
-    return Issue(29, _CAT, name, "WARNING", "Entity status not clearly specified")
+    m = re.search(r"(small entity|micro entity|large entity|entity status)", ads_text, re.IGNORECASE)
+    if m:
+        issue = Issue(29, _CAT, name, "PASS", "Entity status appears to be specified")
+        issue.evidence = [data("Entity status", actual=m.group(1), kind="match", doc_type="ADS")]
+        return issue
+    issue = Issue(29, _CAT, name, "WARNING", "Entity status not clearly specified")
+    issue.evidence = [data("Entity status", actual="not found in ADS", kind="mismatch", doc_type="ADS")]
+    return issue
 
 
 def _attorney_info(ads_text) -> Issue:
     name = "Attorney/Agent Information"
     if re.search(r"registration\s*(?:no|number)", ads_text, re.IGNORECASE):
-        return Issue(31, _CAT, name, "PASS",
-                     "Attorney/agent registration information appears present")
-    return Issue(31, _CAT, name, "INFO",
-                 "Manual review recommended for attorney/agent registration number")
+        issue = Issue(31, _CAT, name, "PASS",
+                      "Attorney/agent registration information appears present")
+        issue.evidence = [data("Attorney/agent registration", actual="present", kind="match",
+                               doc_type="ADS")]
+        return issue
+    issue = Issue(31, _CAT, name, "INFO",
+                  "Manual review recommended for attorney/agent registration number")
+    issue.evidence = [data("Attorney/agent registration", actual="not detected — manual review",
+                           kind="value", doc_type="ADS")]
+    return issue
 
 
 def _customer_numbers(qc):
@@ -118,13 +136,18 @@ def _customer_numbers(qc):
     atty = (ads.get("attorney_customer_number") or "").strip()
     if corr and atty:
         if corr == atty:
-            return Issue(73, _CAT, name, "PASS",
-                         f"Attorney and correspondence customer numbers match: {corr}")
-        return Issue(73, _CAT, name, "WARNING",
-                     f"Attorney customer number ({atty}) differs from correspondence "
-                     f"customer number ({corr})",
-                     details="These are often the same firm. Confirm the difference is "
-                             "intentional.")
+            issue = Issue(73, _CAT, name, "PASS",
+                          f"Attorney and correspondence customer numbers match: {corr}")
+            issue.evidence = [data("Customer number (both)", actual=corr, kind="match", doc_type="ADS")]
+            return issue
+        issue = Issue(73, _CAT, name, "WARNING",
+                      f"Attorney customer number ({atty}) differs from correspondence "
+                      f"customer number ({corr})",
+                      details="These are often the same firm. Confirm the difference is "
+                              "intentional.")
+        issue.evidence = [data("Correspondence customer number", actual=corr, kind="mismatch", doc_type="ADS"),
+                          data("Attorney customer number", actual=atty, kind="mismatch", doc_type="ADS")]
+        return issue
     if corr or atty:
         return Issue(73, _CAT, name, "INFO",
                      f"Only one customer number populated (correspondence="
