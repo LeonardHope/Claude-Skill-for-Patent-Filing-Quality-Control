@@ -125,8 +125,13 @@ def render(result: Result) -> str:
 
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Patent Filing QC Report</title><style>{_CSS}</style></head>
+<title>Newport IP — Patent Filing QC Report</title><style>{_CSS}</style></head>
 <body><div class="wrap">
+<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
+<span style="width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,#3b82f6,#1e40af);
+color:#fff;font-weight:800;display:inline-flex;align-items:center;justify-content:center;font-size:17px;">N</span>
+<span style="font-size:17px;font-weight:700;color:#0f1729;">Newport <span style="color:#2563eb;">IP</span></span>
+</div>
 <h1>Patent Filing QC Report</h1>
 <div class="sub">{_esc(d.get('folder'))} · {_esc(d.get('generated_at'))}</div>
 <div class="counts">{pills or '<span class="muted">No findings.</span>'}</div>

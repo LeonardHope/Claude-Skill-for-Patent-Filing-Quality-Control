@@ -3,10 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Patent Filing QC</title>
+<title>Newport IP — Patent Filing QC</title>
 <style>
-  :root { --bg:#0f1419; --panel:#171c24; --line:#262d39; --text:#e6e9ee; --muted:#8a93a3;
-          --accent:#3a4a5f; --accentTx:#dbe7ff; }
+  /* Newport IP brand palette — dark navy + professional blue accent. */
+  :root { --bg:#0a1120; --panel:#101a2e; --line:#1e2b42; --text:#e6ebf3; --muted:#8493a8;
+          --accent:#2563eb; --accentTx:#ffffff; --brandblue:#3b82f6; }
   * { box-sizing:border-box; }
   body { margin:0; font:14px/1.45 -apple-system,Segoe UI,Roboto,sans-serif; color:var(--text); background:var(--bg); }
   button { font:inherit; }
@@ -14,18 +15,18 @@
            display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
   header b { font-size:15px; } header .folder { color:var(--muted); font-size:12px; }
   .counts span { font-weight:700; padding:2px 8px; border-radius:10px; margin-left:6px; font-size:12px; }
-  .hbtn { background:#1d2430; color:var(--text); border:1px solid var(--line); border-radius:6px;
+  .hbtn { background:#18243d; color:var(--text); border:1px solid var(--line); border-radius:6px;
           padding:4px 10px; font-size:12px; cursor:pointer; }
   .hbtn:hover { border-color:var(--accent); }
   .filters { margin-left:auto; display:flex; gap:6px; align-items:center; }
-  .filters button { background:#1d2430; color:var(--text); border:1px solid var(--line);
+  .filters button { background:#18243d; color:var(--text); border:1px solid var(--line);
                     border-radius:6px; padding:3px 9px; font-size:12px; cursor:pointer; }
-  .filters button.on { background:#2a3340; border-color:var(--accent); }
+  .filters button.on { background:#20304f; border-color:var(--accent); }
   .wrap { display:grid; grid-template-columns:420px 1fr; height:calc(100vh - 49px); }
   .checks { overflow:auto; border-right:1px solid var(--line); background:var(--panel); }
   .viewer { overflow:auto; position:relative; padding:16px; }
   .cattools { display:flex; gap:8px; padding:8px 14px; border-bottom:1px solid var(--line); background:var(--panel); }
-  .cattools button { background:#1d2430; color:var(--muted); border:1px solid var(--line);
+  .cattools button { background:#18243d; color:var(--muted); border:1px solid var(--line);
                      border-radius:6px; padding:3px 9px; font-size:11px; cursor:pointer; }
   .cattools button:hover { color:var(--text); border-color:var(--accent); }
   .cat { position:sticky; top:0; z-index:1; background:var(--panel); padding:9px 14px;
@@ -44,7 +45,7 @@
   .PASS { background:#123524; color:#5ee08a; } .CRITICAL { background:#3a1418; color:#ff7a85; }
   .WARNING { background:#3a2e10; color:#ffcf66; } .INFO { background:#10283a; color:#74b9ff; }
   .cname { font-weight:600; } .cmsg { color:var(--muted); margin-top:4px; }
-  .ev { margin-top:8px; padding:7px 10px; background:#10141b; border:1px solid var(--line);
+  .ev { margin-top:8px; padding:7px 10px; background:#0c1426; border:1px solid var(--line);
         border-radius:6px; font-size:13px; cursor:pointer; }
   .ev:hover { border-color:var(--accent); }
   .ev .tag { font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
@@ -60,18 +61,26 @@
   .card h3 { margin:0 0 10px; } .card .row { display:flex; gap:10px; margin:6px 0; }
   .card .k { color:var(--muted); width:130px; flex:none; } .card code { color:#9ee6b4; }
   .hint { color:var(--muted); text-align:center; margin-top:40px; }
+  /* Newport IP wordmark */
+  .wordmark { display:inline-flex; align-items:center; gap:9px; }
+  .wm-badge { width:26px; height:26px; border-radius:7px; flex:none; color:#fff;
+              background:linear-gradient(135deg,#3b82f6,#1e40af); font-weight:800; font-size:15px;
+              display:flex; align-items:center; justify-content:center; box-shadow:0 1px 6px rgba(37,99,235,.45); }
+  .wordmark b { font-size:15px; font-weight:700; letter-spacing:.01em; }
+  .wm-ip { color:var(--brandblue); margin-left:3px; }
+  .toolname { color:var(--muted); font-size:13px; border-left:1px solid var(--line); padding-left:12px; }
   .viewtools { position:sticky; top:0; background:var(--bg); z-index:2; }
   .docbar { display:flex; gap:6px; flex-wrap:wrap; align-items:center; padding-bottom:10px; }
   .barlabel { color:var(--muted); font-size:12px; margin-right:4px; }
-  .docchip { background:#1d2430; color:var(--text); border:1px solid var(--line); border-radius:14px;
+  .docchip { background:#18243d; color:var(--text); border:1px solid var(--line); border-radius:14px;
              padding:4px 12px; font-size:12px; cursor:pointer; }
   .docchip:hover:enabled { border-color:var(--accent); }
-  .docchip.on { background:#2a3340; border-color:var(--accent); color:var(--accentTx); }
+  .docchip.on { background:#20304f; border-color:var(--accent); color:var(--accentTx); }
   .docchip:disabled { opacity:.45; cursor:default; }
   .docchip .pg { color:var(--muted); margin-left:6px; font-size:11px; }
   .pagenav { display:flex; align-items:center; gap:12px; padding-bottom:12px;
              border-bottom:1px solid var(--line); margin-bottom:12px; }
-  .pagenav button { background:#1d2430; color:var(--text); border:1px solid var(--line);
+  .pagenav button { background:#18243d; color:var(--text); border:1px solid var(--line);
                     border-radius:6px; padding:4px 12px; font-size:13px; cursor:pointer; }
   .pagenav button:disabled { opacity:.4; cursor:default; }
   .pagenav .ind { color:var(--muted); font-size:13px; }
@@ -80,9 +89,15 @@
   #landing { height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
   .land { width:540px; max-width:100%; background:var(--panel); border:1px solid var(--line);
           border-radius:14px; padding:34px 36px; text-align:center; }
-  .land .mark { font-size:13px; letter-spacing:.18em; text-transform:uppercase; color:var(--muted); }
+  .land-brand { display:inline-flex; align-items:center; gap:13px; margin-bottom:22px; }
+  .land-brand .wm-badge { width:44px; height:44px; border-radius:11px; font-size:24px; }
+  .land-brand .wm-name { font-size:22px; font-weight:700; text-align:left; line-height:1.1; }
+  .land-brand .wm-sub { font-size:12px; color:var(--muted); text-align:left; letter-spacing:.12em;
+                        text-transform:uppercase; margin-top:3px; }
   .land h1 { margin:8px 0 6px; font-size:26px; }
   .land p { color:var(--muted); margin:0 auto 22px; max-width:420px; }
+  .land-foot { margin-top:22px; font-size:11.5px; color:var(--muted); }
+  .land-foot .lock { color:var(--brandblue); }
   .open { display:inline-flex; align-items:center; gap:9px; background:var(--accent); color:var(--accentTx);
           border:none; border-radius:9px; padding:13px 26px; font-size:15px; font-weight:600; cursor:pointer; }
   .open:hover { filter:brightness(1.12); }
@@ -90,9 +105,9 @@
   .manual { margin-top:22px; padding-top:18px; border-top:1px solid var(--line); }
   .manual .lbl { font-size:12px; color:var(--muted); margin-bottom:8px; }
   .manual .grp { display:flex; gap:8px; }
-  .manual input { flex:1; background:#10141b; color:var(--text); border:1px solid var(--line);
+  .manual input { flex:1; background:#0c1426; color:var(--text); border:1px solid var(--line);
                   border-radius:7px; padding:9px 11px; font-size:13px; font-family:ui-monospace,monospace; }
-  .manual button { background:#1d2430; color:var(--text); border:1px solid var(--line); border-radius:7px;
+  .manual button { background:#18243d; color:var(--text); border:1px solid var(--line); border-radius:7px;
                    padding:9px 16px; cursor:pointer; }
   .status { margin-top:18px; min-height:20px; font-size:13px; }
   .status.err { color:#ff7a85; } .status.busy { color:var(--muted); }
@@ -108,7 +123,11 @@
 <!-- ====================== LANDING ====================== -->
 <div id="landing">
   <div class="land">
-    <div class="mark">Patent Filing QC</div>
+    <div class="land-brand">
+      <span class="wm-badge">N</span>
+      <div><div class="wm-name">Newport <span class="wm-ip">IP</span></div>
+           <div class="wm-sub">Patent Filing QC</div></div>
+    </div>
     <h1>Open the filing folder</h1>
     <p>Select the folder containing this application's filing documents. The quality
        checks run automatically and the results appear here.</p>
@@ -125,13 +144,16 @@
       </div>
     </div>
     <div class="status" id="status"></div>
+    <div class="land-foot"><span class="lock">●</span> All processing is local — documents never leave your computer.</div>
   </div>
 </div>
 
 <!-- ====================== APP ====================== -->
 <div id="app" class="hidden">
   <header>
-    <b>Patent Filing QC</b><span class="folder" id="folder"></span>
+    <span class="wordmark"><span class="wm-badge">N</span><b>Newport <span class="wm-ip">IP</span></b></span>
+    <span class="toolname">Patent Filing QC</span>
+    <span class="folder" id="folder"></span>
     <button class="hbtn" id="rerunBtn" title="Re-run the checks (after editing files)">Re-run</button>
     <button class="hbtn" id="changeBtn">Open another folder</button>
     <span class="counts" id="counts"></span>
