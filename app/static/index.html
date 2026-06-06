@@ -200,7 +200,14 @@
   .receipt .r-ico svg { width:16px; height:16px; }
   .receipt .r-main { min-width:0; flex:1; }
   .receipt .r-label { font-size:13px; font-weight:550; color:var(--text); }
-  .receipt .r-meta { font-size:11.5px; color:var(--faint); margin-top:2px; }
+  .receipt .r-val { display:inline-block; font-size:12px; font-weight:600; font-family:var(--mono);
+                    color:var(--text); background:var(--surface-3); border-radius:5px;
+                    padding:1px 8px; margin-top:4px; }
+  .receipt.match .r-val { color:var(--pass); background:var(--pass-bg); }
+  .receipt.mismatch .r-val, .receipt.missing .r-val { color:var(--critical); background:var(--critical-bg); }
+  .receipt .r-meta { font-size:11.5px; color:var(--faint); margin-top:4px; }
+  .receipt.static { cursor:default; }
+  .receipt.static:hover { border-color:var(--border); background:var(--surface); transform:none; }
   .receipt .r-go { color:var(--faint); align-self:center; flex:none; }
   .receipt:hover .r-go { color:var(--accent-2); }
   .no-evidence { color:var(--faint); font-size:12.5px; font-style:italic; }
@@ -337,6 +344,7 @@ const ICON = {
   file:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>',
   data:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v12c0 1.66 3.13 3 7 3s7-1.34 7-3V6"/><path d="M5 12c0 1.66 3.13 3 7 3s7-1.34 7-3"/></svg>',
   go:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><path d="M9 6l6 6-6 6"/></svg>',
+  list:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1.2" fill="currentColor"/><circle cx="4.5" cy="12" r="1.2" fill="currentColor"/><circle cx="4.5" cy="18" r="1.2" fill="currentColor"/></svg>',
 };
 const SEV_GLYPH = { CRITICAL:"!", WARNING:"!", INFO:"i", PASS:"✓" };
 
@@ -471,30 +479,44 @@ function showCard(ev) {
 }
 
 /* ---------- receipts ---------- */
+function evType(ev) { return (ev.locator && ev.locator.type) || "none"; }
 function evIcon(ev) {
-  const t = ev.locator && ev.locator.type;
+  const t = evType(ev);
   if (t === "xfa_field") return ICON.data;
   if (t === "pdf_page") return ICON.file;
+  if (t === "none") return ICON.list;
   return ICON.pin;
 }
 function evLabel(ev) {
   if (ev.label) return ev.label;
-  const t = ev.locator && ev.locator.type;
+  const t = evType(ev);
   if (t === "pdf_page") return `Open ${ev.doc_type}`;
   return ev.doc_type || "Evidence";
+}
+function evValue(ev) {
+  if (ev.kind === "mismatch" && ev.expected != null && ev.actual != null)
+    return `expected ${ev.expected} — found ${ev.actual}`;
+  if (ev.actual != null) return ev.actual;
+  return "";
 }
 function evMeta(ev) {
   const L = ev.locator || {};
   if (L.type === "pdf_region") return `${ev.doc_type} · page ${(L.page||0)+1}`;
   if (L.type === "pdf_page")   return `${ev.doc_type} · open document`;
   if (L.type === "xfa_field")  return `${ev.doc_type} · ${L.field_path||"form field"}`;
-  return ev.doc_type || "";
+  return ev.doc_type ? `${ev.doc_type}` : "engine finding";
+}
+function navigable(ev) {
+  const t = evType(ev);
+  if (t === "pdf_region" || t === "pdf_page" || t === "xfa_field") return true;
+  return t === "none" && ev.doc_type && viewable(ev.doc_type);   // data receipt → open its doc
 }
 function activate(ev) {
   const L = ev.locator || {};
   if (L.type === "pdf_region") renderPage(ev.doc_type, L.page||0, L.bbox);
   else if (L.type === "pdf_page") renderPage(ev.doc_type, L.page||0, null);
   else if (L.type === "xfa_field") showCard(ev);
+  else if (L.type === "none" && ev.doc_type && viewable(ev.doc_type)) renderPage(ev.doc_type, 0, null);
 }
 
 /* ---------- selection / detail ---------- */
@@ -517,16 +539,19 @@ function selectCheck(issue, targetEv) {
   const ev = $("dEvidence"); ev.innerHTML = "";
   const evs = issue.evidence || [];
   if (!evs.length) {
-    ev.innerHTML = `<div class="no-evidence">This check is a cross-document assessment — its reasoning is shown above; there is no single source location to highlight.</div>`;
+    ev.innerHTML = `<div class="no-evidence">No structured evidence for this check — the reasoning above is the receipt.</div>`;
   }
   evs.forEach(e => {
-    const b = document.createElement("button");
-    b.className = "receipt " + (e.kind || "");
+    const nav = navigable(e), val = evValue(e);
+    const b = document.createElement(nav ? "button" : "div");
+    b.className = "receipt " + (e.kind || "") + (nav ? "" : " static");
     b.innerHTML = `<span class="r-ico">${evIcon(e)}</span>
       <span class="r-main"><span class="r-label">${esc(evLabel(e))}</span>
-      <span class="r-meta">${esc(evMeta(e))}</span></span><span class="r-go">${ICON.go}</span>`;
-    b.onclick = () => { document.querySelectorAll(".receipt.active").forEach(n=>n.classList.remove("active"));
-                        b.classList.add("active"); activate(e); };
+      ${val?`<span class="r-val">${esc(val)}</span>`:""}
+      <span class="r-meta">${esc(evMeta(e))}</span></span>
+      ${nav?`<span class="r-go">${ICON.go}</span>`:""}`;
+    if (nav) b.onclick = () => { document.querySelectorAll(".receipt.active").forEach(n=>n.classList.remove("active"));
+                                 b.classList.add("active"); activate(e); };
     ev.appendChild(b);
   });
 

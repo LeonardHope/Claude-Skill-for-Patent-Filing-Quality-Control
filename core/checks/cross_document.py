@@ -10,6 +10,7 @@ import re
 
 from ..locate import locate, locate_flex
 from ..result import Issue, Evidence, Locator
+from ._ev import data
 
 _CUST_RE = re.compile(r"Customer\s*(?:Number|No\.?)[:\s]*(\d{5,6})", re.IGNORECASE)
 
@@ -376,9 +377,16 @@ def check_filing_date(qc) -> Issue:
         if m:
             issues.append(f"ADS has filing date: {m.group(1)}")
     if not issues:
-        return Issue(6, _CAT, name, "PASS",
-                     "Documents consistently indicate new filing (no conflicting dates)")
-    return Issue(6, _CAT, name, "WARNING", f"Filing date inconsistency: {'; '.join(issues)}")
+        issue = Issue(6, _CAT, name, "PASS",
+                      "Documents consistently indicate new filing (no conflicting dates)")
+        issue.evidence = [data("New-filing indication", actual="no conflicting filing dates",
+                               kind="match")]
+        return issue
+    issue = Issue(6, _CAT, name, "WARNING", f"Filing date inconsistency: {'; '.join(issues)}")
+    issue.evidence = [data(s, kind="mismatch",
+                           doc_type=("ADS" if s.startswith("ADS") else "Power of Attorney"))
+                      for s in issues]
+    return issue
 
 
 def check_inventor_count(qc) -> Issue:
@@ -394,26 +402,35 @@ def check_inventor_count(qc) -> Issue:
     decl_count = max(len(re.findall(r"(?:i|I)\s+hereby\s+declare", decl)),
                      len(re.findall(r"/[A-Z][^/\n]{2,40}/", decl)))
     if decl_count == ads_count:
-        return Issue(7, _CAT, name, "PASS",
-                     f"Same number of inventors ({ads_count}) in ADS and Declaration")
-    if decl_count == 0:
-        return Issue(7, _CAT, name, "INFO",
-                     f"ADS has {ads_count} inventor(s); could not count inventors in "
-                     f"declaration. Manual verification recommended.")
-    cont_note = ""
-    if qc._is_continuation_filing():
-        cont_note = (" Note: this is a continuation filing — if the parent's declaration "
-                     "is carried forward, inventorship may have changed in the "
-                     "continuation, in which case a new declaration is required.")
-    img = (getattr(qc, "image_only_pages", {}) or {}).get("Declaration", 0)
-    if img and decl_count + img >= ads_count:
-        return Issue(7, _CAT, name, "WARNING",
-                     f"Could not confirm count: ADS has {ads_count}, Declaration text shows "
-                     f"{decl_count} signed declaration(s) and {img} additional image-only "
-                     f"page(s) which may contain the remaining {ads_count - decl_count}.")
-    return Issue(7, _CAT, name, "CRITICAL",
-                 f"Inventor count mismatch: ADS has {ads_count}, Declaration has "
-                 f"{decl_count}." + cont_note)
+        issue = Issue(7, _CAT, name, "PASS",
+                      f"Same number of inventors ({ads_count}) in ADS and Declaration")
+    elif decl_count == 0:
+        issue = Issue(7, _CAT, name, "INFO",
+                      f"ADS has {ads_count} inventor(s); could not count inventors in "
+                      f"declaration. Manual verification recommended.")
+    else:
+        cont_note = ""
+        if qc._is_continuation_filing():
+            cont_note = (" Note: this is a continuation filing — if the parent's declaration "
+                         "is carried forward, inventorship may have changed in the "
+                         "continuation, in which case a new declaration is required.")
+        img = (getattr(qc, "image_only_pages", {}) or {}).get("Declaration", 0)
+        if img and decl_count + img >= ads_count:
+            issue = Issue(7, _CAT, name, "WARNING",
+                          f"Could not confirm count: ADS has {ads_count}, Declaration text shows "
+                          f"{decl_count} signed declaration(s) and {img} additional image-only "
+                          f"page(s) which may contain the remaining {ads_count - decl_count}.")
+        else:
+            issue = Issue(7, _CAT, name, "CRITICAL",
+                          f"Inventor count mismatch: ADS has {ads_count}, Declaration has "
+                          f"{decl_count}." + cont_note)
+    k = "match" if decl_count == ads_count else "mismatch"
+    issue.evidence = [
+        data("Inventors listed in ADS", actual=ads_count, doc_type="ADS", kind=k),
+        data("Signed declarations in Declaration", actual=decl_count,
+             doc_type="Declaration", kind=k),
+    ]
+    return issue
 
 
 def check_residency(qc) -> Issue:
@@ -426,12 +443,18 @@ def check_residency(qc) -> Issue:
         total = len(invs)
         populated = sum(1 for inv in invs if (inv.get("residency") or "").strip())
         if total > 0 and populated == total:
-            return Issue(8, _CAT, name, "PASS",
-                         f"All {total} inventors have residency information")
+            issue = Issue(8, _CAT, name, "PASS",
+                          f"All {total} inventors have residency information")
+            issue.evidence = [data("Inventors with residency populated (ADS)",
+                                   actual=f"{populated} of {total}", doc_type="ADS", kind="match")]
+            return issue
         if total > 0:
-            return Issue(8, _CAT, name, "WARNING",
-                         f"Only {populated} of {total} inventors have residency "
-                         f"populated in the ADS")
+            issue = Issue(8, _CAT, name, "WARNING",
+                          f"Only {populated} of {total} inventors have residency "
+                          f"populated in the ADS")
+            issue.evidence = [data("Inventors with residency populated (ADS)",
+                                   actual=f"{populated} of {total}", doc_type="ADS", kind="mismatch")]
+            return issue
         return Issue(8, _CAT, name, "INFO", "No inventors found in ADS XFA data")
     if getattr(qc, "ads_text", ""):
         us = len(re.findall(r"(?<!non-)US\s*Residency", qc.ads_text, re.IGNORECASE))

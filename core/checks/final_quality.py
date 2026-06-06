@@ -2,7 +2,7 @@
 import re
 
 from ..result import Issue
-from ._ev import region
+from ._ev import region, data
 
 _CAT = "Final Quality"
 _MONTHS = (r"(?:January|February|March|April|May|June|July|August|September|October|"
@@ -38,9 +38,14 @@ def _typos(qc) -> Issue:
     if tm and len(tm.group(1).strip()) < 5:
         issues.append(f"Title appears too short: '{tm.group(1).strip()}'")
     if issues:
-        return Issue(66, _CAT, name, "WARNING",
-                     f"Potential issues found: {'; '.join(issues[:3])}")
-    return Issue(66, _CAT, name, "PASS", "No obvious typos detected in critical fields")
+        issue = Issue(66, _CAT, name, "WARNING",
+                      f"Potential issues found: {'; '.join(issues[:3])}")
+        issue.evidence = [data(s, kind="mismatch", doc_type="Specification") for s in issues[:5]]
+        return issue
+    issue = Issue(66, _CAT, name, "PASS", "No obvious typos detected in critical fields")
+    issue.evidence = [data("Critical fields scanned (docket, names, title)",
+                           actual="no obvious typos", kind="match")]
+    return issue
 
 
 def _dates(qc) -> Issue:
@@ -71,10 +76,17 @@ def _dates(qc) -> Issue:
                 if int(g[2]) < 2000 or int(g[2]) > 2030:
                     issues.append(f"Date with unusual year: {' '.join(g)}")
     if issues:
-        return Issue(67, _CAT, name, "WARNING", f"Date format issues: {'; '.join(issues[:3])}")
+        issue = Issue(67, _CAT, name, "WARNING", f"Date format issues: {'; '.join(issues[:3])}")
+        issue.evidence = [data(s, kind="mismatch") for s in issues[:5]]
+        return issue
     if found:
-        return Issue(67, _CAT, name, "PASS", f"All {len(found)} dates appear properly formatted")
-    return Issue(67, _CAT, name, "PASS", "No date format issues detected")
+        issue = Issue(67, _CAT, name, "PASS", f"All {len(found)} dates appear properly formatted")
+        issue.evidence = [data("Dates examined", actual=f"{len(found)} — all properly formatted",
+                               kind="match")]
+        return issue
+    issue = Issue(67, _CAT, name, "PASS", "No date format issues detected")
+    issue.evidence = [data("Dates examined", actual="none in a recognized numeric format", kind="match")]
+    return issue
 
 
 def _long_claims(qc) -> Issue:
@@ -103,9 +115,17 @@ def _long_claims(qc) -> Issue:
         long = [(n, w) for n, w in claims if w > 200]
         if long:
             d = ", ".join(f"Claim {n} ({w} words)" for n, w in long[:5])
-            return Issue(68, _CAT, name, "WARNING", f"Unusually long claims detected: {d}")
-        return Issue(68, _CAT, name, "PASS",
-                     f"No excessively long claims detected ({len(claims)} claims checked)")
+            issue = Issue(68, _CAT, name, "WARNING", f"Unusually long claims detected: {d}")
+            issue.evidence = [data(f"Claim {n}", actual=f"{w} words", kind="mismatch",
+                                   doc_type="Specification") for n, w in long[:5]]
+            return issue
+        longest = max(claims, key=lambda c: c[1])
+        issue = Issue(68, _CAT, name, "PASS",
+                      f"No excessively long claims detected ({len(claims)} claims checked)")
+        issue.evidence = [data(f"{len(claims)} claims checked",
+                               actual=f"longest is claim {longest[0]} ({longest[1]} words, limit 200)",
+                               kind="match", doc_type="Specification")]
+        return issue
     return Issue(68, _CAT, name, "INFO", "Unable to parse individual claims for length check")
 
 
