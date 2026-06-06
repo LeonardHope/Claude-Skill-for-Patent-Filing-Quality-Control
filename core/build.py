@@ -139,10 +139,13 @@ def run(folder: str, *, generated_at: Optional[str] = None,
     return result
 
 
-# A check's category names the single document it is about. Cross-cutting
-# categories (consistency / completeness / cross-references / priority / final
-# quality / file quality / formatting) span documents and are intentionally
-# absent — those checks get no document link.
+# A check's category names the single document it is about, used to give any
+# still-receipt-less check an "Open <doc>" affordance. Per-document categories
+# map to their document; "Sequence Listing" maps to the Specification (the gate
+# check examines the spec for SEQ ID NO references). Genuinely cross-cutting
+# categories (consistency / completeness / cross-references / final quality /
+# file quality / formatting / priority) are absent — their checks carry their
+# own data receipts instead.
 _CATEGORY_DOC = {
     "Specification": "Specification",
     "Drawings": "Drawings",
@@ -151,6 +154,7 @@ _CATEGORY_DOC = {
     "Power of Attorney": "Power of Attorney",
     "ADS": "ADS",
     "IDS": "IDS",
+    "Sequence Listing": "Specification",
 }
 
 
