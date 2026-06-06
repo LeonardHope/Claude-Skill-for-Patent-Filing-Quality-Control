@@ -391,6 +391,8 @@ function setup() {
   });
   $("expandAll").onclick = () => { COLLAPSED = {}; render(); };
   $("collapseAll").onclick = () => { RESULT.issues.forEach(i => COLLAPSED[i.category||"Other"]=true); render(); };
+  // Start with every category collapsed on first load (one row per category).
+  RESULT.issues.forEach(i => { COLLAPSED[i.category || "Other"] = true; });
   renderDocBar();
   render();
 }
