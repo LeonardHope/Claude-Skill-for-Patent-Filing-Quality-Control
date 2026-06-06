@@ -194,7 +194,7 @@ def main():
     port = httpd.server_address[1]
     url = f"http://localhost:{port}"
     where = PRESELECTED or "(choose a folder in the browser)"
-    print(f"Patent Filing QC — interactive viewer\n  folder: {where}\n  {url}\n"
+    print(f"Newport IP — Patent Filing QC\n  folder: {where}\n  {url}\n"
           f"  (leave this window open while you work; close it to stop)")
     try:
         import webbrowser
