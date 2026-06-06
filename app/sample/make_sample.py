@@ -58,21 +58,54 @@ def build():
 
 
 def build_spec():
+    """A small but realistically-structured specification: title, related-
+    application/priority language, the standard section headers, numbered
+    dependent claims, figure references, and an abstract — enough for the spec /
+    claims / figure / priority checks to fire and attach receipts. Keeps the
+    'BACKGROUND' header and the '[INSERT …]' placeholder that the tests locate."""
     pdf = FPDF(unit="pt", format="letter")
     pdf.set_auto_page_break(False)
+
+    def line(x, y, text, size=11):
+        pdf.set_font("Helvetica", size=size)
+        pdf.set_xy(x, y)
+        pdf.cell(0, 14, text)
+
+    # ---- Page 1: front matter + description ----
     pdf.add_page()
-    pdf.set_font("Helvetica", size=13)
-    pdf.set_xy(72, 90)
-    pdf.cell(0, 18, TITLE)                       # title near the top (Check 2)
-    pdf.set_font("Helvetica", size=11)
-    pdf.set_xy(72, 140)
-    pdf.cell(0, 14, "BACKGROUND")
-    pdf.set_xy(72, 162)
-    pdf.cell(0, 14, "Modern systems require efficient inference.")
-    pdf.set_xy(72, 184)
-    # A leftover drafting placeholder — Check 50 should flag this and the viewer
-    # highlight exactly where it sits.
-    pdf.cell(0, 14, "[INSERT DESCRIPTION OF PRIOR ART]")
+    line(72, 90, TITLE, size=13)                              # title (Check 2)
+    line(72, 122, "CROSS-REFERENCE TO RELATED APPLICATIONS")  # Checks 63/64
+    line(72, 140, "This application claims the benefit of U.S. Provisional "
+                  "Application No. 63/000,000, filed")
+    line(72, 154, "January 5, 2025, which is incorporated herein by reference.")
+    line(72, 184, "BACKGROUND")                               # Check 18 (+ receipt)
+    line(72, 202, "Modern systems require efficient inference.")
+    line(72, 216, "[INSERT DESCRIPTION OF PRIOR ART]")        # Check 50 (+ receipt)
+    line(72, 246, "BRIEF DESCRIPTION OF THE DRAWINGS")        # Check 19 (+ receipt)
+    line(72, 264, "FIG. 1 illustrates a system overview.")    # Checks 15/70
+    line(72, 278, "FIG. 2 shows a method flow.")
+    line(72, 308, "DETAILED DESCRIPTION")                     # Check 20 (+ receipt)
+    line(72, 326, "Referring to FIG. 1, the system 100 includes a processor 110 "
+                  "configured to")
+    line(72, 340, "perform memory-efficient inference for large language models.")
+
+    # ---- Page 2: claims + abstract ----
+    pdf.add_page()
+    line(72, 90, "What is claimed is:")                       # Check 21 (+ receipt)
+    line(72, 116, "1. A method comprising: receiving input data; and processing "
+                  "the input")
+    line(72, 130, "data with a processor to produce an inference result.")
+    line(72, 152, "2. The method of claim 1, further comprising storing the "
+                  "inference result.")
+    line(72, 174, "3. The method of claim 1, wherein processing comprises "
+                  "quantized inference.")
+    line(72, 214, "ABSTRACT")                                 # Check 17 (+ receipt)
+    line(72, 232, "A method and system for memory-efficient inference for large "
+                  "language")
+    line(72, 246, "models, including a processor configured to process input "
+                  "data and produce")
+    line(72, 260, "an inference result.")
+
     out = HERE / "Specification.pdf"
     pdf.output(str(out)); print(f"wrote {out}")
 
