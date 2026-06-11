@@ -357,6 +357,7 @@ Each check produces one of these results, shown as a colored badge in the HTML r
 | **WARN** | amber | Potential issue, review recommended |
 | **INFO** | blue | Informational / manual review recommended (e.g., when extraction couldn't fully verify the check) |
 | **PASS** | green | Check passed, no action needed |
+| **N/A** | gray | Check skipped / not applicable (optional document absent or precondition unmet — e.g. no IDS, no foreign priority, non-biological application). Separate from PASS so the Pass count reflects only checks that verified something. |
 
 ## Known Limitations
 
