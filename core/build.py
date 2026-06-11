@@ -135,8 +135,23 @@ def run(folder: str, *, generated_at: Optional[str] = None,
         from .evidence import enrich as _enrich
         doc_paths = {k: v for k, v in (getattr(qc, "documents", {}) or {}).items() if v}
         _enrich(result, doc_paths)
+    _reclassify_na(result)
     _backfill_doc_links(result)
     return result
+
+
+# Engine-emitted checks that report a skipped / inapplicable state as PASS are
+# re-tagged "N/A" so they don't inflate the Pass count (migrated core checks emit
+# "N/A" directly). Kept to a tight set of unambiguous "didn't apply" phrasings.
+_NA_PHRASES = ("sequence listing checks skipped", "checks skipped",
+               "check not applicable", "— not applicable", "not applicable")
+
+
+def _reclassify_na(result: Result) -> None:
+    for issue in result.issues:
+        if issue.severity == "PASS" and any(p in (issue.message or "").lower()
+                                            for p in _NA_PHRASES):
+            issue.severity = "N/A"
 
 
 # A check's category names the single document it is about, used to give any

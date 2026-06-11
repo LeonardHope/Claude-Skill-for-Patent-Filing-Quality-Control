@@ -95,8 +95,8 @@ def _foreign(foreign) -> Issue:
                                actual=f"{len(foreign)} — {', '.join(countries)}", kind="value",
                                doc_type="ADS")]
         return issue
-    issue = Issue(65, _CAT, name, "PASS", "No foreign priority claims in ADS")
-    issue.evidence = [data("Foreign priority claims (ADS)", actual="none", kind="match")]
+    issue = Issue(65, _CAT, name, "N/A", "No foreign priority claims in ADS")
+    issue.evidence = [data("Foreign priority claims (ADS)", actual="none", kind="value")]
     return issue
 
 
@@ -136,9 +136,9 @@ def _verification_urls(raw_app):
 def _priority_app_numbers(qc, dom):
     name = "Priority Application Number Verification"
     if not dom:
-        issue = Issue(81, _CAT, name, "PASS",
+        issue = Issue(81, _CAT, name, "N/A",
                       "No domestic continuity entries — check not applicable")
-        issue.evidence = [data("Domestic continuity entries (ADS)", actual="none", kind="match")]
+        issue.evidence = [data("Domestic continuity entries (ADS)", actual="none", kind="value")]
         return [issue]
 
     ads_num_map = {}

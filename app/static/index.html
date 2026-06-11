@@ -14,9 +14,9 @@
     /* brand */
     --accent:#3b82f6; --accent-2:#60a5fa; --brandblue:#60a5fa;
     /* severity */
-    --critical:#fb7185; --warning:#fbbf24; --info:#60a5fa; --pass:#34d399;
+    --critical:#fb7185; --warning:#fbbf24; --info:#60a5fa; --pass:#34d399; --na:#94a3b8;
     --critical-bg:rgba(251,113,133,.13); --warning-bg:rgba(251,191,36,.13);
-    --info-bg:rgba(96,165,250,.13); --pass-bg:rgba(52,211,153,.13);
+    --info-bg:rgba(96,165,250,.13); --pass-bg:rgba(52,211,153,.13); --na-bg:rgba(148,163,184,.14);
     /* shape */
     --r-sm:7px; --r:10px; --r-lg:14px;
     --shadow:0 1px 2px rgba(0,0,0,.4), 0 12px 32px rgba(0,0,0,.35);
@@ -106,12 +106,14 @@
   .fchip:hover { border-color:var(--border-2); background:var(--surface-2); }
   .fchip.sev-CRITICAL { color:var(--critical); } .fchip.sev-WARNING { color:var(--warning); }
   .fchip.sev-INFO { color:var(--info); } .fchip.sev-PASS { color:var(--pass); }
+  .fchip.sev-NA { color:var(--na); }
   .fchip.on { color:var(--text); border-color:transparent; box-shadow:0 0 0 1.5px var(--accent) inset;
               background:var(--surface-3); }
   .fchip.on.sev-CRITICAL { box-shadow:0 0 0 1.5px var(--critical) inset; background:var(--critical-bg); }
   .fchip.on.sev-WARNING { box-shadow:0 0 0 1.5px var(--warning) inset; background:var(--warning-bg); }
   .fchip.on.sev-INFO { box-shadow:0 0 0 1.5px var(--info) inset; background:var(--info-bg); }
   .fchip.on.sev-PASS { box-shadow:0 0 0 1.5px var(--pass) inset; background:var(--pass-bg); }
+  .fchip.on.sev-NA { box-shadow:0 0 0 1.5px var(--na) inset; background:var(--na-bg); }
 
   .wrap { flex:1; min-height:0; display:grid; grid-template-columns:var(--leftw,30%) 6px 1fr; }
   .resizer { position:relative; cursor:col-resize; background:var(--border); transition:background .12s; }
@@ -149,6 +151,7 @@
   .item.s-WARNING { border-left-color:var(--warning); }
   .item.s-INFO { border-left-color:var(--info); }
   .item.s-PASS { border-left-color:var(--pass); }
+  .item.s-NA { border-left-color:var(--na); }
   .item .ico { margin-top:1px; flex:none; }
   .item .it-body { min-width:0; flex:1; }
   .item .it-name { font-size:13px; font-weight:600; line-height:1.35; }
@@ -162,7 +165,7 @@
   .sico { width:17px; height:17px; border-radius:50%; display:inline-flex; align-items:center;
           justify-content:center; font-size:11px; font-weight:800; color:#0a0f1c; flex:none; }
   .sico.CRITICAL { background:var(--critical); } .sico.WARNING { background:var(--warning); }
-  .sico.INFO { background:var(--info); } .sico.PASS { background:var(--pass); }
+  .sico.INFO { background:var(--info); } .sico.PASS { background:var(--pass); } .sico.NA { background:var(--na); color:#0a0f1c; }
 
   /* ===== right: detail / source ===== */
   .detail { min-height:0; display:flex; flex-direction:column; background:var(--bg); }
@@ -177,6 +180,7 @@
   .verdict.WARNING { color:var(--warning); background:var(--warning-bg); }
   .verdict.INFO { color:var(--info); background:var(--info-bg); }
   .verdict.PASS { color:var(--pass); background:var(--pass-bg); }
+  .verdict.NA { color:var(--na); background:var(--na-bg); }
   .vp-title { min-width:0; }
   .vp-title h2 { font-size:16px; }
   .vp-title .vid { font-size:11.5px; color:var(--faint); font-weight:600; }
@@ -350,7 +354,10 @@ const ICON = {
   go:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><path d="M9 6l6 6-6 6"/></svg>',
   list:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1.2" fill="currentColor"/><circle cx="4.5" cy="12" r="1.2" fill="currentColor"/><circle cx="4.5" cy="18" r="1.2" fill="currentColor"/></svg>',
 };
-const SEV_GLYPH = { CRITICAL:"!", WARNING:"!", INFO:"i", PASS:"✓" };
+const SEV_GLYPH = { CRITICAL:"!", WARNING:"!", INFO:"i", PASS:"✓", "N/A":"–" };
+const SEVERITIES = ["CRITICAL","WARNING","INFO","PASS","N/A"];
+const scls = s => s === "N/A" ? "NA" : s;                       // CSS-safe class token
+const svar = s => s === "N/A" ? "na" : s.toLowerCase();         // CSS var token
 
 /* ---------- folder selection / loading ---------- */
 function setStatus(msg, cls) { const s=$("status"); s.className="status "+(cls||""); s.innerHTML=msg; }
@@ -531,7 +538,7 @@ function selectCheck(issue, targetEv) {
   if (node) node.classList.add("sel");
 
   $("vpEmpty").classList.add("hidden"); $("vp").classList.remove("hidden");
-  $("dVerdict").className = "verdict " + issue.severity; $("dVerdict").textContent = issue.severity;
+  $("dVerdict").className = "verdict " + scls(issue.severity); $("dVerdict").textContent = issue.severity;
   $("dId").textContent = "Check " + issue.check_id + " · " + (issue.category||"");
   $("dName").textContent = issue.check_name;
   $("dMsg").textContent = issue.message || "";
@@ -585,8 +592,8 @@ function hasReceipt(issue) {
 }
 function itemEl(issue) {
   const el = document.createElement("div");
-  el.className = "item s-" + issue.severity; el.dataset.cid = issue._uid;
-  el.innerHTML = `<span class="sico ${issue.severity}">${SEV_GLYPH[issue.severity]||""}</span>
+  el.className = "item s-" + scls(issue.severity); el.dataset.cid = issue._uid;
+  el.innerHTML = `<span class="sico ${scls(issue.severity)}">${SEV_GLYPH[issue.severity]||""}</span>
     <span class="it-body"><span class="it-name"><span class="it-id">${issue.check_id}</span>${esc(issue.check_name)}</span>
     <span class="it-msg">${esc(issue.message||"")}</span></span>
     ${hasReceipt(issue)?`<span class="it-pin" title="Has a located receipt">${ICON.pin}</span>`:""}`;
@@ -605,8 +612,8 @@ function render() {
   order.forEach(cat => {
     const list = byCat[cat], collapsed = !!COLLAPSED[cat];
     const counts = {}; list.forEach(i => counts[i.severity]=(counts[i.severity]||0)+1);
-    const mini = ["CRITICAL","WARNING","INFO","PASS"].filter(s=>counts[s]).map(s =>
-      `<span class="mp" style="color:var(--${s.toLowerCase()})"><span class="dot" style="background:var(--${s.toLowerCase()})"></span>${counts[s]}</span>`).join("");
+    const mini = SEVERITIES.filter(s=>counts[s]).map(s =>
+      `<span class="mp" style="color:var(--${svar(s)})"><span class="dot" style="background:var(--${svar(s)})"></span>${counts[s]}</span>`).join("");
     const head = document.createElement("div");
     head.className = "cat" + (collapsed ? "" : " open");
     head.innerHTML = `<span class="chev"></span><span class="cname">${esc(cat)}</span><span class="cmini">${mini}</span>`;
@@ -626,11 +633,11 @@ function renderFilters() {
   const chips = [
     ["all","All checks",RESULT.issues.length,""], ["CRITICAL","Critical",counts.CRITICAL||0,"CRITICAL"],
     ["WARNING","Warning",counts.WARNING||0,"WARNING"], ["INFO","Info",counts.INFO||0,"INFO"],
-    ["PASS","Pass",counts.PASS||0,"PASS"],
+    ["PASS","Pass",counts.PASS||0,"PASS"], ["N/A","N/A",counts["N/A"]||0,"N/A"],
   ];
   chips.forEach(([k,label,n,sev]) => {
     const b = document.createElement("button");
-    b.className = "fchip" + (sev?` sev-${sev}`:"") + (k===FILTER?" on":"");
+    b.className = "fchip" + (sev?` sev-${scls(sev)}`:"") + (k===FILTER?" on":"");
     b.innerHTML = `${sev?'<span class="dot"></span>':''}${label} <span class="n">${n}</span>`;
     b.onclick = () => { FILTER=k; [...f.children].forEach(c=>c.classList.remove("on")); b.classList.add("on"); render(); };
     f.appendChild(b);

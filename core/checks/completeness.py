@@ -154,7 +154,7 @@ def check_declaration_signatures(qc) -> Issue:
 def check_assignment_signatures(qc) -> Issue:
     """Check 12 — assignment signatures present (optional document)."""
     def _missing():
-        return Issue(12, _CAT, "Assignment Signatures Present", "INFO",
+        return Issue(12, _CAT, "Assignment Signatures Present", "N/A",
                      "Assignment not found (optional document)")
     return _signature_check(qc, 12, "Assignment",
                             getattr(qc, "assignment_text", ""), "Assignment",
