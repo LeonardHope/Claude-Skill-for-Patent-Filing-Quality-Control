@@ -5464,7 +5464,7 @@ class PatentFilingQC:
             else:
                 self.report.add_issue(
                     63, "Priority Claims", "Priority Claim Consistency",
-                    Severity.PASS, "No priority claims detected in specification or ADS"
+                    Severity.N_A, "No priority claims detected in specification or ADS"
                 )
 
         # ----- Check 64: Related application references in spec -----
@@ -5504,7 +5504,7 @@ class PatentFilingQC:
         else:
             self.report.add_issue(
                 64, "Priority Claims", "Related Application References",
-                Severity.PASS, "No related applications detected"
+                Severity.N_A, "No related applications detected"
             )
 
         # ----- Check 65: Foreign priority documents -----
