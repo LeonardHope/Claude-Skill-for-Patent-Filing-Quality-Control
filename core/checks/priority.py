@@ -59,7 +59,7 @@ def _consistency(dom, foreign, spec_priority) -> Issue:
                      "Priority language detected in specification but no priority entries "
                      "in ADS. Verify the ADS continuity/foreign-priority sections are "
                      "filled in correctly.")
-    return Issue(63, _CAT, name, "PASS",
+    return Issue(63, _CAT, name, "N/A",
                  "No priority claims detected in specification or ADS")
 
 
@@ -80,7 +80,7 @@ def _related(qc, dom, foreign, spec_priority, spec, sp=None) -> Issue:
                      "Priority claims present but no Cross-Reference / Related Applications "
                      "section found in specification. Verify the spec includes proper "
                      "priority/continuation language near the start.")
-    return Issue(64, _CAT, name, "PASS", "No related applications detected")
+    return Issue(64, _CAT, name, "N/A", "No related applications detected")
 
 
 def _foreign(foreign) -> Issue:
