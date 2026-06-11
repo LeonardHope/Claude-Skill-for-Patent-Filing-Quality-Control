@@ -91,6 +91,7 @@ class Severity(Enum):
     WARNING = "WARNING"
     INFO = "INFO"
     PASS = "PASS"
+    N_A = "N/A"          # check skipped / not applicable (optional doc absent, precondition unmet)
 
 
 @dataclass
@@ -2706,7 +2707,7 @@ class PatentFilingQC:
         else:
             self.report.add_issue(
                 12, "Document Completeness", "Assignment Signatures Present",
-                Severity.INFO, "Assignment not found (optional document)"
+                Severity.N_A, "Assignment not found (optional document)"
             )
     
     def check_specification(self):
@@ -3989,7 +3990,7 @@ class PatentFilingQC:
             for i in range(36, 41):
                 self.report.add_issue(
                     i, "Assignment", f"Check {i}",
-                    Severity.INFO, "Assignment not found (optional document)"
+                    Severity.N_A, "Assignment not found (optional document)"
                 )
             return
         
@@ -4249,7 +4250,7 @@ class PatentFilingQC:
             for i in (41, 42, 44):
                 self.report.add_issue(
                     i, "Power of Attorney", f"Check {i}",
-                    Severity.INFO, "Power of Attorney not found (may not be required)"
+                    Severity.N_A, "Power of Attorney not found (may not be required)"
                 )
             return
         
@@ -4365,7 +4366,7 @@ class PatentFilingQC:
         if not ids_path and not wa_path:
             self.report.add_issue(
                 76, "IDS", "IDS Documents Present",
-                Severity.PASS,
+                Severity.N_A,
                 "No IDS documents present — IDS is optional under MPEP 609. "
                 "Skipping IDS-specific checks."
             )
@@ -5524,7 +5525,7 @@ class PatentFilingQC:
         else:
             self.report.add_issue(
                 65, "Priority Claims", "Foreign Priority Documents",
-                Severity.PASS, "No foreign priority claims in ADS"
+                Severity.N_A, "No foreign priority claims in ADS"
             )
 
         # ----- Check 81: Priority application number verification -----
@@ -5698,7 +5699,7 @@ class PatentFilingQC:
         if not ads_dom_entries:
             self.report.add_issue(
                 81, "Priority Claims", "Priority Application Number Verification",
-                Severity.PASS, "No domestic continuity entries — check not applicable"
+                Severity.N_A, "No domestic continuity entries — check not applicable"
             )
 
         elif odp_api_key:
@@ -6204,7 +6205,7 @@ class PatentFilingQC:
         if not self._is_biological_application():
             self.report.add_issue(
                 82, CATEGORY, "Sequence Listing (Gate Check)",
-                Severity.PASS,
+                Severity.N_A,
                 "No biological sequence indicators detected — "
                 "sequence listing checks skipped"
             )
@@ -6653,6 +6654,7 @@ class PatentFilingQC:
                 Severity.WARNING: 'warning',
                 Severity.INFO: 'info',
                 Severity.PASS: 'pass',
+                Severity.N_A: 'na',
             }.get(sev, 'info')
 
         def severity_label(sev: 'Severity') -> str:
@@ -6661,12 +6663,14 @@ class PatentFilingQC:
                 Severity.WARNING: 'WARN',
                 Severity.INFO: 'INFO',
                 Severity.PASS: 'PASS',
+                Severity.N_A: 'N/A',
             }.get(sev, 'INFO')
 
         critical_issues = [i for i in self.report.issues if i.severity == Severity.CRITICAL]
         warnings = [i for i in self.report.issues if i.severity == Severity.WARNING]
         info_issues = [i for i in self.report.issues if i.severity == Severity.INFO]
         passed_issues = [i for i in self.report.issues if i.severity == Severity.PASS]
+        na_issues = [i for i in self.report.issues if i.severity == Severity.N_A]
 
         def group_by_category(issues):
             groups: Dict[str, List] = {}
@@ -6697,6 +6701,8 @@ class PatentFilingQC:
                 --c-info-bg:  #eff6ff;
                 --c-pass:     #166534;
                 --c-pass-bg:  #f0fdf4;
+                --c-na:       #4b5563;
+                --c-na-bg:    #f3f4f6;
                 --c-text:     #1f2937;
                 --c-muted:    #6b7280;
                 --c-border:   #e5e7eb;
@@ -6745,6 +6751,8 @@ class PatentFilingQC:
             .stat.info     .num { color: var(--c-info); }
             .stat.pass     { background: var(--c-pass-bg);     border-color: #bbf7d0; }
             .stat.pass     .num { color: var(--c-pass); }
+            .stat.na       { background: var(--c-na-bg);       border-color: #e5e7eb; }
+            .stat.na       .num { color: var(--c-na); }
             /* Stat cards are <a> elements — make them look clickable */
             a.stat { text-decoration: none; color: inherit; display: block;
                      transition: transform 0.1s ease, box-shadow 0.1s ease; cursor: pointer; }
@@ -6784,6 +6792,7 @@ class PatentFilingQC:
             .issue.warning  { border-left-color: var(--c-warn); }
             .issue.info     { border-left-color: var(--c-info); }
             .issue.pass     { border-left-color: var(--c-pass); }
+            .issue.na       { border-left-color: var(--c-na); }
 
             .issue-head { display: flex; align-items: baseline; gap: 10px;
                           flex-wrap: wrap; }
@@ -6796,6 +6805,7 @@ class PatentFilingQC:
             .badge.warning  { background: var(--c-warn);     color: #fff; }
             .badge.info     { background: var(--c-info);     color: #fff; }
             .badge.pass     { background: var(--c-pass);     color: #fff; }
+            .badge.na       { background: var(--c-na);       color: #fff; }
 
             .issue-id { color: var(--c-muted); font-variant-numeric: tabular-nums;
                         font-size: 12px; min-width: 28px; }
@@ -6861,6 +6871,7 @@ class PatentFilingQC:
                 ('warning',  len(warnings),        'Warnings',      'sec-warnings'),
                 ('info',     len(info_issues),     'Manual Review', 'sec-info'),
                 ('pass',     len(passed_issues),   'Passed',        'sec-passed'),
+                ('na',       len(na_issues),       'Not Applicable','sec-na'),
             ]:
                 # Make the card a link only if the section exists (has issues).
                 if count > 0:
@@ -6910,6 +6921,7 @@ class PatentFilingQC:
             write_issue_section("Warnings — Should Review", warnings, "sec-warnings")
             write_issue_section("Info / Manual Review", info_issues, "sec-info")
             write_issue_section("Passed Checks", passed_issues, "sec-passed")
+            write_issue_section("Not Applicable / Skipped", na_issues, "sec-na")
 
             # ADS Data Summary (when XFA data is available)
             if self.ads_data:
@@ -7042,6 +7054,7 @@ def main():
     print(f"⚠️  Warnings:        {qc.report.get_warning_count()}")
     print(f"🚨 Critical Issues: {qc.report.get_critical_count()}")
     print(f"ℹ️  Info/Manual:     {sum(1 for i in qc.report.issues if i.severity == Severity.INFO)}")
+    print(f"➖ Not Applicable:  {sum(1 for i in qc.report.issues if i.severity == Severity.N_A)}")
     print()
 
     # List critical issues in console (to match markdown report)
