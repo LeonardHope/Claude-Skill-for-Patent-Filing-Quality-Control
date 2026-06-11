@@ -27,11 +27,11 @@ def check_ids(qc):
     ids_text = getattr(qc, "ids_text", "") or ""
 
     if not ids_path and not wa_path:
-        issue = Issue(76, _CAT, "IDS Documents Present", "PASS",
+        issue = Issue(76, _CAT, "IDS Documents Present", "N/A",
                       "No IDS documents present — IDS is optional under MPEP 609. "
                       "Skipping IDS-specific checks.")
         issue.evidence = [data("IDS documents", actual="none (optional under MPEP 609)",
-                               kind="match")]
+                               kind="value")]
         return [issue]
 
     out = []

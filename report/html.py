@@ -9,16 +9,20 @@ from typing import List
 
 from core.result import Result
 
-_SEV_ORDER = ["CRITICAL", "WARNING", "INFO", "PASS"]
+_SEV_ORDER = ["CRITICAL", "WARNING", "INFO", "PASS", "N/A"]
 _SEV_LABEL = {
     "CRITICAL": "Critical — Must Fix Before Filing",
     "WARNING": "Warnings — Should Review",
     "INFO": "Informational / Manual Review",
     "PASS": "Passed",
+    "N/A": "Not Applicable / Skipped",
 }
+# "N/A" -> CSS-safe class token (a "/" is invalid in a class name)
+def _sevcls(s):
+    return "NA" if s == "N/A" else s
 
 _CSS = """
-:root{--crit:#c0392b;--warn:#b7791f;--info:#2c6fbb;--pass:#1e7a46;--line:#e3e6ea;--muted:#6b7280;}
+:root{--crit:#c0392b;--warn:#b7791f;--info:#2c6fbb;--pass:#1e7a46;--na:#6b7280;--line:#e3e6ea;--muted:#6b7280;}
 *{box-sizing:border-box;}
 body{font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1f29;margin:0;background:#fff;}
 .wrap{max-width:920px;margin:0 auto;padding:28px 22px 60px;}
@@ -26,14 +30,14 @@ h1{font-size:22px;margin:0 0 2px;} .sub{color:var(--muted);font-size:13px;margin
 .counts{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0 26px;}
 .pill{padding:6px 12px;border-radius:18px;font-weight:700;font-size:13px;color:#fff;}
 .pill.CRITICAL{background:var(--crit);} .pill.WARNING{background:var(--warn);}
-.pill.INFO{background:var(--info);} .pill.PASS{background:var(--pass);}
+.pill.INFO{background:var(--info);} .pill.PASS{background:var(--pass);} .pill.NA{background:var(--na);}
 h2{font-size:16px;margin:26px 0 10px;padding-bottom:6px;border-bottom:2px solid var(--line);}
 table{border-collapse:collapse;width:100%;font-size:13px;margin:6px 0 14px;}
 th,td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:top;}
 th{color:var(--muted);font-weight:600;}
 .issue{border:1px solid var(--line);border-left-width:4px;border-radius:6px;padding:10px 13px;margin:8px 0;}
 .issue.CRITICAL{border-left-color:var(--crit);} .issue.WARNING{border-left-color:var(--warn);}
-.issue.INFO{border-left-color:var(--info);} .issue.PASS{border-left-color:var(--pass);}
+.issue.INFO{border-left-color:var(--info);} .issue.PASS{border-left-color:var(--pass);} .issue.NA{border-left-color:var(--na);}
 .issue .id{color:var(--muted);font-weight:600;} .issue .name{font-weight:700;}
 .issue .msg{margin-top:3px;} .issue .details{color:var(--muted);white-space:pre-wrap;margin-top:5px;font-size:12.5px;}
 .receipts{margin-top:7px;padding-top:6px;border-top:1px dashed var(--line);}
@@ -67,7 +71,7 @@ def _receipt_line(ev) -> str:
 
 
 def _issue_html(issue: dict) -> str:
-    parts = [f'<div class="issue {issue["severity"]}">',
+    parts = [f'<div class="issue {_sevcls(issue["severity"])}">',
              f'<div><span class="id">{issue["check_id"]}.</span> '
              f'<span class="name">{_esc(issue["check_name"])}</span> '
              f'<span class="muted">({_esc(issue["category"])})</span></div>',
@@ -112,7 +116,7 @@ def render(result: Result) -> str:
     issues = d.get("issues", [])
     counts = {s: sum(1 for i in issues if i["severity"] == s) for s in _SEV_ORDER}
 
-    pills = "".join(f'<span class="pill {s}">{counts[s]} {s.title()}</span>'
+    pills = "".join(f'<span class="pill {_sevcls(s)}">{counts[s]} {s.title()}</span>'
                     for s in _SEV_ORDER if counts[s])
 
     sections = []

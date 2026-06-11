@@ -17,7 +17,7 @@ _IDS = (42, 44)
 def check_poa(qc):
     text = getattr(qc, "poa_text", "") or ""
     if not text:
-        return [Issue(i, _CAT, f"Check {i}", "INFO",
+        return [Issue(i, _CAT, f"Check {i}", "N/A",
                       "Power of Attorney not found (may not be required)") for i in _IDS]
     return [_registration_numbers(text), _signed(qc, text)]
 

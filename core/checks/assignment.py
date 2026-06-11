@@ -16,7 +16,7 @@ _IDS = (36, 37, 38, 40)
 def check_assignment(qc):
     text = getattr(qc, "assignment_text", "") or ""
     if not text:
-        return [Issue(i, _CAT, f"Check {i}", "INFO",
+        return [Issue(i, _CAT, f"Check {i}", "N/A",
                       "Assignment not found (optional document)") for i in _IDS]
     return [_assignors(qc, text), _assignee(text), _references_app(qc, text),
             _rights(text)]

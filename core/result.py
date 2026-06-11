@@ -59,7 +59,9 @@ class Issue:
     check_id: int
     category: str
     check_name: str
-    severity: str                           # CRITICAL | WARNING | INFO | PASS
+    severity: str                           # CRITICAL | WARNING | INFO | PASS | N/A
+                                            # N/A = check skipped / not applicable
+                                            # (optional doc absent, precondition unmet)
     message: str
     details: str = ""                       # legacy free-text fallback
     evidence: List[Evidence] = field(default_factory=list)
