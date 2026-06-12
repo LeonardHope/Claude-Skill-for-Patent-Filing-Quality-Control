@@ -211,7 +211,7 @@ class PatentFilingQC:
             import pdfplumber
             with pdfplumber.open(pdf_path) as pdf:
                 for page in pdf.pages:
-                    page_text = page.extract_text() or ""
+                    page_text = self._extract_page_text_corrected(page)
                     if page_text:
                         text += page_text + "\n"
                     elif hasattr(page, 'images') and page.images:
@@ -269,6 +269,73 @@ class PatentFilingQC:
         except Exception as e:
             self._document_read_failure(doc_type, pdf_path, str(e))
             return ""
+
+    @staticmethod
+    def _extract_page_text_corrected(page) -> str:
+        """Extract text from a pdfplumber page, correcting reversed vertical text.
+
+        Patent drawing tools (Visio, CAD software) store figure labels as 90°-
+        rotated vertical text with a character matrix of (0, b, c, 0, x, y) where
+        b > 0 and c < 0. Letters are stacked bottom-to-top (increasing y in PDF
+        space). pdfplumber reads characters top-to-bottom, reversing every such
+        word: "COMMAND" → "DNAMMOC", "AND" → "DNA", "FIG. 6A" → "A6.GIF".
+
+        Fix: detect chars with the rotated matrix, group them by x-position into
+        vertical runs, sort each run bottom-to-top (increasing y) to recover the
+        correct reading order, then replace the reversed tokens in the extracted
+        text with the corrected forms.
+        """
+        chars = page.chars
+        if not chars:
+            return ""
+
+        # Identify chars with 90° CCW rotation: matrix (0, +b, -c, 0, x, y).
+        rotated = [
+            c for c in chars
+            if abs(c.get('matrix', (1, 0, 0, 1, 0, 0))[0]) < 0.01
+            and abs(c.get('matrix', (1, 0, 0, 1, 0, 0))[3]) < 0.01
+            and c.get('matrix', (1, 0, 0, 1, 0, 0))[1] > 0
+            and c.get('matrix', (1, 0, 0, 1, 0, 0))[2] < 0
+        ]
+
+        if not rotated:
+            return page.extract_text() or ""
+
+        # Group rotated chars into vertical runs by x-position (±2pt tolerance).
+        rotated.sort(key=lambda c: c['x0'])
+        runs: List[List] = []
+        for ch in rotated:
+            if runs and abs(ch['x0'] - runs[-1][-1]['x0']) < 2.0:
+                runs[-1].append(ch)
+            else:
+                runs.append([ch])
+
+        # Start with pdfplumber's standard extraction (reversed tokens included).
+        text = page.extract_text() or ""
+
+        # For each vertical run, recover correct reading order (increasing y),
+        # split on y-gaps > 2× average char height, then replace reversed tokens.
+        for run in runs:
+            run.sort(key=lambda c: c['y0'])  # bottom-to-top = correct order
+            avg_h = sum(abs(c.get('height', 8)) for c in run) / len(run)
+
+            # Split run into words at y-gaps larger than 2× average char height.
+            words: List[List] = [[run[0]]]
+            for ch in run[1:]:
+                if ch['y0'] - words[-1][-1]['y0'] > avg_h * 2:
+                    words.append([ch])
+                else:
+                    words[-1].append(ch)
+
+            for word_chars in words:
+                correct = ''.join(c['text'] for c in word_chars).strip()
+                reversed_form = correct[::-1]
+                # Skip single chars — reversing them is a no-op and risks
+                # replacing unrelated single letters in the extracted text.
+                if len(correct) >= 2 and reversed_form in text:
+                    text = text.replace(reversed_form, correct, 1)
+
+        return text
 
     def _ocr_pdf_text(self, pdf_path: Path, doc_type: str) -> Optional[str]:
         """OCR every page of a PDF into a single text string. Returns the OCR
