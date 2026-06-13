@@ -2076,6 +2076,7 @@ class PatentFilingQC:
         self.check_file_quality()
         self.check_cross_references()
         self.check_priority()
+        self.check_caf()
         self.check_final_quality()
     
     def _check_unrecognized_files(self):
@@ -6039,6 +6040,255 @@ class PatentFilingQC:
                     "Manual verification links:"
                 ),
                 '\n\n'.join(_url_lines) if _url_lines else None
+            )
+
+    def check_caf(self):
+        """Check 86: Continuing Application Fee (CAF) exposure under 37 C.F.R. § 1.17(w).
+
+        Screens for applications whose Earliest Benefit Date (EBD) — the earliest
+        filing date claimed under 35 U.S.C. §§ 120, 121, 365(c), or 386(c) — falls
+        more than 6 or 9 years before the expected filing date (today).
+
+        Provisional priority under § 119(e) and foreign priority under § 119(a)
+        are NOT the EBD for CAF purposes and are excluded.
+        """
+        import datetime
+
+        CATEGORY = "Priority Claims"
+        CHECK = 86
+        NAME = "Continuing Application Fee (CAF) Exposure"
+
+        # Need domestic continuity entries with dates
+        dom_entries = (self.ads_data.get('domestic_continuity_entries')
+                       if self.ads_data else None) or []
+
+        if not dom_entries:
+            # No domestic benefit claim — CAF cannot apply
+            self.report.add_issue(
+                CHECK, CATEGORY, NAME,
+                Severity.PASS,
+                "No domestic benefit claims in ADS — CAF under 37 C.F.R. § 1.17(w) "
+                "does not apply"
+            )
+            return
+
+        def _parse_date(s):
+            """Parse M/D/YYYY or YYYY-MM-DD; return datetime.date or None."""
+            if not s:
+                return None
+            s = s.strip()
+            m = re.match(r'^(\d{4})-(\d{2})-(\d{2})$', s)
+            if m:
+                try:
+                    return datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                except ValueError:
+                    return None
+            m = re.match(r'^(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})$', s)
+            if m:
+                try:
+                    return datetime.date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+                except ValueError:
+                    return None
+            return None
+
+        # Identify the EBD: earliest parseable date from domestic entries,
+        # skipping provisional-only entries (continuation_type contains "PROV").
+        ebd = None
+        ebd_raw = None
+        ebd_app = None
+        unparseable = []
+        for entry in dom_entries:
+            ctype = (entry.get('continuation_type') or '').upper()
+            if 'PROV' in ctype:
+                # § 119(e) provisional — not the EBD for CAF purposes
+                continue
+            raw_date = entry.get('date') or ''
+            d = _parse_date(raw_date)
+            if d is None:
+                if raw_date:
+                    unparseable.append(raw_date)
+                continue
+            if ebd is None or d < ebd:
+                ebd = d
+                ebd_raw = raw_date
+                ebd_app = entry.get('application_number') or entry.get('prior_application_number') or '?'
+
+        if ebd is None:
+            msg = "Could not determine Earliest Benefit Date (EBD) from ADS continuity entries"
+            detail = None
+            if unparseable:
+                detail = ("Unreadable date(s): " + "; ".join(unparseable)
+                          + "\nManually verify whether a Continuing Application Fee (CAF) "
+                          "under 37 C.F.R. § 1.17(w) is due.")
+            self.report.add_issue(
+                CHECK, CATEGORY, NAME,
+                Severity.INFO,
+                msg + " — manual CAF review required",
+                detail
+            )
+            return
+
+        today = datetime.date.today()
+
+        # Years elapsed (fractional, for threshold comparison)
+        days_elapsed = (today - ebd).days
+        years_elapsed = days_elapsed / 365.25
+
+        # Compute the exact 6- and 9-year anniversary dates
+        def _anniversary(base, years):
+            try:
+                return base.replace(year=base.year + years)
+            except ValueError:
+                # Feb 29 edge case — use Mar 1
+                return datetime.date(base.year + years, 3, 1)
+
+        ann6 = _anniversary(ebd, 6)
+        ann9 = _anniversary(ebd, 9)
+
+        base_msg = (
+            f"EBD: {ebd_raw} (application {ebd_app}); "
+            f"today: {today.isoformat()}; "
+            f"elapsed: {years_elapsed:.1f} years"
+        )
+
+        days_to_ann6 = (ann6 - today).days  # negative if already past
+
+        if today >= ann9:
+            # Past 9-year threshold — second-tier CAF due; omit 6-year date.
+            # The only grace available under 37 C.F.R. § 1.7 is if the exact
+            # anniversary date fell on a weekend or D.C. federal holiday, in
+            # which case the deadline shifts to the next business day.
+            # Compute the next-business-day shift for weekend anniversaries
+            # (we can detect weekends exactly; federal holidays require manual check).
+            _wd = ann9.weekday()  # 0=Mon … 5=Sat, 6=Sun
+            if _wd == 5:   # Saturday → next Monday is +2
+                _shifted = ann9 + datetime.timedelta(days=2)
+                _weekend_note = (
+                    f"\n\nNOTE: The 9-year anniversary ({ann9.isoformat()}) fell on a "
+                    f"Saturday. Under 37 C.F.R. § 1.7, the threshold shifts to the "
+                    f"next business day ({_shifted.isoformat()}). If today is on or "
+                    f"before that date and no intervening federal holiday applies, the "
+                    f"second-tier CAF threshold has not yet been crossed."
+                )
+            elif _wd == 6:  # Sunday → next Monday is +1
+                _shifted = ann9 + datetime.timedelta(days=1)
+                _weekend_note = (
+                    f"\n\nNOTE: The 9-year anniversary ({ann9.isoformat()}) fell on a "
+                    f"Sunday. Under 37 C.F.R. § 1.7, the threshold shifts to the "
+                    f"next business day ({_shifted.isoformat()}). If today is on or "
+                    f"before that date and no intervening federal holiday applies, the "
+                    f"second-tier CAF threshold has not yet been crossed."
+                )
+            else:
+                _weekend_note = (
+                    f"\n\nNOTE: The 9-year anniversary ({ann9.isoformat()}) fell on a "
+                    f"weekday. No automatic weekend/holiday extension applies unless "
+                    f"that date was a D.C. federal holiday — verify manually if in doubt."
+                )
+            detail = (
+                f"{base_msg}\n\n"
+                f"The application's EBD is more than 9 years before the expected "
+                f"filing date. Both tiers of the Continuing Application Fee (CAF) "
+                f"under 37 C.F.R. § 1.17(w) are due at filing. "
+                f"9-year CAF threshold: {ann9.isoformat()}. "
+                f"Verify the applicable fee amounts on the current USPTO fee schedule "
+                f"before filing."
+                + _weekend_note
+            )
+            self.report.add_issue(
+                CHECK, CATEGORY, NAME,
+                Severity.CRITICAL,
+                f"EBD is more than 9 years ago — second-tier Continuing Application "
+                f"Fee (CAF) due at filing under 37 C.F.R. § 1.17(w)",
+                detail
+            )
+
+        elif today >= ann6:
+            # Past 6-year but not yet 9-year — first-tier CAF due
+            detail = (
+                f"{base_msg}\n\n"
+                f"The application's EBD is more than 6 years before the expected "
+                f"filing date. The first-tier Continuing Application Fee (CAF) "
+                f"under 37 C.F.R. § 1.17(w) is due at filing. "
+                f"6-year CAF threshold: {ann6.isoformat()}. "
+                f"The second-tier CAF will also apply if the actual filing date is "
+                f"more than 9 years after the EBD "
+                f"(9-year threshold: {ann9.isoformat()}). "
+                f"Verify the applicable fee amounts on the current USPTO fee schedule "
+                f"before filing."
+            )
+            self.report.add_issue(
+                CHECK, CATEGORY, NAME,
+                Severity.CRITICAL,
+                f"EBD is more than 6 years ago — first-tier Continuing Application "
+                f"Fee (CAF) due at filing under 37 C.F.R. § 1.17(w)",
+                detail
+            )
+
+        elif days_to_ann6 <= 31:
+            # Within 31 days of the 6-year threshold — approaching first-tier CAF.
+            # Compute the effective threshold accounting for weekends (37 C.F.R. § 1.7).
+            _wd6 = ann6.weekday()  # 0=Mon … 5=Sat, 6=Sun
+            if _wd6 == 5:
+                _eff6 = ann6 + datetime.timedelta(days=2)
+                _weekend_note6 = (
+                    f"\n\nNOTE: The 6-year anniversary ({ann6.isoformat()}) falls on a "
+                    f"Saturday. Under 37 C.F.R. § 1.7, the effective threshold shifts "
+                    f"to the following Monday ({_eff6.isoformat()}). Filing before that "
+                    f"date avoids the first-tier CAF, provided no intervening D.C. "
+                    f"federal holiday pushes the deadline later."
+                )
+            elif _wd6 == 6:
+                _eff6 = ann6 + datetime.timedelta(days=1)
+                _weekend_note6 = (
+                    f"\n\nNOTE: The 6-year anniversary ({ann6.isoformat()}) falls on a "
+                    f"Sunday. Under 37 C.F.R. § 1.7, the effective threshold shifts "
+                    f"to the following Monday ({_eff6.isoformat()}). Filing before that "
+                    f"date avoids the first-tier CAF, provided no intervening D.C. "
+                    f"federal holiday pushes the deadline later."
+                )
+            else:
+                _eff6 = ann6
+                _weekend_note6 = (
+                    f"\n\nNOTE: The 6-year anniversary ({ann6.isoformat()}) falls on a "
+                    f"weekday. No automatic weekend extension applies. Verify whether "
+                    f"that date is a D.C. federal holiday; if so, the effective "
+                    f"threshold shifts to the next business day under 37 C.F.R. § 1.7."
+                )
+            detail = (
+                f"{base_msg}\n\n"
+                f"The 6-year CAF threshold under 37 C.F.R. § 1.17(w) is "
+                f"{days_to_ann6} day(s) away ({ann6.isoformat()}). "
+                f"If the actual filing date is on or after the effective threshold "
+                f"date ({_eff6.isoformat()}), the first-tier Continuing Application "
+                f"Fee (CAF) will be due. "
+                f"9-year CAF threshold: {ann9.isoformat()}."
+                + _weekend_note6
+            )
+            self.report.add_issue(
+                CHECK, CATEGORY, NAME,
+                Severity.WARNING,
+                f"6-year CAF threshold is {days_to_ann6} day(s) away "
+                f"({ann6.isoformat()}) — first-tier Continuing Application Fee "
+                f"(CAF) under 37 C.F.R. § 1.17(w) will be due if filing is on "
+                f"or after that date",
+                detail
+            )
+
+        else:
+            # More than 31 days before the 6-year threshold — no CAF exposure yet
+            detail = (
+                f"{base_msg}\n"
+                f"6-year CAF threshold (37 C.F.R. § 1.17(w)): {ann6.isoformat()} "
+                f"({days_to_ann6} days away)\n"
+                f"9-year CAF threshold (37 C.F.R. § 1.17(w)): {ann9.isoformat()}"
+            )
+            self.report.add_issue(
+                CHECK, CATEGORY, NAME,
+                Severity.PASS,
+                f"EBD is {years_elapsed:.1f} years ago — no CAF threshold crossed "
+                f"as of today ({today.isoformat()})",
+                detail
             )
 
     def check_final_quality(self):
