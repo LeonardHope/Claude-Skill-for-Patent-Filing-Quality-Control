@@ -170,6 +170,7 @@ _CATEGORY_DOC = {
     "ADS": "ADS",
     "IDS": "IDS",
     "Sequence Listing": "Specification",
+    "Priority Claims": "ADS",   # e.g. Check 86 (CAF) reads the ADS continuity dates
 }
 
 
