@@ -10,7 +10,10 @@ browser; use File → Print → Save as PDF for a paper copy.
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 import urllib.error
@@ -284,6 +287,38 @@ class PatentFilingQC:
             self._document_read_failure(doc_type, pdf_path, f"OCR failed: {str(ocr_error)}")
             return None
 
+    def _ocr_via_cli(self, pdf_path: Path) -> str:
+        """Higher-quality OCR fallback using pdftoppm + tesseract CLI directly.
+        Used when pdf2image/pytesseract returns too little text to classify a
+        file, or when OCR_AVAILABLE is False but the CLI tools are on PATH.
+        Returns the combined OCR text, or '' on any error."""
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            result = subprocess.run(
+                ['pdftoppm', '-r', '300', '-png', str(pdf_path),
+                 str(tmp / 'page')],
+                capture_output=True, timeout=120
+            )
+            if result.returncode != 0:
+                return ''
+            pages = sorted(tmp.glob('page*.png'))
+            if not pages:
+                return ''
+            text_parts = []
+            for pg in pages:
+                r = subprocess.run(
+                    ['tesseract', str(pg), 'stdout', '-l', 'eng'],
+                    capture_output=True, text=True, encoding='utf-8',
+                    errors='replace', timeout=60
+                )
+                if r.returncode == 0 and r.stdout.strip():
+                    text_parts.append(r.stdout)
+            return '\n'.join(text_parts)
+        except Exception:
+            return ''
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def _surname_present(self, surname_norm: str, norm_text: str) -> bool:
         """Whether a normalized surname appears in normalized document text.
 
@@ -298,6 +333,38 @@ class PatentFilingQC:
             return re.search(r'\b' + re.escape(surname_norm) + r'\b',
                              norm_text) is not None
         return surname_norm in norm_text
+
+    def _extract_abstract_from_docx(self, path: Path) -> Optional[str]:
+        """Extract the abstract body text directly from .docx XML, bypassing
+        the page-header/footer noise that text-extraction pipelines splice in.
+        Returns the abstract body as a single string, or None on failure."""
+        import zipfile
+        try:
+            with zipfile.ZipFile(path) as z:
+                xml = z.read('word/document.xml')
+            ns = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+            root = ET.fromstring(xml)
+            paras = []
+            for p in root.iter(f'{ns}p'):
+                runs = ''.join((r.text or '') for r in p.iter(f'{ns}t'))
+                paras.append(runs)
+            # Find the ABSTRACT heading then collect body paragraphs until
+            # the next all-caps short heading (another section).
+            for i, p in enumerate(paras):
+                if p.strip().upper() == 'ABSTRACT':
+                    body = []
+                    for j in range(i + 1, len(paras)):
+                        line = paras[j].strip()
+                        if not line:
+                            continue
+                        if line.upper() == line and len(line) < 80:
+                            break  # next section heading
+                        body.append(line)
+                    if body:
+                        return ' '.join(body)
+            return None
+        except Exception:
+            return None
 
     def _count_ads_inventors_present(self, text: str) -> int:
         """How many ADS inventors are findable in `text`, using the same
@@ -1189,6 +1256,16 @@ class PatentFilingQC:
         for path in all_files:
             classifications = self._classify_file(path)
             real = [(t, c) for t, c in classifications if t != 'Unknown']
+            if not real and path.suffix.lower() == '.pdf':
+                # Primary OCR returned too little text to classify — retry with
+                # the higher-quality pdftoppm + tesseract CLI pipeline before
+                # giving up and marking the file as unrecognized.
+                cli_text = self._ocr_via_cli(path)
+                if cli_text and len(cli_text.strip()) > 100:
+                    classifications = self._classify_text(cli_text)
+                    real = [(t, c) for t, c in classifications if t != 'Unknown']
+                    if real:
+                        print(f"  ℹ️  Reclassified via CLI OCR: {path.name}")
             if not real:
                 self.unrecognized_files.append(path)
                 print(f"  ❓ Unrecognized file (low confidence): {path.name}")
@@ -3130,57 +3207,82 @@ class PatentFilingQC:
             )
         
         # Check 17: Abstract present and length compliant (≤150 words, 37 CFR 1.72(b))
-        # The previous version overcounted by capturing PDF page-footer noise
-        # (page numbers, "Page X of Y", repeated headers, etc.) along with the
-        # abstract proper. Now: capture the abstract chunk, then strip common
-        # PDF-extraction noise before counting.
-        abstract_match = re.search(
-            r'\bABSTRACT\b\s*(?:OF\s+THE\s+(?:DISCLOSURE|INVENTION))?\s*[:\n]+'
-            r'(.{20,2500}?)'
-            r'(?='
-            r'\n\s*(?:BACKGROUND|FIELD|BRIEF|DETAILED|CLAIMS|WHAT\s+IS\s+CLAIMED|'
-            r'I\s+HEREBY\s+DECLARE|FIG\.|Sheet\s+\d+\s*(?:of|/)\s*\d+)'
-            r'|\Z)',
-            self.spec_text, re.IGNORECASE | re.DOTALL
-        )
-        if abstract_match:
-            raw = abstract_match.group(1)
-            # Strip common page-footer / page-header artifacts that PDF text
-            # extraction frequently splices into nearby content
-            cleaned = raw
-            cleaned = re.sub(r'\bPage\s+\d+(?:\s+of\s+\d+)?\b', ' ', cleaned, flags=re.IGNORECASE)
-            cleaned = re.sub(r'(?m)^\s*\d{1,3}\s*$', ' ', cleaned)            # bare page numbers
-            cleaned = re.sub(r'(?m)^\s*\d+\s*/\s*\d+\s*$', ' ', cleaned)      # "52 / 52" footers
-            cleaned = re.sub(r'\bPatent\s+Application\s+Publication\b', ' ', cleaned, flags=re.IGNORECASE)
-            cleaned = re.sub(r'\b(?:US|U\.S\.)\s*\d{4}/\d+\s*A\d?\b', ' ', cleaned)  # pub-no headers
-            cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-            word_count = len(cleaned.split())
-            if word_count == 0:
-                self.report.add_issue(
-                    17, "Specification", "Abstract Present and Length Compliant",
-                    Severity.WARNING, "Abstract heading found but body could not be extracted"
-                )
-            elif word_count <= 150:
-                self.report.add_issue(
-                    17, "Specification", "Abstract Present and Length Compliant",
-                    Severity.PASS, f"Abstract found ({word_count} words, limit is 150)"
-                )
-            else:
-                # Borderline counts (151-160) are usually PDF extraction noise;
-                # show the user what was actually counted so they can verify.
-                preview = (cleaned[:240] + '…') if len(cleaned) > 240 else cleaned
-                self.report.add_issue(
-                    17, "Specification", "Abstract Present and Length Compliant",
-                    Severity.WARNING,
-                    f"Abstract may be too long ({word_count} words, limit is 150)",
-                    f"Extracted text used for the count (verify against the source .docx, "
-                    f"as PDF text extraction can splice in page-header/footer artifacts):\n\n{preview}"
-                )
-        else:
-            self.report.add_issue(
-                17, "Specification", "Abstract Present and Length Compliant",
-                Severity.CRITICAL, "Abstract section not found"
+        # When the spec is a .docx, extract the abstract directly from the XML
+        # to avoid page-header/footer noise that text-extraction pipelines splice
+        # in (which can inflate the count by 40+ words on a typical filing).
+        spec_path_17 = self.documents.get('Specification')
+        _abstract_handled = False
+        if spec_path_17 and spec_path_17.suffix.lower() == '.docx':
+            docx_abstract = self._extract_abstract_from_docx(spec_path_17)
+            if docx_abstract is not None:
+                _abstract_handled = True
+                word_count = len(docx_abstract.split())
+                if word_count == 0:
+                    self.report.add_issue(
+                        17, "Specification", "Abstract Present and Length Compliant",
+                        Severity.WARNING, "Abstract heading found but body could not be extracted"
+                    )
+                elif word_count <= 150:
+                    self.report.add_issue(
+                        17, "Specification", "Abstract Present and Length Compliant",
+                        Severity.PASS, f"Abstract found ({word_count} words, limit is 150)"
+                    )
+                else:
+                    preview = (docx_abstract[:240] + '…') if len(docx_abstract) > 240 else docx_abstract
+                    self.report.add_issue(
+                        17, "Specification", "Abstract Present and Length Compliant",
+                        Severity.WARNING,
+                        f"Abstract is too long ({word_count} words, limit is 150)",
+                        f"Abstract text (from .docx XML):\n\n{preview}"
+                    )
+
+        if not _abstract_handled:
+            # PDF spec or docx parse failure — fall back to regex on spec_text
+            abstract_match = re.search(
+                r'\bABSTRACT\b\s*(?:OF\s+THE\s+(?:DISCLOSURE|INVENTION))?\s*[:\n]+'
+                r'(.{20,2500}?)'
+                r'(?='
+                r'\n\s*(?:BACKGROUND|FIELD|BRIEF|DETAILED|CLAIMS|WHAT\s+IS\s+CLAIMED|'
+                r'I\s+HEREBY\s+DECLARE|FIG\.|Sheet\s+\d+\s*(?:of|/)\s*\d+)'
+                r'|\Z)',
+                self.spec_text, re.IGNORECASE | re.DOTALL
             )
+            if abstract_match:
+                raw = abstract_match.group(1)
+                # Strip common page-footer / page-header artifacts that PDF text
+                # extraction frequently splices into nearby content
+                cleaned = raw
+                cleaned = re.sub(r'\bPage\s+\d+(?:\s+of\s+\d+)?\b', ' ', cleaned, flags=re.IGNORECASE)
+                cleaned = re.sub(r'(?m)^\s*\d{1,3}\s*$', ' ', cleaned)
+                cleaned = re.sub(r'(?m)^\s*\d+\s*/\s*\d+\s*$', ' ', cleaned)
+                cleaned = re.sub(r'\bPatent\s+Application\s+Publication\b', ' ', cleaned, flags=re.IGNORECASE)
+                cleaned = re.sub(r'\b(?:US|U\.S\.)\s*\d{4}/\d+\s*A\d?\b', ' ', cleaned)
+                cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+                word_count = len(cleaned.split())
+                if word_count == 0:
+                    self.report.add_issue(
+                        17, "Specification", "Abstract Present and Length Compliant",
+                        Severity.WARNING, "Abstract heading found but body could not be extracted"
+                    )
+                elif word_count <= 150:
+                    self.report.add_issue(
+                        17, "Specification", "Abstract Present and Length Compliant",
+                        Severity.PASS, f"Abstract found ({word_count} words, limit is 150)"
+                    )
+                else:
+                    preview = (cleaned[:240] + '…') if len(cleaned) > 240 else cleaned
+                    self.report.add_issue(
+                        17, "Specification", "Abstract Present and Length Compliant",
+                        Severity.WARNING,
+                        f"Abstract may be too long ({word_count} words, limit is 150)",
+                        f"Extracted text used for the count (verify against the source .docx, "
+                        f"as PDF text extraction can splice in page-header/footer artifacts):\n\n{preview}"
+                    )
+            else:
+                self.report.add_issue(
+                    17, "Specification", "Abstract Present and Length Compliant",
+                    Severity.CRITICAL, "Abstract section not found"
+                )
         
         # Check 18: Background section present
         if re.search(r'BACKGROUND|FIELD OF (?:THE )?INVENTION', self.spec_text, re.IGNORECASE):
@@ -3194,8 +3296,17 @@ class PatentFilingQC:
                 Severity.WARNING, "Background/Field section not clearly identified"
             )
         
-        # Check 19: Brief Description of Drawings present
-        if re.search(r'BRIEF DESCRIPTION OF (?:THE )?DRAWINGS', self.spec_text, re.IGNORECASE):
+        # Check 19: Brief Description of Drawings present.
+        # Matches any heading where a form of "description" and a form of
+        # "drawing(s)/figure(s)" appear within four words of each other,
+        # in either order — e.g. "BRIEF DESCRIPTION OF THE DRAWINGS",
+        # "DESCRIPTION OF THE DRAWINGS", "DRAWINGS DESCRIPTION", etc.
+        _DESC_DRAW_RE = re.compile(
+            r'descript\w*(?:\W+\w+){0,3}\W+draw\w*'
+            r'|draw\w*(?:\W+\w+){0,3}\W+descript\w*',
+            re.IGNORECASE
+        )
+        if _DESC_DRAW_RE.search(self.spec_text):
             self.report.add_issue(
                 19, "Specification", "Brief Description of Drawings Present",
                 Severity.PASS, "Brief Description of Drawings section found"
@@ -6345,7 +6456,7 @@ class PatentFilingQC:
                 if long_claims:
                     details = ", ".join([f"Claim {num} ({words} words)" for num, words in long_claims[:5]])
                     self.report.add_issue(
-                        68, "Final Quality", "No Excessively Long Claims",
+                        68, "Final Quality", "Excessively Long Claims",
                         Severity.WARNING, f"Unusually long claims detected: {details}"
                     )
                 else:
@@ -6746,14 +6857,18 @@ class PatentFilingQC:
                                 f'  ADS/Spec:         "{spec_title}"'
                             )
 
-                # Docket match
-                if xml_docket and self.ads_text:
-                    docket_m = re.search(
-                        r'(?:docket|attorney\s+(?:docket|file|ref(?:erence)?)'
-                        r'|file\s+(?:no|number|ref))'
-                        r'\s*[:\-#]?\s*([\w\-./]+)',
-                        self.ads_text, re.IGNORECASE)
-                    ads_docket = docket_m.group(1).strip() if docket_m else ''
+                # Docket match — prefer structured XFA data over regex on text
+                if xml_docket:
+                    ads_docket = ''
+                    if self.ads_data and self.ads_data.get('docket_number'):
+                        ads_docket = self.ads_data['docket_number'].strip()
+                    elif self.ads_text:
+                        docket_m = re.search(
+                            r'(?:docket|attorney\s+(?:docket|file|ref(?:erence)?)'
+                            r'|file\s+(?:no|number|ref))'
+                            r'\s*[:\-#]?\s*([\w\-./]+)',
+                            self.ads_text, re.IGNORECASE)
+                        ads_docket = docket_m.group(1).strip() if docket_m else ''
                     if ads_docket:
                         norm_d = lambda s: s.upper().replace(' ', '')
                         if norm_d(xml_docket) != norm_d(ads_docket):
@@ -6762,6 +6877,19 @@ class PatentFilingQC:
                                 f'  Sequence listing: "{xml_docket}"\n'
                                 f'  ADS:              "{ads_docket}"'
                             )
+
+                # Filename consistency — internal fileName attribute must match
+                # the actual filename on disk (USPTO Patent Center validates this)
+                xml_file_attr = (
+                    _find_attrib(root, 'fileName')
+                    or root.attrib.get('fileName', '')
+                )
+                if xml_file_attr and xml_file_attr != seq_xml.name:
+                    issues_84.append(
+                        f'Filename mismatch:\n'
+                        f'  Actual filename:         "{seq_xml.name}"\n'
+                        f'  Internal fileName attr:  "{xml_file_attr}"'
+                    )
 
                 # Sequence count declared vs. actual
                 if xml_seq_count is not None and actual_count > 0:
@@ -6821,11 +6949,15 @@ class PatentFilingQC:
         #             already used by _is_biological_application().
         #   Pass 2 — search only within those windows for sequence patterns.
 
-        if not self.spec_text:
+        # Scan both the specification and the drawings — biological sequences
+        # appear in figures regularly in biotech applications (e.g. sequence
+        # diagrams, labeled nucleotide strands in method illustrations).
+        combined_source = (self.spec_text or '') + '\n' + (self.drawings_text or '')
+        if not combined_source.strip():
             self.report.add_issue(
                 85, CATEGORY, "Biological Sequence Detection",
                 Severity.INFO,
-                "Specification text could not be extracted — "
+                "Neither specification nor drawings text could be extracted — "
                 "sequence pattern scan skipped"
             )
             return
@@ -6860,13 +6992,13 @@ class PatentFilingQC:
             # thousands of false hits from words like "characteristics".
         ]
 
-        # Build context windows around gate-term hits in the spec
+        # Build context windows around gate-term hits in spec + drawings
         windows: List[str] = []
         for term in self._BIOLOGICAL_GATE_TERMS:
-            for m in re.finditer(term, self.spec_text, re.IGNORECASE):
+            for m in re.finditer(term, combined_source, re.IGNORECASE):
                 start = max(0, m.start() - 600)
-                end = min(len(self.spec_text), m.end() + 600)
-                windows.append(self.spec_text[start:end])
+                end = min(len(combined_source), m.end() + 600)
+                windows.append(combined_source[start:end])
 
         if not windows:
             # Gate triggered by seq listing file presence, not spec text
@@ -6898,24 +7030,56 @@ class PatentFilingQC:
             else:
                 below_threshold.append(entry)
 
-        if above_threshold and not has_seq_id_no:
+        if above_threshold and not seq_xml and not seq_txt:
+            # Sequences at or above threshold but no listing file in the folder.
+            # Severity depends on whether the sequences carry SEQ ID NO labels:
+            #   - Labeled (SEQ ID NO present) → clearly inventive/referenced,
+            #     a listing is required → CRITICAL.
+            #   - Unlabeled → may be illustrative examples (e.g., a primer shown
+            #     in a method figure); the practitioner must decide whether the
+            #     listing requirement applies → WARNING.
+            if has_seq_id_no:
+                self.report.add_issue(
+                    85, CATEGORY, "Biological Sequence Detection",
+                    Severity.CRITICAL,
+                    'Sequences at or above the listing threshold are referenced '
+                    'with "SEQ ID NO" labels in the specification/drawings but no '
+                    'sequence listing file was found in the filing folder. A ST.26 '
+                    'XML listing is required under 37 CFR § 1.821(c).',
+                    'Sequences detected (within biological context windows):\n'
+                    + '\n'.join(f'  • {e}' for e in above_threshold)
+                )
+            else:
+                self.report.add_issue(
+                    85, CATEGORY, "Biological Sequence Detection",
+                    Severity.WARNING,
+                    'Sequences at or above the listing threshold detected in the '
+                    'specification/drawings without "SEQ ID NO" labels, and no '
+                    'sequence listing file was found. Verify whether a listing is '
+                    'required under 37 CFR § 1.821(a) — unlabeled sequences may '
+                    'be illustrative and not subject to the listing requirement.',
+                    'Sequences detected (within biological context windows):\n'
+                    + '\n'.join(f'  • {e}' for e in above_threshold)
+                )
+        elif above_threshold and seq_txt and not seq_xml:
+            # Non-XML listing present — wrong format for new filings.
             self.report.add_issue(
                 85, CATEGORY, "Biological Sequence Detection",
                 Severity.WARNING,
-                'Sequences at or above the listing threshold detected in '
-                'the specification without a corresponding "SEQ ID NO" '
-                'identifier. Verify whether a sequence listing is required '
-                'under 37 CFR § 1.821(a).',
+                'Sequences at or above the listing threshold detected and a '
+                f'plain-text listing is present ({seq_txt.name}), but new '
+                'filings must use ST.26 XML format (.xml) per 37 CFR § 1.824.',
                 'Sequences detected (within biological context windows):\n'
                 + '\n'.join(f'  • {e}' for e in above_threshold)
             )
-        elif above_threshold and has_seq_id_no:
-            # Sequences present and labeled — expected, no issue
+        elif above_threshold and seq_xml:
+            # Sequences present and an XML listing is in the folder — expected.
             self.report.add_issue(
                 85, CATEGORY, "Biological Sequence Detection",
                 Severity.PASS,
-                'Sequences detected in specification and labeled with '
-                '"SEQ ID NO" — consistent with a sequence listing filing'
+                'Sequences at or above the listing threshold detected and an '
+                'ST.26 XML sequence listing is present — consistent with a '
+                'compliant sequence listing filing'
             )
         elif below_threshold and not above_threshold:
             self.report.add_issue(
