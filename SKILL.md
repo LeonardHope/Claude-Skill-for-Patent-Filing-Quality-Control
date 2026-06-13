@@ -249,21 +249,21 @@ The skill performs 70+ quality control checks across these categories:
 - Related application references match
 - Foreign priority documentation
 
-### Final Quality (5 checks)
+### Final Quality (4 checks)
 - No obvious typos in critical fields
 - Dates properly formatted
 - No excessively long claims
-- Specification supports all claims
 - Consistent figure reference format
 
 ## Understanding Check Results
 
-Each check produces one of four severity levels (shown as colored badges in the HTML report):
+Each check produces one of five severity levels (shown as colored badges in the HTML report):
 
 - **CRITICAL** (red) — Issue must be fixed before filing
 - **WARN** (amber) — Potential issue, review recommended
 - **INFO** (blue) — Manual review recommended (e.g., when extraction couldn't fully verify the check)
 - **PASS** (green) — Check passed, no action needed
+- **N/A** (gray) — Check skipped or not applicable (an optional document is absent, or a precondition isn't met — e.g. no IDS, no foreign priority, a non-biological application). Kept separate from PASS so the Pass count reflects only checks that actually verified something.
 
 ## Best Practices
 
