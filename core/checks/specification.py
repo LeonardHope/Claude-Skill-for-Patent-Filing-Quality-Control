@@ -23,7 +23,7 @@ def check_specification(qc):
     sp = (getattr(qc, "documents", {}) or {}).get("Specification")
     out = [_claim_numbering(qc, spec), _claim_dependency(qc, spec),
            _figure_refs(qc, spec), _reference_numerals(qc),
-           _abstract(spec, sp), _background(spec, sp),
+           _abstract(qc, spec, sp), _background(spec, sp),
            _brief_description(spec, sp), _detailed_description(spec, sp),
            _claims_section(spec, sp)]
     return out
@@ -193,8 +193,26 @@ def _figure_refs(qc, spec) -> Issue:
 
 
 # ---- Check 17: abstract present and length ---------------------------------
-def _abstract(spec, spec_path=None) -> Issue:
+def _abstract(qc, spec, spec_path=None) -> Issue:
     name = "Abstract Present and Length Compliant"
+    tag = lambda issue: _located(issue, spec_path, "ABSTRACT", "Abstract section")
+    # For a .docx spec, read the abstract from the XML directly (avoids the
+    # page-header/footer noise PDF extraction splices in). Mirrors the engine's
+    # Check 17 (PR #27); falls through to the regex path on PDFs / parse failure.
+    if spec_path and str(spec_path).lower().endswith(".docx"):
+        dx = qc._extract_abstract_from_docx(spec_path)
+        if dx is not None:
+            wc = len(dx.split())
+            if wc == 0:
+                return tag(Issue(17, _CAT, name, "WARNING",
+                                 "Abstract heading found but body could not be extracted"))
+            if wc <= 150:
+                return tag(Issue(17, _CAT, name, "PASS",
+                                 f"Abstract found ({wc} words, limit is 150)"))
+            preview = (dx[:240] + "…") if len(dx) > 240 else dx
+            return tag(Issue(17, _CAT, name, "WARNING",
+                             f"Abstract is too long ({wc} words, limit is 150)",
+                             details=f"Abstract text (from .docx XML):\n\n{preview}"))
     m = re.search(
         r"\bABSTRACT\b\s*(?:OF\s+THE\s+(?:DISCLOSURE|INVENTION))?\s*[:\n]+"
         r"(.{20,2500}?)"
