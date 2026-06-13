@@ -94,6 +94,7 @@ class Severity(Enum):
     WARNING = "WARNING"
     INFO = "INFO"
     PASS = "PASS"
+    N_A = "N/A"          # check skipped / not applicable (optional doc absent, precondition unmet)
 
 
 @dataclass
@@ -147,7 +148,7 @@ LIGHTWEIGHT_SKIP_IDS = {
     45, 49,               # USPTO formatting: line numbering, page numbering
     52, 53, 54,           # common errors: claim terminology, antecedent basis, undefined terms
     59, 60,               # cross-references: claims↔spec elements, summary↔claims
-    66, 68, 69, 70,       # final quality: typos, long claims, spec-references-all-claims, figure-ref format
+    66, 68, 70,           # final quality: typos, long claims, figure-ref format
 }
 
 
@@ -213,7 +214,7 @@ class PatentFilingQC:
             import pdfplumber
             with pdfplumber.open(pdf_path) as pdf:
                 for page in pdf.pages:
-                    page_text = page.extract_text() or ""
+                    page_text = self._extract_page_text_corrected(page)
                     if page_text:
                         text += page_text + "\n"
                     elif hasattr(page, 'images') and page.images:
@@ -271,6 +272,73 @@ class PatentFilingQC:
         except Exception as e:
             self._document_read_failure(doc_type, pdf_path, str(e))
             return ""
+
+    @staticmethod
+    def _extract_page_text_corrected(page) -> str:
+        """Extract text from a pdfplumber page, correcting reversed vertical text.
+
+        Patent drawing tools (Visio, CAD software) store figure labels as 90°-
+        rotated vertical text with a character matrix of (0, b, c, 0, x, y) where
+        b > 0 and c < 0. Letters are stacked bottom-to-top (increasing y in PDF
+        space). pdfplumber reads characters top-to-bottom, reversing every such
+        word: "COMMAND" → "DNAMMOC", "AND" → "DNA", "FIG. 6A" → "A6.GIF".
+
+        Fix: detect chars with the rotated matrix, group them by x-position into
+        vertical runs, sort each run bottom-to-top (increasing y) to recover the
+        correct reading order, then replace the reversed tokens in the extracted
+        text with the corrected forms.
+        """
+        chars = page.chars
+        if not chars:
+            return ""
+
+        # Identify chars with 90° CCW rotation: matrix (0, +b, -c, 0, x, y).
+        rotated = [
+            c for c in chars
+            if abs(c.get('matrix', (1, 0, 0, 1, 0, 0))[0]) < 0.01
+            and abs(c.get('matrix', (1, 0, 0, 1, 0, 0))[3]) < 0.01
+            and c.get('matrix', (1, 0, 0, 1, 0, 0))[1] > 0
+            and c.get('matrix', (1, 0, 0, 1, 0, 0))[2] < 0
+        ]
+
+        if not rotated:
+            return page.extract_text() or ""
+
+        # Group rotated chars into vertical runs by x-position (±2pt tolerance).
+        rotated.sort(key=lambda c: c['x0'])
+        runs: List[List] = []
+        for ch in rotated:
+            if runs and abs(ch['x0'] - runs[-1][-1]['x0']) < 2.0:
+                runs[-1].append(ch)
+            else:
+                runs.append([ch])
+
+        # Start with pdfplumber's standard extraction (reversed tokens included).
+        text = page.extract_text() or ""
+
+        # For each vertical run, recover correct reading order (increasing y),
+        # split on y-gaps > 2× average char height, then replace reversed tokens.
+        for run in runs:
+            run.sort(key=lambda c: c['y0'])  # bottom-to-top = correct order
+            avg_h = sum(abs(c.get('height', 8)) for c in run) / len(run)
+
+            # Split run into words at y-gaps larger than 2× average char height.
+            words: List[List] = [[run[0]]]
+            for ch in run[1:]:
+                if ch['y0'] - words[-1][-1]['y0'] > avg_h * 2:
+                    words.append([ch])
+                else:
+                    words[-1].append(ch)
+
+            for word_chars in words:
+                correct = ''.join(c['text'] for c in word_chars).strip()
+                reversed_form = correct[::-1]
+                # Skip single chars — reversing them is a no-op and risks
+                # replacing unrelated single letters in the extracted text.
+                if len(correct) >= 2 and reversed_form in text:
+                    text = text.replace(reversed_form, correct, 1)
+
+        return text
 
     def _ocr_pdf_text(self, pdf_path: Path, doc_type: str) -> Optional[str]:
         """OCR every page of a PDF into a single text string. Returns the OCR
@@ -2784,7 +2852,7 @@ class PatentFilingQC:
         else:
             self.report.add_issue(
                 12, "Document Completeness", "Assignment Signatures Present",
-                Severity.INFO, "Assignment not found (optional document)"
+                Severity.N_A, "Assignment not found (optional document)"
             )
     
     def check_specification(self):
@@ -4101,7 +4169,7 @@ class PatentFilingQC:
             for i in range(36, 41):
                 self.report.add_issue(
                     i, "Assignment", f"Check {i}",
-                    Severity.INFO, "Assignment not found (optional document)"
+                    Severity.N_A, "Assignment not found (optional document)"
                 )
             return
         
@@ -4361,7 +4429,7 @@ class PatentFilingQC:
             for i in (41, 42, 44):
                 self.report.add_issue(
                     i, "Power of Attorney", f"Check {i}",
-                    Severity.INFO, "Power of Attorney not found (may not be required)"
+                    Severity.N_A, "Power of Attorney not found (may not be required)"
                 )
             return
         
@@ -4477,7 +4545,7 @@ class PatentFilingQC:
         if not ids_path and not wa_path:
             self.report.add_issue(
                 76, "IDS", "IDS Documents Present",
-                Severity.PASS,
+                Severity.N_A,
                 "No IDS documents present — IDS is optional under MPEP 609. "
                 "Skipping IDS-specific checks."
             )
@@ -5575,7 +5643,7 @@ class PatentFilingQC:
             else:
                 self.report.add_issue(
                     63, "Priority Claims", "Priority Claim Consistency",
-                    Severity.PASS, "No priority claims detected in specification or ADS"
+                    Severity.N_A, "No priority claims detected in specification or ADS"
                 )
 
         # ----- Check 64: Related application references in spec -----
@@ -5615,7 +5683,7 @@ class PatentFilingQC:
         else:
             self.report.add_issue(
                 64, "Priority Claims", "Related Application References",
-                Severity.PASS, "No related applications detected"
+                Severity.N_A, "No related applications detected"
             )
 
         # ----- Check 65: Foreign priority documents -----
@@ -5636,7 +5704,7 @@ class PatentFilingQC:
         else:
             self.report.add_issue(
                 65, "Priority Claims", "Foreign Priority Documents",
-                Severity.PASS, "No foreign priority claims in ADS"
+                Severity.N_A, "No foreign priority claims in ADS"
             )
 
         # ----- Check 81: Priority application number verification -----
@@ -5810,7 +5878,7 @@ class PatentFilingQC:
         if not ads_dom_entries:
             self.report.add_issue(
                 81, "Priority Claims", "Priority Application Number Verification",
-                Severity.PASS, "No domestic continuity entries — check not applicable"
+                Severity.N_A, "No domestic continuity entries — check not applicable"
             )
 
         elif odp_api_key:
@@ -6475,80 +6543,6 @@ class PatentFilingQC:
                 Severity.WARNING, "Specification not found"
             )
         
-        # Check 69: Specification references all claims
-        if self.spec_text:
-            # Extract claims section
-            claims_section_patterns = [
-                r'CLAIMS\s+What is claimed[^:]*:\s*(.*?)(?:ABSTRACT|$)',
-                r'What is claimed[^:]*:\s*(.*?)(?:ABSTRACT|$)',
-                r'(?:CLAIMS?\s*\n|What is claimed[^\n]*\n)(.*?)(?:ABSTRACT|$)',
-            ]
-            claims_text_69 = None
-            for pattern in claims_section_patterns:
-                m = re.search(pattern, self.spec_text, re.DOTALL | re.IGNORECASE)
-                if m:
-                    claims_text_69 = m.group(1)
-                    break
-
-            # Get description text (everything before claims)
-            desc_match = re.search(
-                r'(?:DETAILED\s+DESCRIPTION|DESCRIPTION\s+OF.*?EMBODIMENTS?)(.*?)(?:CLAIMS|What is claimed)',
-                self.spec_text, re.DOTALL | re.IGNORECASE
-            )
-            desc_text_69 = desc_match.group(1) if desc_match else ""
-
-            if claims_text_69 and desc_text_69:
-                # Extract reference numerals from claims
-                claim_numerals = set(re.findall(r'\b(\d{2,3})\b', claims_text_69))
-                # Filter to actual reference numerals (those used with element descriptions)
-                valid_numerals = set()
-                for num in claim_numerals:
-                    if re.search(r'(?:a|an|the|said)\s+[\w\-]+(?:\s+[\w\-]+){0,2}\s+' + num + r'\b',
-                                claims_text_69, re.IGNORECASE):
-                        valid_numerals.add(num)
-
-                if valid_numerals:
-                    # Check which numerals appear in the detailed description
-                    missing = [n for n in valid_numerals if n not in desc_text_69]
-                    if not missing:
-                        self.report.add_issue(
-                            69, "Final Quality", "Specification References All Claims",
-                            Severity.PASS, f"All {len(valid_numerals)} claim reference numerals found in specification"
-                        )
-                    elif len(missing) <= 2:
-                        self.report.add_issue(
-                            69, "Final Quality", "Specification References All Claims",
-                            Severity.PASS, f"Most claim elements referenced in specification ({len(valid_numerals) - len(missing)}/{len(valid_numerals)})"
-                        )
-                    else:
-                        self.report.add_issue(
-                            69, "Final Quality", "Specification References All Claims",
-                            Severity.WARNING, f"{len(missing)} claim reference numerals not found in specification: {', '.join(sorted(missing)[:5])}"
-                        )
-                else:
-                    # No reference numerals in claims to verify against the
-                    # specification. We deliberately do NOT fall back to a
-                    # word-coverage heuristic here — that's Check 60's job and
-                    # would just produce duplicate noise under a misleading
-                    # name (this check's name is "References All Claims",
-                    # not "term coverage").
-                    self.report.add_issue(
-                        69, "Final Quality", "Specification References All Claims",
-                        Severity.INFO,
-                        "No reference numerals detected in claims — cannot verify "
-                        "claim-to-specification element references. Manual review recommended."
-                    )
-            else:
-                self.report.add_issue(
-                    69, "Final Quality", "Specification References All Claims",
-                    Severity.INFO, "Could not isolate claims and description for cross-reference"
-                )
-        else:
-            self.report.add_issue(
-                69, "Final Quality", "Specification References All Claims",
-                Severity.WARNING, "Specification not found"
-            )
-        
         # Check 70: Consistent figure reference format
         if self.spec_text:
             fig_refs = re.findall(r'(FIG(?:URE)?\.?\s*\d+)', self.spec_text, re.IGNORECASE)
@@ -6639,7 +6633,7 @@ class PatentFilingQC:
         if not self._is_biological_application():
             self.report.add_issue(
                 82, CATEGORY, "Sequence Listing (Gate Check)",
-                Severity.PASS,
+                Severity.N_A,
                 "No biological sequence indicators detected — "
                 "sequence listing checks skipped"
             )
@@ -7141,6 +7135,7 @@ class PatentFilingQC:
                 Severity.WARNING: 'warning',
                 Severity.INFO: 'info',
                 Severity.PASS: 'pass',
+                Severity.N_A: 'na',
             }.get(sev, 'info')
 
         def severity_label(sev: 'Severity') -> str:
@@ -7149,12 +7144,14 @@ class PatentFilingQC:
                 Severity.WARNING: 'WARN',
                 Severity.INFO: 'INFO',
                 Severity.PASS: 'PASS',
+                Severity.N_A: 'N/A',
             }.get(sev, 'INFO')
 
         critical_issues = [i for i in self.report.issues if i.severity == Severity.CRITICAL]
         warnings = [i for i in self.report.issues if i.severity == Severity.WARNING]
         info_issues = [i for i in self.report.issues if i.severity == Severity.INFO]
         passed_issues = [i for i in self.report.issues if i.severity == Severity.PASS]
+        na_issues = [i for i in self.report.issues if i.severity == Severity.N_A]
 
         def group_by_category(issues):
             groups: Dict[str, List] = {}
@@ -7185,6 +7182,8 @@ class PatentFilingQC:
                 --c-info-bg:  #eff6ff;
                 --c-pass:     #166534;
                 --c-pass-bg:  #f0fdf4;
+                --c-na:       #4b5563;
+                --c-na-bg:    #f3f4f6;
                 --c-text:     #1f2937;
                 --c-muted:    #6b7280;
                 --c-border:   #e5e7eb;
@@ -7233,6 +7232,8 @@ class PatentFilingQC:
             .stat.info     .num { color: var(--c-info); }
             .stat.pass     { background: var(--c-pass-bg);     border-color: #bbf7d0; }
             .stat.pass     .num { color: var(--c-pass); }
+            .stat.na       { background: var(--c-na-bg);       border-color: #e5e7eb; }
+            .stat.na       .num { color: var(--c-na); }
             /* Stat cards are <a> elements — make them look clickable */
             a.stat { text-decoration: none; color: inherit; display: block;
                      transition: transform 0.1s ease, box-shadow 0.1s ease; cursor: pointer; }
@@ -7272,6 +7273,7 @@ class PatentFilingQC:
             .issue.warning  { border-left-color: var(--c-warn); }
             .issue.info     { border-left-color: var(--c-info); }
             .issue.pass     { border-left-color: var(--c-pass); }
+            .issue.na       { border-left-color: var(--c-na); }
 
             .issue-head { display: flex; align-items: baseline; gap: 10px;
                           flex-wrap: wrap; }
@@ -7284,6 +7286,7 @@ class PatentFilingQC:
             .badge.warning  { background: var(--c-warn);     color: #fff; }
             .badge.info     { background: var(--c-info);     color: #fff; }
             .badge.pass     { background: var(--c-pass);     color: #fff; }
+            .badge.na       { background: var(--c-na);       color: #fff; }
 
             .issue-id { color: var(--c-muted); font-variant-numeric: tabular-nums;
                         font-size: 12px; min-width: 28px; }
@@ -7349,6 +7352,7 @@ class PatentFilingQC:
                 ('warning',  len(warnings),        'Warnings',      'sec-warnings'),
                 ('info',     len(info_issues),     'Manual Review', 'sec-info'),
                 ('pass',     len(passed_issues),   'Passed',        'sec-passed'),
+                ('na',       len(na_issues),       'Not Applicable','sec-na'),
             ]:
                 # Make the card a link only if the section exists (has issues).
                 if count > 0:
@@ -7398,6 +7402,7 @@ class PatentFilingQC:
             write_issue_section("Warnings — Should Review", warnings, "sec-warnings")
             write_issue_section("Info / Manual Review", info_issues, "sec-info")
             write_issue_section("Passed Checks", passed_issues, "sec-passed")
+            write_issue_section("Not Applicable / Skipped", na_issues, "sec-na")
 
             # ADS Data Summary (when XFA data is available)
             if self.ads_data:
@@ -7530,6 +7535,7 @@ def main():
     print(f"⚠️  Warnings:        {qc.report.get_warning_count()}")
     print(f"🚨 Critical Issues: {qc.report.get_critical_count()}")
     print(f"ℹ️  Info/Manual:     {sum(1 for i in qc.report.issues if i.severity == Severity.INFO)}")
+    print(f"➖ Not Applicable:  {sum(1 for i in qc.report.issues if i.severity == Severity.N_A)}")
     print()
 
     # List critical issues in console (to match markdown report)

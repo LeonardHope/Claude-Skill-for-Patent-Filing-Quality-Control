@@ -564,10 +564,10 @@ def _ids_xfa(sig="/Robert M. Holcomb/", reg="62198", us_docs=("10123456","102223
     parts.append("</ids-form>")
     return "".join(parts)
 
-@test("IDS10.1: Check 76 PASS when no IDS present (optional)")
+@test("IDS10.1: Check 76 N/A when no IDS present (optional)")
 def t():
     qc = build_qc()  # no IDS in documents
-    return assert_severity(qc, 76, Severity.PASS, "Check 76 no-IDS")
+    return assert_severity(qc, 76, Severity.N_A, "Check 76 no-IDS")
 
 @test("IDS10.2: Check 76 INFO when IDS form present")
 def t():
@@ -1013,13 +1013,13 @@ _ST26_COUNT_MISMATCH = ('<ST26SequenceListing>'
             '<SequenceData sequenceIDNumber="1">ACGT</SequenceData>'
             '</ST26SequenceListing>')
 
-@test("SL15.1: non-biological filing → single Check 82 PASS, no 83/84/85")
+@test("SL15.1: non-biological filing → single Check 82 N/A, no 83/84/85")
 def t():
     qc = build_qc()  # LLM patent — no biological terms
     qc.run_all_checks()
     c82 = get_check(qc, 82)
-    if not c82 or c82.severity != Severity.PASS:
-        print(f"  ❌ Check 82 = {c82.severity.value if c82 else 'absent'} (expected PASS gate)")
+    if not c82 or c82.severity != Severity.N_A:
+        print(f"  ❌ Check 82 = {c82.severity.value if c82 else 'absent'} (expected N/A gate)")
         return False
     if get_check(qc, 83) or get_check(qc, 84) or get_check(qc, 85):
         print(f"  ❌ downstream seq checks fired on a non-biological filing")
@@ -1220,12 +1220,12 @@ def t():
         return False
     return True
 
-@test("LW17.6: skip set is exactly the documented 18 IDs")
+@test("LW17.6: skip set is exactly the documented 17 IDs")
 def t():
-    if len(LIGHTWEIGHT_SKIP_IDS) != 18:
-        print(f"  ❌ expected 18 skip IDs, got {len(LIGHTWEIGHT_SKIP_IDS)}: "
+    if len(LIGHTWEIGHT_SKIP_IDS) != 17:
+        print(f"  ❌ expected 17 skip IDs, got {len(LIGHTWEIGHT_SKIP_IDS)}: "
               f"{sorted(LIGHTWEIGHT_SKIP_IDS)}"); return False
-    expected = {16,17,18,19,20,24,25,45,49,52,53,54,59,60,66,68,69,70}
+    expected = {16,17,18,19,20,24,25,45,49,52,53,54,59,60,66,68,70}
     if set(LIGHTWEIGHT_SKIP_IDS) != expected:
         print(f"  ❌ skip set mismatch: {sorted(LIGHTWEIGHT_SKIP_IDS)}"); return False
     return True

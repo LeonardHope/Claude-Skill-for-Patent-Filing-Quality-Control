@@ -309,7 +309,7 @@ Validates priority claims:
 | 65 | Foreign Priority Documents | Foreign priority documented |
 | 81 | Priority Application Number Verification | Spec ↔ ADS application-number consistency (catches digit errors). When `USPTO_ODP_API_KEY` is set, additionally verifies each number's existence and filing date against USPTO public records; otherwise emits manual Patent Center / Google Patents verification links |
 
-### 14. Final Quality (5 checks)
+### 14. Final Quality (4 checks)
 
 Final review checks:
 
@@ -318,8 +318,11 @@ Final review checks:
 | 66 † | No Obvious Typos in Critical Fields | Critical fields free of obvious typos |
 | 67 | Dates in Proper Format | All dates in a recognized format |
 | 68 † | No Excessively Long Claims | Flags very long claims (readability) |
-| 69 † | Specification References All Claims | Claim subject matter is supported in the spec |
 | 70 † | Consistent Figure Reference Format | Consistent FIG. vs Figure usage |
+
+*(Check 69 "Specification References All Claims" was removed — its premise was
+wrong, as US claims carry no reference numerals; claim-element → specification
+support is already covered by Check 59.)*
 
 ### 15. Information Disclosure Statement / IDS (5 checks)
 
@@ -354,6 +357,7 @@ Each check produces one of these results, shown as a colored badge in the HTML r
 | **WARN** | amber | Potential issue, review recommended |
 | **INFO** | blue | Informational / manual review recommended (e.g., when extraction couldn't fully verify the check) |
 | **PASS** | green | Check passed, no action needed |
+| **N/A** | gray | Check skipped / not applicable (optional document absent or precondition unmet — e.g. no IDS, no foreign priority, non-biological application). Separate from PASS so the Pass count reflects only checks that verified something. |
 
 ## Known Limitations
 
