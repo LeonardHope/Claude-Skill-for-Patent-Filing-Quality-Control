@@ -5631,18 +5631,12 @@ class PatentFilingQC:
         def _norm_priority_num(s: str) -> str:
             """Normalize an application number for comparison.
 
-            PCT numbers: parse country/year/serial and zero-pad serial to 6
-            digits so PCT/US2008/59500 == PCT/US2008/059500.
-            All others: strip every non-alphanumeric character and uppercase.
+            Strips only punctuation and whitespace (slashes, commas, spaces,
+            hyphens). All digits are preserved exactly as-is — leading zeros
+            are significant. PCT/US2008/059500 and PCT/US2008/59500 are
+            different numbers and will not compare equal.
             """
-            s = (s or '').strip().upper()
-            pct = re.match(
-                r'PCT/?\s*([A-Z]{2})\s*[/\-]?\s*(\d{4})\s*[/\-]?\s*(\d+)', s
-            )
-            if pct:
-                country, year, serial = pct.group(1), pct.group(2), pct.group(3)
-                return f'PCT/{country}/{year}/{int(serial):06d}'
-            return re.sub(r'[^A-Z0-9]', '', s)
+            return re.sub(r'[^A-Z0-9]', '', (s or '').strip().upper())
 
         def _extract_nums_from_text(text: str) -> dict:
             """Pull application numbers out of the spec priority paragraph.
@@ -5680,19 +5674,15 @@ class PatentFilingQC:
             return nums
 
         # Collect every number referenced by the ADS entries.
-        # Track ALL raw forms per normalized key so we can detect internal
-        # ADS inconsistencies (e.g. PCT/US2008/059500 vs PCT/US2008/59500
-        # appearing in different fields of different entries).
-        ads_nums_all: dict = {}  # normalized → set of raw forms
+        # normalized → first raw form seen (for display in error messages).
+        ads_nums: dict = {}
         for entry in ads_dom_entries + ads_for_entries:
             for field in ('application_number', 'prior_application_number'):
                 raw = (entry.get(field) or '').strip()
                 if raw:
                     n = _norm_priority_num(raw)
-                    if n:
-                        ads_nums_all.setdefault(n, set()).add(raw)
-        # Primary lookup: one canonical (longest/most-formatted) raw form per key
-        ads_nums: dict = {n: max(raws, key=len) for n, raws in ads_nums_all.items()}
+                    if n and n not in ads_nums:
+                        ads_nums[n] = raw
 
         spec_nums = _extract_nums_from_text(self.spec_text)  # {normalized: raw}
 
@@ -5715,33 +5705,6 @@ class PatentFilingQC:
                 missing_from_ads = {
                     spec_nums[n] for n in spec_nums if n not in ads_nums
                 }
-                # Detect internal ADS inconsistencies: same application
-                # referenced with different raw formats in different entries
-                # (e.g. PCT/US2008/059500 in one field, PCT/US2008/59500 in
-                # another). These normalize to the same number but the
-                # inconsistency may be flagged by USPTO.
-                ads_internal_inconsistencies = []
-                for n, raws in ads_nums_all.items():
-                    digits_set = {re.sub(r'[^A-Z0-9]', '', r.upper()) for r in raws}
-                    if len(digits_set) > 1:
-                        ads_internal_inconsistencies.append(
-                            f"{' vs '.join(sorted(raws))} (same application, inconsistent format)"
-                        )
-
-                # Detect formatting differences between ADS and spec for
-                # the same normalized number.
-                format_mismatches = []
-                for n in ads_nums:
-                    if n in spec_nums:
-                        ads_raw = ads_nums[n]
-                        spec_raw = spec_nums[n]
-                        ads_digits = re.sub(r'[^A-Z0-9]', '', ads_raw.upper())
-                        spec_digits = re.sub(r'[^A-Z0-9]', '', spec_raw.upper())
-                        if ads_digits != spec_digits:
-                            format_mismatches.append(
-                                f"ADS '{ads_raw}' vs spec '{spec_raw}'"
-                            )
-
                 if missing_from_spec or missing_from_ads:
                     parts = []
                     if missing_from_spec:
@@ -5757,26 +5720,7 @@ class PatentFilingQC:
                         Severity.WARNING,
                         "Application number mismatch between ADS and specification. "
                         + "; ".join(parts) + ". "
-                        "Verify application numbers match exactly (including leading zeros in PCT numbers)."
-                    )
-                elif format_mismatches or ads_internal_inconsistencies:
-                    parts = []
-                    if ads_internal_inconsistencies:
-                        parts.append(
-                            "ADS uses inconsistent formats for the same application: "
-                            + "; ".join(ads_internal_inconsistencies)
-                        )
-                    if format_mismatches:
-                        parts.append(
-                            "ADS vs spec formatting differs: "
-                            + "; ".join(format_mismatches)
-                        )
-                    self.report.add_issue(
-                        63, "Priority Claims", "Priority Claim Consistency",
-                        Severity.WARNING,
-                        "Priority application numbers identify the same applications but with "
-                        "formatting inconsistencies (leading zeros, punctuation — may be flagged by USPTO). "
-                        + " ".join(parts)
+                        "Digits must match exactly — leading zeros in PCT serial numbers are significant."
                     )
                 else:
                     self.report.add_issue(
