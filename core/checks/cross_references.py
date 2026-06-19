@@ -29,6 +29,12 @@ def _fig_sort_key(fid):
     return (int(m.group(1)), m.group(2)) if m else (0, fid)
 
 
+def _fig_base(fid):
+    """The figure NUMBER without its sub-figure letter ('4A' -> '4')."""
+    m = re.match(r"(\d+)", fid)
+    return m.group(1) if m else fid
+
+
 def check_cross_references(qc):
     return [_claims_reference_spec(qc), _summary_matches_claims(qc),
             _figure_count(qc), _claim_count(qc)]
@@ -60,13 +66,35 @@ def _figure_count(qc) -> Issue:
             issue.evidence = [data("Figures in spec & drawings", actual=f"{len(sf)}: FIG. {sl}",
                                    kind="match", doc_type="Specification")]
             return issue
-        issue = (Issue(61, _CAT, name, "WARNING",
-                       f"Same figure count ({len(sf)}) but different numbers. "
-                       f"Spec: {sorted(sf, key=_fig_sort_key)}, Drawings: {sorted(df, key=_fig_sort_key)}")
-                 if len(sf) == len(df) else
-                 Issue(61, _CAT, name, "WARNING",
-                       f"Figure count mismatch: Spec references {len(sf)} figures, "
-                       f"Drawings has {len(df)} figures"))
+        # Compare by base figure NUMBER (strip sub-figure letters). Drawings are
+        # frequently image-only: OCR reliably reads the figure number but often
+        # drops the A/B/C sub-figure letter, so a letters-only difference is not
+        # a real discrepancy — don't cry wolf over it.
+        sb = {_fig_base(x) for x in sf}
+        db = {_fig_base(x) for x in df}
+        missing = sorted(sb - db, key=int)   # spec figure numbers absent from drawings
+        extra = sorted(db - sb, key=int)     # drawing figure numbers not referenced in spec
+        if not missing and not extra:
+            base_list = ", ".join(sorted(sb, key=int))
+            issue = Issue(61, _CAT, name, "INFO",
+                          f"Figure numbering is consistent ({len(sb)} figures: FIG. {base_list}). "
+                          f"Spec and drawings differ only in sub-figure lettering (spec: FIG. {sl}; "
+                          f"drawings: FIG. {dl}) — image-only drawings often lose the sub-figure "
+                          f"letter in text extraction. Verify the lettered sub-figures visually.")
+            issue.evidence = [data("Figure numbers (spec vs drawings)",
+                                   actual=f"both cover FIG. {base_list}", kind="match",
+                                   doc_type="Specification"),
+                              data("Spec figure references", actual=f"FIG. {sl}", kind="value",
+                                   doc_type="Specification"),
+                              data("Drawings figures (from OCR)", actual=f"FIG. {dl}", kind="value",
+                                   doc_type="Drawings")]
+            return issue
+        parts = []
+        if missing:
+            parts.append(f"spec references FIG. {', '.join(missing)} not found in the drawings")
+        if extra:
+            parts.append(f"drawings include FIG. {', '.join(extra)} not referenced in the spec")
+        issue = Issue(61, _CAT, name, "WARNING", "Figure count mismatch: " + "; ".join(parts) + ".")
         issue.evidence = [data("Figures in specification", actual=f"FIG. {sl}",
                                kind="mismatch", doc_type="Specification"),
                           data("Figures in drawings", actual=f"FIG. {dl}",

@@ -159,6 +159,59 @@ def _fig_sort_key(fig_id: str):
     return (int(m.group(1)), m.group(2)) if m else (0, fig_id)
 
 
+def _fig_base(fig_id: str) -> str:
+    """The figure NUMBER without its sub-figure letter ('4A' -> '4')."""
+    m = re.match(r'(\d+)', fig_id)
+    return m.group(1) if m else fig_id
+
+
+def _has_bare_introduction(claims_text: str, term: str) -> bool:
+    """True if some significant word of `term` first appears in the claims in a
+    NON-referential position — i.e. introduced as a bare noun ("by firmware") or
+    with "a/an", rather than first appearing as "the/said X". Such an element has
+    proper antecedent basis even without an explicit "a/an" introduction (mass
+    nouns like "firmware"/"software", or elements introduced via a preposition).
+    Used to suppress false antecedent-basis warnings."""
+    for w in term.split():
+        if len(w) < 4:
+            continue
+        m = re.search(r'\b' + re.escape(w) + r'\b', claims_text, re.IGNORECASE)
+        if not m:
+            continue
+        prev = re.search(r'([A-Za-z]+)\W*$', claims_text[:m.start()])
+        if not (prev and prev.group(1).lower() in ('the', 'said')):
+            return True
+    return False
+
+
+_CLAIM_VERB_WORDS = {
+    'is', 'are', 'was', 'were', 'be', 'been', 'being', 'has', 'have', 'had',
+    'comprises', 'comprise', 'comprising', 'includes', 'include', 'including',
+    'consists', 'consist', 'consisting', 'having', 'responsive', 'wherein',
+}
+
+
+def _is_claim_term_phrase(words, stop_words) -> bool:
+    """A real claim term is a contiguous noun phrase. Reject n-grams that span a
+    preposition/conjunction ("license application for installation"), contain a
+    verb/copula ("… comprises …", "… is outside"), or contain a gerund
+    ("comprises transmitting"). Those are clause fragments, not element names —
+    they'd never be "defined" in the spec, so flagging them is just noise."""
+    for w in words:
+        if w in stop_words or w in _CLAIM_VERB_WORDS or w.endswith('ing'):
+            return False
+    return True
+
+
+def _is_modifier_extension(v1: str, v2: str) -> bool:
+    """True if one phrase is the other with leading modifier word(s) prepended
+    ("computing device" vs "target computing device"; "challenge token" vs
+    "echoed challenge token"). Such genus/species pairs are deliberate narrower
+    terms, not a terminology inconsistency — don't flag them."""
+    a, b = sorted((v1.split(), v2.split()), key=len)
+    return len(b) > len(a) and b[-len(a):] == a
+
+
 class PatentFilingQC:
     """Main QC engine for patent filing documents"""
     
@@ -4960,7 +5013,8 @@ class PatentFilingQC:
                                         w1 = set(v1.split()[:-1])  # modifiers only
                                         w2 = set(v2.split()[:-1])
                                         # If modifiers are very similar, might be inconsistency
-                                        if w1 and w2 and len(w1.symmetric_difference(w2)) == 1:
+                                        if (w1 and w2 and len(w1.symmetric_difference(w2)) == 1
+                                                and not _is_modifier_extension(v1, v2)):
                                             inconsistencies.append((v1, v2))
 
                 if inconsistencies:
@@ -5068,6 +5122,12 @@ class PatentFilingQC:
                         if ref.split()[-1] == intro.split()[-1]:
                             found = True
                             break
+                    # An element can be introduced without "a/an" — as a bare
+                    # mass noun ("by firmware…") or via a preposition. If its
+                    # first mention in the claims is non-referential, it has
+                    # antecedent basis; don't flag it.
+                    if not found and _has_bare_introduction(claims_text, ref):
+                        found = True
                     if not found:
                         antecedent_issues.append(ref)
 
@@ -5146,7 +5206,8 @@ class PatentFilingQC:
                                        'wherein the', 'comprising', 'configured to', 'adapted to',
                                        'based on', 'according to', 'at least one', 'one or more',
                                        'or more', 'or fewer']
-                        if not any(skip in term for skip in skip_phrases):
+                        if (not any(skip in term for skip in skip_phrases)
+                                and _is_claim_term_phrase(words, conjunction_prep_words)):
                             claim_terms.add(term)
 
                 # Check if claim terms appear in description. Normalize
@@ -5511,21 +5572,43 @@ class PatentFilingQC:
             spec_figs = set(self._extract_figure_identities(self.spec_text))
             drawing_figs = set(self._extract_figure_identities(self.drawings_text))
 
+            sl = ', '.join(sorted(spec_figs, key=_fig_sort_key))
+            dl = ', '.join(sorted(drawing_figs, key=_fig_sort_key))
             if spec_figs == drawing_figs:
                 self.report.add_issue(
                     61, "Cross-References", "Drawing Figure Count Matches Specification",
-                    Severity.PASS, f"Figure numbers match: {len(spec_figs)} figures (FIG. {', '.join(sorted(spec_figs, key=_fig_sort_key))})"
-                )
-            elif len(spec_figs) == len(drawing_figs):
-                self.report.add_issue(
-                    61, "Cross-References", "Drawing Figure Count Matches Specification",
-                    Severity.WARNING, f"Same figure count ({len(spec_figs)}) but different numbers. Spec: {sorted(spec_figs, key=_fig_sort_key)}, Drawings: {sorted(drawing_figs, key=_fig_sort_key)}"
+                    Severity.PASS, f"Figure numbers match: {len(spec_figs)} figures (FIG. {sl})"
                 )
             else:
-                self.report.add_issue(
-                    61, "Cross-References", "Drawing Figure Count Matches Specification",
-                    Severity.WARNING, f"Figure count mismatch: Spec references {len(spec_figs)} figures, Drawings has {len(drawing_figs)} figures"
-                )
+                # Compare by base figure NUMBER (strip sub-figure letters).
+                # Drawings are frequently image-only: OCR reliably reads the
+                # figure number but often drops the A/B/C sub-figure letter, so
+                # a letters-only difference is not a real discrepancy — don't
+                # cry wolf over it.
+                sb = {_fig_base(x) for x in spec_figs}
+                db = {_fig_base(x) for x in drawing_figs}
+                missing = sorted(sb - db, key=int)   # spec numbers absent from drawings
+                extra = sorted(db - sb, key=int)     # drawing numbers not referenced in spec
+                if not missing and not extra:
+                    base_list = ', '.join(sorted(sb, key=int))
+                    self.report.add_issue(
+                        61, "Cross-References", "Drawing Figure Count Matches Specification",
+                        Severity.INFO,
+                        f"Figure numbering is consistent ({len(sb)} figures: FIG. {base_list}). "
+                        f"Spec and drawings differ only in sub-figure lettering (spec: FIG. {sl}; "
+                        f"drawings: FIG. {dl}) — image-only drawings often lose the sub-figure "
+                        f"letter in text extraction. Verify the lettered sub-figures visually."
+                    )
+                else:
+                    parts = []
+                    if missing:
+                        parts.append(f"spec references FIG. {', '.join(missing)} not found in the drawings")
+                    if extra:
+                        parts.append(f"drawings include FIG. {', '.join(extra)} not referenced in the spec")
+                    self.report.add_issue(
+                        61, "Cross-References", "Drawing Figure Count Matches Specification",
+                        Severity.WARNING, "Figure count mismatch: " + "; ".join(parts) + "."
+                    )
         else:
             self.report.add_issue(
                 61, "Cross-References", "Drawing Figure Count Matches Specification",

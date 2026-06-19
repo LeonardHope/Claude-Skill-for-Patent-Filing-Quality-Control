@@ -212,6 +212,10 @@
                     padding:1px 8px; margin-top:4px; }
   .receipt.match .r-val { color:var(--pass); background:var(--pass-bg); }
   .receipt.mismatch .r-val, .receipt.missing .r-val { color:var(--critical); background:var(--critical-bg); }
+  .receipt .r-quote { display:block; font-size:12.5px; line-height:1.5; color:var(--text);
+    background:var(--surface-2); border-left:3px solid var(--border); border-radius:0 6px 6px 0;
+    padding:7px 11px; margin-top:7px; font-family:var(--mono); white-space:normal; }
+  .receipt.mismatch .r-quote, .receipt.missing .r-quote { border-left-color:var(--critical); }
   .receipt .r-meta { font-size:11.5px; color:var(--faint); margin-top:4px; }
   .receipt.static { cursor:default; }
   .receipt.static:hover { border-color:var(--border); background:var(--surface); transform:none; }
@@ -559,6 +563,7 @@ function selectCheck(issue, targetEv) {
     b.innerHTML = `<span class="r-ico">${evIcon(e)}</span>
       <span class="r-main"><span class="r-label">${esc(evLabel(e))}</span>
       ${val?`<span class="r-val">${esc(val)}</span>`:""}
+      ${e.snippet?`<span class="r-quote">${esc(e.snippet)}</span>`:""}
       <span class="r-meta">${esc(evMeta(e))}</span></span>
       ${nav?`<span class="r-go">${ICON.go}</span>`:""}`;
     if (nav) b.onclick = () => { document.querySelectorAll(".receipt.active").forEach(n=>n.classList.remove("active"));

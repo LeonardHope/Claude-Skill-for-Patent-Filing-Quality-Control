@@ -6,13 +6,17 @@ from ..locate import locate, locate_flex
 from ..result import Evidence, Locator
 
 
-def data(label, *, actual=None, expected=None, doc_type=None, kind="value"):
+def data(label, *, actual=None, expected=None, doc_type=None, kind="value", snippet=""):
     """A non-located 'data receipt' — the concrete value(s) a check examined,
     optionally tied to a source document (so the UI can still open it). Use this
     for checks that have no single spot to highlight (counts, comparisons,
-    presence lists) so every check still shows the evidence behind its verdict."""
+    presence lists) so every check still shows the evidence behind its verdict.
+    `snippet` carries the verbatim source text the finding refers to (e.g. the
+    offending claim clause) so the reader sees the problem without opening the
+    document."""
     return Evidence(
         doc_type=doc_type, locator=Locator(type="none"), kind=kind, label=label,
+        snippet=snippet or "",
         actual=None if actual is None else str(actual),
         expected=None if expected is None else str(expected),
     )
