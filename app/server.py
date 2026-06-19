@@ -17,12 +17,30 @@ Run:  python3 app/server.py [/path/to/filing/folder]
 Then open http://localhost:8000 (the script tries to open it).
 """
 import json
+import os
 import platform
 import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
+
+# ── Windows compatibility ────────────────────────────────────────────────────
+# qc_patent_filing.py uses emoji in its progress print statements. Windows
+# consoles default to cp1252 which cannot encode them, causing a
+# UnicodeEncodeError that crashes the server silently mid-request.
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+# Tesseract is required for OCR of image-only PDFs (executed declarations,
+# scanned assignments, filing receipts). On Windows it is not on PATH by
+# default even when installed; add the standard install location if present.
+_tesseract_dir = r"C:\Program Files\Tesseract-OCR"
+if platform.system() == "Windows" and os.path.isdir(_tesseract_dir):
+    if _tesseract_dir not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = os.environ.get("PATH", "") + os.pathsep + _tesseract_dir
+# ────────────────────────────────────────────────────────────────────────────
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))           # repo root, for `import core`
