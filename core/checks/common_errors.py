@@ -117,15 +117,24 @@ def _context_receipt(claims_text, spans, regex, *, label, kind="mismatch"):
     return data(lbl, kind=kind, doc_type="Specification", snippet=clause)
 
 
+_ANTE_FUNC_WORDS = {
+    "a", "an", "the", "and", "or", "nor", "but", "of", "to", "for", "in", "on",
+    "at", "by", "with", "said", "is", "are", "was", "were", "as", "from", "that",
+    "which", "wherein", "thereby", "whereby", "further",
+}
+
+
 def _has_bare_introduction(claims_text, term):
     """True if some significant word of `term` first appears in the claims in a
     NON-referential position — i.e. introduced as a bare noun ("by firmware") or
     with "a/an", rather than first appearing as "the/said X". Such an element has
     proper antecedent basis even without an explicit "a/an" introduction (mass
-    nouns like "firmware"/"software", or elements introduced via a preposition).
-    Used to suppress false antecedent-basis warnings."""
+    nouns like "firmware"/"software", elements introduced via a preposition, or
+    acronyms like "(BMC)"). Function words are skipped (checking whether "and"
+    has a bare mention is meaningless) but short acronyms are not. Used to
+    suppress false antecedent-basis warnings."""
     for w in term.split():
-        if len(w) < 4:
+        if len(w) < 2 or w in _ANTE_FUNC_WORDS:
             continue
         m = re.search(r"\b" + re.escape(w) + r"\b", claims_text, re.IGNORECASE)
         if not m:

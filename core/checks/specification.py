@@ -307,11 +307,19 @@ def _reference_numerals(qc):
                  'associated', 'related']
 
     def get_core_name(desc):
-        words = desc.lower().split()
+        # Collapse spaces around hyphens so "dc- scm" (a PDF extraction
+        # artifact) compares equal to "dc-scm".
+        desc = re.sub(r"\s*-\s*", "-", desc.lower())
+        words = desc.split()
         core = [w for w in words if w not in modifiers]
         if not core and words:
             core = [words[-1]]
         return ' '.join(core)
+
+    def _noun_eq(a, b):
+        na = a[:-1] if len(a) > 3 and a.endswith("s") else a
+        nb = b[:-1] if len(b) > 3 and b.endswith("s") else b
+        return a == b or na == nb
 
     def is_acronym_of(short, lng):
         short = short.replace(' ', '').lower()
@@ -324,7 +332,7 @@ def _reference_numerals(qc):
         c1, c2 = get_core_name(d1), get_core_name(d2)
         if c1 == c2 or c1 in c2 or c2 in c1:
             return True
-        if c1.split()[-1] == c2.split()[-1]:
+        if _noun_eq(c1.split()[-1], c2.split()[-1]):   # singular/plural same element
             return True
         if is_acronym_of(c1, c2) or is_acronym_of(c2, c1):
             return True
@@ -334,7 +342,7 @@ def _reference_numerals(qc):
     for num, rd in spec_refs.items():
         descs = rd['descriptions']
         if len(descs) > 1:
-            desc_list = list(descs)
+            desc_list = sorted(descs)   # deterministic grouping (descs is a set)
             groups, used = [], set()
             for i, d1 in enumerate(desc_list):
                 if i in used:

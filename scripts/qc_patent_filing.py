@@ -165,15 +165,24 @@ def _fig_base(fig_id: str) -> str:
     return m.group(1) if m else fig_id
 
 
+_ANTE_FUNC_WORDS = {
+    'a', 'an', 'the', 'and', 'or', 'nor', 'but', 'of', 'to', 'for', 'in', 'on',
+    'at', 'by', 'with', 'said', 'is', 'are', 'was', 'were', 'as', 'from', 'that',
+    'which', 'wherein', 'thereby', 'whereby', 'further',
+}
+
+
 def _has_bare_introduction(claims_text: str, term: str) -> bool:
     """True if some significant word of `term` first appears in the claims in a
     NON-referential position — i.e. introduced as a bare noun ("by firmware") or
     with "a/an", rather than first appearing as "the/said X". Such an element has
     proper antecedent basis even without an explicit "a/an" introduction (mass
-    nouns like "firmware"/"software", or elements introduced via a preposition).
-    Used to suppress false antecedent-basis warnings."""
+    nouns like "firmware"/"software", elements introduced via a preposition, or
+    acronyms like "(BMC)"). Function words are skipped (checking whether "and"
+    has a bare mention is meaningless) but short acronyms are not. Used to
+    suppress false antecedent-basis warnings."""
     for w in term.split():
-        if len(w) < 4:
+        if len(w) < 2 or w in _ANTE_FUNC_WORDS:
             continue
         m = re.search(r'\b' + re.escape(w) + r'\b', claims_text, re.IGNORECASE)
         if not m:
@@ -1657,7 +1666,7 @@ class PatentFilingQC:
             # Standard format: "Title: TITLE HERE"
             r'(?:Title|TITLE)[:\s]+([A-Z][A-Z\s\-]+)',
             # Specification format: Title after docket number and page number
-            # "A088-0170US \n 1 TITLE HERE BACKGROUND"
+            # "X000-0000US \n 1 TITLE HERE BACKGROUND"
             r'Docket[^\n]+\n\s*\d+\s+([A-Z][A-Z\s\-]+)',
             # Declaration/Assignment format: title in quotes
             r'entitled\s*["\']([^"\']+)["\']',
@@ -3177,12 +3186,15 @@ class PatentFilingQC:
 
                     def get_core_name(desc):
                         """Extract core element name from description"""
+                        # Collapse spaces around hyphens so "dc- scm" (a PDF
+                        # extraction artifact) compares equal to "dc-scm".
+                        desc = re.sub(r'\s*-\s*', '-', desc.lower())
                         # Remove common modifiers
                         modifiers = ['target', 'source', 'primary', 'secondary', 'main', 'new', 'old',
                                     'current', 'next', 'previous', 'updated', 'original', 'modified',
                                     'first', 'second', 'third', 'specific', 'particular', 'given',
                                     'respective', 'corresponding', 'associated', 'related']
-                        words = desc.lower().split()
+                        words = desc.split()
                         core_words = [w for w in words if w not in modifiers]
 
                         # If we stripped everything, keep the last word
@@ -3205,8 +3217,13 @@ class PatentFilingQC:
                         if core1 in core2 or core2 in core1:
                             return True
 
-                        # Last word matches (usually the main noun)
-                        if core1.split()[-1] == core2.split()[-1]:
+                        # Last word matches (usually the main noun), treating
+                        # singular/plural as the same element ("sensor"/"sensors").
+                        def _noun_eq(a, b):
+                            na = a[:-1] if len(a) > 3 and a.endswith('s') else a
+                            nb = b[:-1] if len(b) > 3 and b.endswith('s') else b
+                            return a == b or na == nb
+                        if _noun_eq(core1.split()[-1], core2.split()[-1]):
                             return True
 
                         # Acronym match: one is the initials of the other
@@ -3230,8 +3247,10 @@ class PatentFilingQC:
 
                         return False
 
-                    # Group descriptions that refer to the same element
-                    desc_list = list(descs)
+                    # Group descriptions that refer to the same element.
+                    # Sort so grouping is deterministic across processes (descs
+                    # is a set; raw iteration order varies with the hash seed).
+                    desc_list = sorted(descs)
                     distinct_groups = []
                     used = set()
 
