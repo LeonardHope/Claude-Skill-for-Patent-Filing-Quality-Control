@@ -429,7 +429,7 @@ _TITLE = "MEMORY-EFFICIENT INFERENCE FOR LARGE LANGUAGE MODELS"
 @test("LOC.1: locate strips surrounding punctuation from tokens")
 def t():
     from core.locate import _tok, locate
-    if (_tok("X000-0000US)"), _tok("CHEN,"), _tok("(Docket")) != ("X000-0179us", "chen", "docket"):
+    if (_tok("X000-0000US)"), _tok("CHEN,"), _tok("(Docket")) != ("x000-0000us", "chen", "docket"):
         print("  ❌ _tok punctuation strip wrong"); return False
     if not locate(DRAW_PDF, "LUM-0142US"):   # 'LUM-0142US)' in the PDF
         print("  ❌ docket not located against trailing-paren token"); return False
