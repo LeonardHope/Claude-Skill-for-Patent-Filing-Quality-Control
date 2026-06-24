@@ -1604,7 +1604,7 @@ class PatentFilingQC:
             # Standard format: "Title: TITLE HERE"
             r'(?:Title|TITLE)[:\s]+([A-Z][A-Z\s\-]+)',
             # Specification format: Title after docket number and page number
-            # "A088-0170US \n 1 TITLE HERE BACKGROUND"
+            # "X000-0000US \n 1 TITLE HERE BACKGROUND"
             r'Docket[^\n]+\n\s*\d+\s+([A-Z][A-Z\s\-]+)',
             # Declaration/Assignment format: title in quotes
             r'entitled\s*["\']([^"\']+)["\']',
