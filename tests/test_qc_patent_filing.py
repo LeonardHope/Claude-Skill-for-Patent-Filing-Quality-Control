@@ -1239,14 +1239,14 @@ _qc_bare = PatentFilingQC(str(WORK))
 
 @test("DR18.1: image-only file (no text), generic name → Drawings (low conf)")
 def t():
-    r = _qc_bare._maybe_unreadable_drawings("A088-0179US-001", "")
+    r = _qc_bare._maybe_unreadable_drawings("X000-0000US-001", "")
     if r != [("Drawings", 3.0)]:
         print(f"  ❌ got {r}"); return False
     return True
 
 @test("DR18.2: filename '...-Drawings.pdf' → Drawings (the reported case)")
 def t():
-    r = _qc_bare._maybe_unreadable_drawings("A088-0179US-Drawings", "")
+    r = _qc_bare._maybe_unreadable_drawings("X000-0000US-Drawings", "")
     if not r or r[0][0] != "Drawings":
         print(f"  ❌ got {r}"); return False
     return True
@@ -1295,7 +1295,7 @@ def _figure_rich_drawings_text(figs=9, n_callouts=360):
               "RENDERED TEST EXECUTION LOG", "VECTOR DATABASE",
               "REMEDIATION ROUTING ENGINE", "FAULT ORIGIN ATTRIBUTION"]
     for fig in range(1, figs + 1):
-        parts.append(f"Page {fig} of {figs}    (Docket No.: A088-0179US)")
+        parts.append(f"Page {fig} of {figs}    (Docket No.: X000-0000US)")
         for i in range(n_callouts // figs):
             parts.append(labels[i % len(labels)])
             parts.append(str(100 + (i * 2) % 900))   # reference numeral on its own line
@@ -1315,7 +1315,7 @@ def t():
 @test("DR19.2: 'Page N of M' margin header recognized as a sheet signal")
 def t():
     # Sparse text, only the margin header + a couple numerals (no FIG label).
-    text = "Page 1 of 7\n(Docket No.: A088-0179US)\n102\n104\n"
+    text = "Page 1 of 7\n(Docket No.: X000-0000US)\n102\n104\n"
     bt, bs, scores = _qc_bare._score_text(text)
     if scores.get("Drawings", 0) < 3:
         print(f"  ❌ Drawings score too low: {scores.get('Drawings')}"); return False

@@ -21,7 +21,7 @@ def _norm(s: str) -> str:
 
 def _tok(s: str) -> str:
     """Normalize a token and strip surrounding punctuation, keeping internal
-    chars: 'A088-0179US)' -> 'a088-0179us' (internal '-' kept); 'CHEN,' ->
+    chars: 'X000-0000US)' -> 'x000-0000us' (internal '-' kept); 'CHEN,' ->
     'chen'. Lets a phrase match even when the PDF token carries a trailing
     paren/comma from its surrounding text."""
     return _norm(s).strip(_EDGE_PUNCT)
