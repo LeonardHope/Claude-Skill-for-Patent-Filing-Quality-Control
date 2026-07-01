@@ -21,18 +21,18 @@ def _norm(s: str) -> str:
 
 def _tok(s: str) -> str:
     """Normalize a token and strip surrounding punctuation, keeping internal
-    chars: 'X000-0000US)' -> 'x000-0000us' (internal '-' kept); 'CHEN,' ->
-    'chen'. Lets a phrase match even when the PDF token carries a trailing
+    chars: 'X000-0000US)' -> 'x000-0000us' (internal '-' kept); 'EXAMPLE,' ->
+    'example'. Lets a phrase match even when the PDF token carries a trailing
     paren/comma from its surrounding text."""
     return _norm(s).strip(_EDGE_PUNCT)
 
 
 def _collapse(s: str) -> str:
     """Reduce a token to its bare alphanumerics (lowercased): drop surrounding
-    punctuation, internal hyphens, and whitespace. 'RETRIEVAL-' -> 'retrieval',
-    'MULTI-CORE' -> 'multiagent', 'systems.' -> 'systems'. This is what lets a
-    title that line-breaks mid-word ('RETRIEVAL-\\nAUGMENTED') still match the
-    ADS title token 'LOW-LATENCY' — both collapse to the same run of
+    punctuation, internal hyphens, and whitespace. 'LOW-' -> 'low',
+    'MULTI-CORE' -> 'multicore', 'systems.' -> 'systems'. This is what lets a
+    title that line-breaks mid-word ('LOW-\\nLATENCY') still match the
+    ADS title token 'low-latency' — both collapse to the same run of
     characters."""
     return re.sub(r"[^a-z0-9]", "", _norm(s))
 
@@ -41,8 +41,8 @@ def locate(pdf_path, phrase: str, *, pad: float = 1.5) -> Optional[Dict]:
     """First run of consecutive words on a page whose *concatenated characters*
     equal `phrase` (case/space/hyphen/edge-punctuation-insensitive). Matching on
     the collapsed character stream rather than token-by-token means a phrase
-    survives line-break hyphenation ('RETRIEVAL-\\nAUGMENTED') and internal
-    hyphens ('MULTI-CORE' vs 'MULTI-CORE') that split or join words
+    survives line-break hyphenation ('LOW-\\nLATENCY') and internal
+    hyphens ('multi-core' vs 'MULTI-CORE') that split or join words
     differently between the source phrase and the PDF's extracted words.
     Returns {page, bbox:[x0,top,x1,bottom], page_width, page_height, matched}
     or None. Never raises — returns None on any extraction error."""

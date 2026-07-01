@@ -161,9 +161,9 @@ the **receipts** live. Sketch (subject to refinement during the spike):
 {
   "doc_type": "Declaration",      // which document (null for engine-level)
   "locator": Locator,             // where (tagged union below)
-  "snippet": "Sarah J. CHEN",     // the relevant text
-  "expected": "CHEN",             // optional
-  "actual": "CHEN",               // optional
+  "snippet": "Alice J. EXAMPLE",     // the relevant text
+  "expected": "EXAMPLE",             // optional
+  "actual": "EXAMPLE",               // optional
   "kind": "match",                // match | mismatch | missing | value | context
   "label": "ADS inventor 1 surname found in declaration"  // optional caption
 }

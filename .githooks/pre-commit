@@ -1,0 +1,12 @@
+#!/bin/sh
+# Block real client/firm material (e.g. docket numbers like X000-0000US) from
+# being committed to this PUBLIC repo. Enable with:
+#     git config core.hooksPath .githooks
+files=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$files" ] && exit 0
+python3 scripts/check_no_client_material.py $files || {
+    echo ""
+    echo "Commit blocked by .githooks/pre-commit (see message above)."
+    echo "Bypass only if you are certain: git commit --no-verify"
+    exit 1
+}

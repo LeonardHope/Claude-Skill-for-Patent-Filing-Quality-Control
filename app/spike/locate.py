@@ -59,5 +59,5 @@ def locate(pdf_path, phrase: str) -> Optional[Dict]:
 
 if __name__ == "__main__":
     pdf = Path(__file__).resolve().parent.parent / "sample" / "Declaration.pdf"
-    for phrase in ("CHEN", "Aditya Vikram MEHTA", "NOTFOUND"):
+    for phrase in ("EXAMPLE", "Carol Dana SAMPLE", "NOTFOUND"):
         print(f"{phrase!r:25} -> {locate(pdf, phrase)}")

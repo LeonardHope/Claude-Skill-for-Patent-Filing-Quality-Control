@@ -25,13 +25,13 @@ SAMPLE = Path(__file__).resolve().parent.parent / "sample"
 # Simulated authoritative data (in the real build this comes from the ADS XFA
 # extraction + the spec text).
 ADS = {
-    "docket_number": "LUM-0142US",
+    "docket_number": "X000-0000US",
     "inventors": [
-        {"first": "Sarah", "middle": "J.", "last": "CHEN"},
-        {"first": "Aditya", "middle": "Vikram", "last": "MEHTA"},
+        {"first": "Alice", "middle": "J.", "last": "EXAMPLE"},
+        {"first": "Carol", "middle": "Dana", "last": "SAMPLE"},
     ],
 }
-SPEC_DOCKET = "LUM-0142US"  # what the spec carries (matches -> PASS)
+SPEC_DOCKET = "X000-0000US"  # what the spec carries (matches -> PASS)
 
 
 def _document_ref(doc_type: str, path: Path) -> Dict:

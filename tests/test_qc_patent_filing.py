@@ -34,38 +34,38 @@ for _n in ['Spec.pdf', 'Drawings.pdf', 'ADS.pdf', 'Decl.pdf', 'Asgn.pdf',
 # Test fixtures
 # ============================================================
 BASE_INVENTORS = [
-    {"prefix": "", "first": "Sarah", "middle": "J.", "last": "CHEN", "suffix": "",
+    {"prefix": "", "first": "Alice", "middle": "J.", "last": "EXAMPLE", "suffix": "",
      "citizenship": "US", "residency": "us-residency",
      "res_city": "Mountain View", "res_state": "CA", "res_country": "US",
-     "mail_address1": "1500 Lumina Way", "mail_address2": "",
+     "mail_address1": "1 Test Street", "mail_address2": "",
      "mail_city": "Mountain View", "mail_state": "CA",
      "mail_postcode": "94043", "mail_country": "US"},
-    {"prefix": "", "first": "Aditya", "middle": "Vikram", "last": "MEHTA", "suffix": "",
+    {"prefix": "", "first": "Carol", "middle": "Dana", "last": "SAMPLE", "suffix": "",
      "citizenship": "IN", "residency": "non-us-residency",
      "res_city": "Bengaluru", "res_state": "", "res_country": "IN",
-     "mail_address1": "c/o Lumina AI India",
+     "mail_address1": "c/o Acme Corp India",
      "mail_address2": "", "mail_city": "Bengaluru", "mail_state": "KA",
      "mail_postcode": "560103", "mail_country": "IN"},
 ]
 BASE_ADS = {
     "inventors": BASE_INVENTORS,
-    "title": "MEMORY-EFFICIENT INFERENCE FOR LARGE LANGUAGE MODELS",
-    "docket_number": "LUM-0142US", "customer_number": "142810",
-    "attorney_customer_number": "142810", "form_pages": "9",
+    "title": "WIDGET ASSEMBLY DEVICE",
+    "docket_number": "X000-0000US", "customer_number": "100000",
+    "attorney_customer_number": "100000", "form_pages": "9",
     "small_entity": False, "application_type": "REGULAR",
     "submission_type": "UTL", "drawing_sheets": "8",
     "representative_figure": "1", "non_publication": False,
-    "aia_transition": False, "assignee_org": "LUMINA AI, INC.",
-    "assignee_address": {"address1": "1500 Lumina Way", "address2": "",
+    "aia_transition": False, "assignee_org": "ACME CORP.",
+    "assignee_address": {"address1": "1 Test Street", "address2": "",
                          "city": "Mountain View", "state": "CA",
                          "postcode": "94043", "country": "US"},
-    "signer": {"first_name": "Robert", "last_name": "Holcomb",
-               "registration_number": "62198",
-               "signature": "/Robert M. Holcomb/", "date": "2026-05-09"},
+    "signer": {"first_name": "Dana", "last_name": "TESTER",
+               "registration_number": "00000",
+               "signature": "/Dana X. TESTER/", "date": "2026-05-09"},
     "domestic_continuity_entries": [], "foreign_priority_entries": [],
 }
-BASE_SPEC = """LUM-0142US
-MEMORY-EFFICIENT INFERENCE FOR LARGE LANGUAGE MODELS
+BASE_SPEC = """X000-0000US
+WIDGET ASSEMBLY DEVICE
 BACKGROUND
 [0001] Modern LLMs use lots of memory.
 SUMMARY
@@ -85,35 +85,34 @@ A system and method for memory-efficient inference dynamically selects per-layer
 """
 BASE_DRAWINGS = "Sheet 1/2 FIG. 1 100 102\nSheet 2/2 FIG. 2 102 104\n"
 BASE_DECL = """DECLARATION (37 CFR 1.63)
-Attorney Docket Number: LUM-0142US
+Attorney Docket Number: X000-0000US
 I hereby declare that I am an original inventor.
 Inventor 1
 Suffix
-Sarah J. CHEN
-/Sarah J. Chen/  Date: 2026-05-09
+Alice J. EXAMPLE
+/Alice J. Example/  Date: 2026-05-09
 I hereby declare that I am an original inventor.
 Inventor 2
 Suffix
-Aditya Vikram MEHTA
-/Aditya Vikram Mehta/  Date: 2026-05-09
+Carol Dana SAMPLE
+/Carol Dana Sample/  Date: 2026-05-09
 """
 BASE_ASGN = """ASSIGNMENT
-Attorney Docket Number: LUM-0142US
+Attorney Docket Number: X000-0000US
 WHEREAS, Assignor(s):
-Sarah J. CHEN
-Aditya Vikram MEHTA
-are the inventors of the invention entitled MEMORY-EFFICIENT INFERENCE
-FOR LARGE LANGUAGE MODELS described in U.S. Patent Application bearing
-Attorney Docket No. LUM-0142US, hereby sell, assign, and transfer unto
-Assignee, LUMINA AI, INC., the entire right, title and interest.
-/Sarah J. Chen/  Date: 2026-05-09
-/Aditya Vikram Mehta/  Date: 2026-05-09
+Alice J. EXAMPLE
+Carol Dana SAMPLE
+are the inventors of the invention entitled WIDGET ASSEMBLY DEVICE described in U.S. Patent Application bearing
+Attorney Docket No. X000-0000US, hereby sell, assign, and transfer unto
+Assignee, ACME CORP., the entire right, title and interest.
+/Alice J. Example/  Date: 2026-05-09
+/Carol Dana Sample/  Date: 2026-05-09
 """
 BASE_POA = """POWER OF ATTORNEY (PTO/AIA/82B)
-Attorney Docket Number: LUM-0142US
-Applicant: LUMINA AI, INC.
-Customer Number: 142810
-First Named Inventor Sarah J. CHEN
+Attorney Docket Number: X000-0000US
+Applicant: ACME CORP.
+Customer Number: 100000
+First Named Inventor Alice J. EXAMPLE
 /Catherine A. Reyes/  Registration Number: 73415  Date: 2025-09-12
 """
 
@@ -195,33 +194,33 @@ def t():
 # ============================================================
 @test("F2.1: Check 1 → CRITICAL when inventor missing from decl")
 def t():
-    qc = build_qc(decl=BASE_DECL.replace('Aditya Vikram MEHTA', '').replace('/Aditya Vikram Mehta/', ''))
+    qc = build_qc(decl=BASE_DECL.replace('Carol Dana SAMPLE', '').replace('/Carol Dana Sample/', ''))
     return assert_severity(qc, 1, Severity.CRITICAL, "Check 1")
 
 @test("F2.2: Check 2 → CRITICAL when title not in spec")
 def t():
-    qc = build_qc(spec=BASE_SPEC.replace('MEMORY-EFFICIENT INFERENCE FOR LARGE LANGUAGE MODELS', 'TOTALLY DIFFERENT'))
+    qc = build_qc(spec=BASE_SPEC.replace('WIDGET ASSEMBLY DEVICE', 'TOTALLY DIFFERENT'))
     return assert_severity(qc, 2, Severity.CRITICAL, "Check 2")
 
 @test("F2.3: Check 3 → CRITICAL when docket mismatch")
 def t():
-    ads = copy.deepcopy(BASE_ADS); ads['docket_number'] = 'XXX-9999US'
+    ads = copy.deepcopy(BASE_ADS); ads['docket_number'] = 'X999-9999US'
     qc = build_qc(ads_data=ads)
     return assert_severity(qc, 3, Severity.CRITICAL, "Check 3")
 
 @test("F2.4: Check 4 → CRITICAL when customer number mismatch")
 def t():
-    qc = build_qc(poa=BASE_POA.replace('142810', '999999'))
+    qc = build_qc(poa=BASE_POA.replace('100000', '999999'))
     return assert_severity(qc, 4, Severity.CRITICAL, "Check 4")
 
 @test("F2.5: Check 5 → WARN when assignee not in assignment")
 def t():
-    qc = build_qc(asgn=BASE_ASGN.replace('LUMINA AI, INC.', 'TOTALLY DIFFERENT ENTITY'))
+    qc = build_qc(asgn=BASE_ASGN.replace('ACME CORP.', 'TOTALLY DIFFERENT ENTITY'))
     return assert_severity(qc, 5, Severity.WARNING, "Check 5")
 
 @test("F2.6: Check 7 → CRITICAL when decl count < ADS count")
 def t():
-    qc = build_qc(decl=BASE_DECL.split('I hereby declare')[0] + 'I hereby declare\n/Sarah J. Chen/\n')
+    qc = build_qc(decl=BASE_DECL.split('I hereby declare')[0] + 'I hereby declare\n/Alice J. Example/\n')
     return assert_severity(qc, 7, Severity.CRITICAL, "Check 7")
 
 @test("F2.7: Check 9 → CRITICAL when spec missing")
@@ -263,12 +262,12 @@ def t():
 
 @test("F2.12: Check 32 → WARN when inventor not in declaration")
 def t():
-    qc = build_qc(decl=BASE_DECL.replace('Aditya Vikram MEHTA', '').replace('/Aditya Vikram Mehta/', ''))
+    qc = build_qc(decl=BASE_DECL.replace('Carol Dana SAMPLE', '').replace('/Carol Dana Sample/', ''))
     return assert_severity(qc, 32, Severity.WARNING, "Check 32")
 
 @test("F2.13: Check 36 → CRITICAL when assignor missing")
 def t():
-    qc = build_qc(asgn=BASE_ASGN.replace('Aditya Vikram MEHTA', '').replace('/Aditya Vikram Mehta/', ''))
+    qc = build_qc(asgn=BASE_ASGN.replace('Carol Dana SAMPLE', '').replace('/Carol Dana Sample/', ''))
     return assert_severity(qc, 36, Severity.CRITICAL, "Check 36")
 
 @test("F2.14: Check 50 → CRITICAL when placeholder text in spec")
@@ -289,8 +288,8 @@ def t():
 
 @test("F2.17: Check 39 → CRITICAL when assignment date in future")
 def t():
-    future = '/Sarah J. Chen/  Date: 2099-01-01\n/Aditya Vikram Mehta/  Date: 2099-01-01'
-    qc = build_qc(asgn=BASE_ASGN.replace('/Sarah J. Chen/  Date: 2026-05-09\n/Aditya Vikram Mehta/  Date: 2026-05-09', future))
+    future = '/Alice J. Example/  Date: 2099-01-01\n/Carol Dana Sample/  Date: 2099-01-01'
+    qc = build_qc(asgn=BASE_ASGN.replace('/Alice J. Example/  Date: 2026-05-09\n/Carol Dana Sample/  Date: 2026-05-09', future))
     return assert_severity(qc, 39, Severity.CRITICAL, "Check 39")
 
 @test("F2.18: Check 65 → INFO when foreign priority claim present")
@@ -327,7 +326,7 @@ def t():
         "mail_address1": "Munich St", "mail_address2": "",
         "mail_city": "Munich", "mail_state": "", "mail_postcode": "80539", "mail_country": "DE"})
     decl = BASE_DECL + "Inventor 3\nLukas SCHMIDT III\n/Lukas Schmidt III/  Date: 2026-05-09\n"
-    asgn = BASE_ASGN.replace('Aditya Vikram MEHTA', 'Aditya Vikram MEHTA\nLukas SCHMIDT III')
+    asgn = BASE_ASGN.replace('Carol Dana SAMPLE', 'Carol Dana SAMPLE\nLukas SCHMIDT III')
     qc = build_qc(ads_data=ads, decl=decl, asgn=asgn, drawings="")
     qc.run_all_checks()
     issue = get_check(qc, 1)
@@ -443,17 +442,17 @@ def t():
 # ============================================================
 @test("Sig7.1: Check 11 — form labels alone do NOT pass")
 def t():
-    return assert_severity(build_qc(decl="DECLARATION\nLegal name of inventor: Sarah CHEN\nsignature\n"),
+    return assert_severity(build_qc(decl="DECLARATION\nLegal name of inventor: Alice EXAMPLE\nsignature\n"),
                            11, Severity.WARNING, "Check 11 form-label-only")
 
 @test("Sig7.2: Check 11 — /Name/ marker passes")
 def t():
-    return assert_severity(build_qc(decl="DECLARATION\n/Sarah J. Chen/  Date: 2026-05-09\n"),
+    return assert_severity(build_qc(decl="DECLARATION\n/Alice J. Example/  Date: 2026-05-09\n"),
                            11, Severity.PASS, "Check 11 /Name/")
 
 @test("Sig7.3: Check 11 — /s/ Name marker passes")
 def t():
-    return assert_severity(build_qc(decl="DECLARATION\n/s/ Sarah Chen\n2026-05-09\n"),
+    return assert_severity(build_qc(decl="DECLARATION\n/s/ Alice Example\n2026-05-09\n"),
                            11, Severity.PASS, "Check 11 /s/ Name")
 
 @test("Sig7.4: Check 11 — image-only pages → INFO hedge")
@@ -464,7 +463,7 @@ def t():
 
 @test("Sig7.5: Check 12 — /Name/ marker passes (assignment)")
 def t():
-    return assert_severity(build_qc(asgn="ASSIGNMENT\n/Sarah Chen/  Date: 2026-05-09\n"),
+    return assert_severity(build_qc(asgn="ASSIGNMENT\n/Alice Example/  Date: 2026-05-09\n"),
                            12, Severity.PASS, "Check 12 /Name/")
 
 @test("Sig7.6: Check 12 — image-only pages → INFO hedge")
@@ -538,7 +537,7 @@ def t():
 # ============================================================
 # 10. IDS checks 76-80 (NEW — PR #6)
 # ============================================================
-def _ids_xfa(sig="/Robert M. Holcomb/", reg="62198", us_docs=("10123456","10222333"),
+def _ids_xfa(sig="/Dana X. TESTER/", reg="00000", us_docs=("10123456","10222333"),
              pubs=(), foreigns=(), npls=()):
     """Build a minimal XFA-like IDS text blob the check_ids parser understands."""
     parts = ["<ids-form>"]
@@ -581,7 +580,7 @@ def t():
 
 @test("IDS10.3: Check 77 PASS when signature + reg no present")
 def t():
-    qc = build_qc(ids_text=_ids_xfa(sig="/Robert M. Holcomb/", reg="62198"))
+    qc = build_qc(ids_text=_ids_xfa(sig="/Dana X. TESTER/", reg="00000"))
     qc.documents['IDS'] = (WORK / "IDS.pdf")
     return assert_severity(qc, 77, Severity.PASS, "Check 77 signed")
 
@@ -593,7 +592,7 @@ def t():
 
 @test("IDS10.5: Check 77 WARN when only partial (sig, no reg)")
 def t():
-    qc = build_qc(ids_text=_ids_xfa(sig="/Robert M. Holcomb/", reg=""))
+    qc = build_qc(ids_text=_ids_xfa(sig="/Dana X. TESTER/", reg=""))
     qc.documents['IDS'] = (WORK / "IDS.pdf")
     return assert_severity(qc, 77, Severity.WARNING, "Check 77 partial")
 
@@ -646,9 +645,9 @@ def t():
 def t():
     qc = build_qc()
     qc.documents['IDS Written Assertion'] = (WORK / "WA.pdf")
-    qc._extract_acroform_fields = lambda p: {"Check Box1": "/Yes", "Signature": "/Robert Holcomb/",
-                                             "Name PrintTyped": "Robert Holcomb",
-                                             "Practitioner Registration Number if applicable": "62198",
+    qc._extract_acroform_fields = lambda p: {"Check Box1": "/Yes", "Signature": "/Dana TESTER/",
+                                             "Name PrintTyped": "Dana TESTER",
+                                             "Practitioner Registration Number if applicable": "00000",
                                              "Date": "2026-05-09"}
     return assert_severity(qc, 80, Severity.PASS, "Check 80 signed")
 
@@ -685,23 +684,23 @@ def t():
 @test("CS11.3: no-middle and full-middle names still work (no regression)")
 def t():
     qc = PatentFilingQC(str(WORK))
-    for txt, want in [("Suffix\nSarah CHEN\n", "CHEN"),
-                      ("Suffix\nSarah Jane CHEN\n", "CHEN"),
-                      ("Suffix\nAditya Vikram MEHTA\n", "MEHTA")]:
+    for txt, want in [("Suffix\nAlice EXAMPLE\n", "EXAMPLE"),
+                      ("Suffix\nAlice Jane EXAMPLE\n", "EXAMPLE"),
+                      ("Suffix\nCarol Dana SAMPLE\n", "SAMPLE")]:
         names = qc.extract_inventors(txt)
         if not any(want in n for n in names):
             print(f"  ❌ {txt!r} → {names}"); return False
     return True
 
-@test("CS11.4: middle-INITIAL name captured (e.g. 'Sarah J. CHEN')")
+@test("CS11.4: middle-INITIAL name captured (e.g. 'Alice J. EXAMPLE')")
 def t():
     qc = PatentFilingQC(str(WORK))
-    names = qc.extract_inventors("Suffix\nSarah J. CHEN\n")
-    if not any('CHEN' in n for n in names):
+    names = qc.extract_inventors("Suffix\nAlice J. EXAMPLE\n")
+    if not any('EXAMPLE' in n for n in names):
         print(f"  ❌ middle-initial name dropped: {names}"); return False
     # two middle initials
-    names2 = qc.extract_inventors("Suffix\nSarah J. K. CHEN\n")
-    if not any('CHEN' in n for n in names2):
+    names2 = qc.extract_inventors("Suffix\nAlice J. K. EXAMPLE\n")
+    if not any('EXAMPLE' in n for n in names2):
         print(f"  ❌ two-initial name dropped: {names2}"); return False
     return True
 
@@ -710,8 +709,8 @@ def t():
     # Decl mixes a middle-initial name with a full-middle name. Before the fix,
     # only the full-middle name was captured → the other was falsely 'missing'.
     qc = PatentFilingQC(str(WORK))
-    got = qc.extract_inventors("Suffix\nSarah J. CHEN\nSuffix\nAditya Vikram MEHTA\n")
-    if not (any('CHEN' in n for n in got) and any('MEHTA' in n for n in got)):
+    got = qc.extract_inventors("Suffix\nAlice J. EXAMPLE\nSuffix\nCarol Dana SAMPLE\n")
+    if not (any('EXAMPLE' in n for n in got) and any('SAMPLE' in n for n in got)):
         print(f"  ❌ both names not captured: {got}"); return False
     return True
 
@@ -759,13 +758,13 @@ _PDFPLUMBER_NONAMES = (
     "I hereby declare that I am an original inventor.\n"
     "Legal name of inventor: ____________________\n"
 )
-# An OCR-style text that recovered both inventor names (CHEN, MEHTA from BASE_ADS).
+# An OCR-style text that recovered both inventor names (EXAMPLE, SAMPLE from BASE_ADS).
 _OCR_WITHNAMES = (
     "DECLARATION (37 CFR 1.63)\n"
     "I hereby declare that I am an original inventor.\n"
-    "Sarah J. CHEN   /Sarah J. Chen/  2026-05-09\n"
+    "Alice J. EXAMPLE   /Alice J. Example/  2026-05-09\n"
     "I hereby declare that I am an original inventor.\n"
-    "Aditya Vikram MEHTA   /Aditya Vikram Mehta/  2026-05-09\n"
+    "Carol Dana SAMPLE   /Carol Dana Sample/  2026-05-09\n"
 )
 
 def _with_ocr(qc, ocr_return, calls=None):
@@ -786,7 +785,7 @@ def t():
     calls = []
     restore = _with_ocr(qc, _OCR_WITHNAMES, calls)
     try:
-        text_in = "Decl body Sarah J. CHEN ... Aditya Vikram MEHTA ... signed"
+        text_in = "Decl body Alice J. EXAMPLE ... Carol Dana SAMPLE ... signed"
         out = qc._maybe_ocr_for_names(WORK / "Decl.pdf", "Declaration", text_in)
     finally:
         restore()
@@ -880,7 +879,7 @@ def t():
 @test("CR13.8: partial — text has 1/2 names, OCR has 2/2 → OCR wins")
 def t():
     qc = build_qc()
-    text_1of2 = "Decl body Sarah J. CHEN present but co-inventor missing\n"
+    text_1of2 = "Decl body Alice J. EXAMPLE present but co-inventor missing\n"
     restore = _with_ocr(qc, _OCR_WITHNAMES)
     try:
         out = qc._maybe_ocr_for_names(WORK / "Decl.pdf", "Declaration", text_1of2)
@@ -897,7 +896,7 @@ def t():
         print(f"  ❌ expected 2 in OCR text"); return False
     if qc._count_ads_inventors_present(_PDFPLUMBER_NONAMES) != 0:
         print(f"  ❌ expected 0 in boilerplate"); return False
-    if qc._count_ads_inventors_present("only Sarah CHEN here") != 1:
+    if qc._count_ads_inventors_present("only Alice EXAMPLE here") != 1:
         print(f"  ❌ expected 1 partial"); return False
     return True
 
@@ -920,8 +919,8 @@ def t():
 # ENDS IN A LETTER ("...US3."). The "3" is preceded by 'S', not a digit, so the
 # old (?<=\d) gap-fill missed it; (?<=\S) recovers it. Claim 3 must be interior
 # (claim 4 present) because gap-fill only fills gaps below max(detected).
-_SPEC_LETTER_MERGE = """LUM-0142US
-MEMORY-EFFICIENT INFERENCE FOR LARGE LANGUAGE MODELS
+_SPEC_LETTER_MERGE = """X000-0000US
+WIDGET ASSEMBLY DEVICE
 BACKGROUND
 [0001] Body.
 BRIEF DESCRIPTION OF THE DRAWINGS
@@ -933,7 +932,7 @@ CLAIMS
 What is claimed is:
 1. A method comprising measuring sensitivity and selecting precision.
 2. The method of claim 1, wherein the measuring uses Hessian saliency.
-LUM-0142US3. The method of claim 2, further comprising offloading cache entries.
+X000-0000US3. The method of claim 2, further comprising offloading cache entries.
 4. The method of claim 3, wherein the offloading is dynamic.
 ABSTRACT
 A system and method for memory-efficient inference.
@@ -954,7 +953,7 @@ def t():
 def t():
     # Claims 1, 2, 4 — no '3' anywhere. Widened lookbehind must not over-recover.
     spec = _SPEC_LETTER_MERGE.replace(
-        "LUM-0142US3. The method of claim 2, further comprising offloading cache entries.\n", "")
+        "X000-0000US3. The method of claim 2, further comprising offloading cache entries.\n", "")
     qc = build_qc(spec=spec)
     qc.run_all_checks()
     issue = get_check(qc, 13)
@@ -969,9 +968,9 @@ def t():
     # on the immediately following line. The old \s+ tail swallowed the title.
     poa = ("POWER OF ATTORNEY (PTO/AIA/82B)\n"
            "First Named Inventor\n"
-           "Sarah J. CHEN\n"
-           "MEMORY-EFFICIENT INFERENCE FOR LARGE LANGUAGE MODELS\n"
-           "Customer Number: 142810\n")
+           "Alice J. EXAMPLE\n"
+           "WIDGET ASSEMBLY DEVICE\n"
+           "Customer Number: 100000\n")
     qc = build_qc(poa=poa)
     qc.documents['Power of Attorney'] = None  # force poa_text path (skip OCR branch)
     qc.run_all_checks()
@@ -987,7 +986,7 @@ def t():
 
 @test("PR14.4: Check 28 — single-line POA layout still works (no regression)")
 def t():
-    qc = build_qc()  # BASE_POA is single-line "First Named Inventor Sarah J. CHEN"
+    qc = build_qc()  # BASE_POA is single-line "First Named Inventor Alice J. EXAMPLE"
     qc.documents['Power of Attorney'] = None
     qc.run_all_checks()
     issue = get_check(qc, 28)
@@ -1200,8 +1199,8 @@ def t():
 @test("LW17.4: lightweight still catches a file-identity CRITICAL")
 def t():
     # Inventor missing from declaration → Check 1 CRITICAL (a kept identity check)
-    qc = _run_lightweight(decl=BASE_DECL.replace('Aditya Vikram MEHTA', '')
-                          .replace('/Aditya Vikram Mehta/', ''))
+    qc = _run_lightweight(decl=BASE_DECL.replace('Carol Dana SAMPLE', '')
+                          .replace('/Carol Dana Sample/', ''))
     c1 = get_check(qc, 1)
     if not c1 or c1.severity != Severity.CRITICAL:
         print(f"  ❌ Check 1 = {c1.severity.value if c1 else 'absent'} (expected CRITICAL)")
@@ -1397,13 +1396,13 @@ def t():
     return True
 
 # ============================================================
-# 20. Short-surname matching — single-letter family initials (e.g. "Manoj
-#     Kumar P") must not match every stray letter (Check 1 false negative)
+# 20. Short-surname matching — single-letter family initials (e.g. "Alpha
+#     Bravo P") must not match every stray letter (Check 1 false negative)
 # ============================================================
 @test("SS21.1: _surname_present — single-letter surname needs a standalone token")
 def t():
     qc = _qc_bare
-    if not qc._surname_present("P", "MANOJ KUMAR P SIGNED HERE"):
+    if not qc._surname_present("P", "ALPHA BRAVO P SIGNED HERE"):
         print("  ❌ standalone 'P' not matched"); return False
     if qc._surname_present("P", "SPECIFICATION DEPLOYMENT PROCESS"):
         print("  ❌ 'P' inside words matched (spurious)"); return False
@@ -1412,27 +1411,27 @@ def t():
 @test("SS21.2: _surname_present — normal surnames keep substring behavior")
 def t():
     qc = _qc_bare
-    if not qc._surname_present("CHEN", "SARAH J CHEN"):
-        print("  ❌ CHEN not matched"); return False
-    if qc._surname_present("MEHTA", "ONLY CHEN HERE"):
-        print("  ❌ absent MEHTA matched"); return False
+    if not qc._surname_present("EXAMPLE", "ALICE J EXAMPLE"):
+        print("  ❌ EXAMPLE not matched"); return False
+    if qc._surname_present("SAMPLE", "ONLY EXAMPLE HERE"):
+        print("  ❌ absent SAMPLE matched"); return False
     return True
 
 def _ads_single_letter_surname():
     ads = copy.deepcopy(BASE_ADS)
-    ads["inventors"] = [{"prefix": "", "first": "Manoj", "middle": "Kumar",
+    ads["inventors"] = [{"prefix": "", "first": "Alpha", "middle": "Bravo",
                          "last": "P", "suffix": "", "citizenship": "IN",
-                         "residency": "non-us-residency", "res_city": "Chennai",
+                         "residency": "non-us-residency", "res_city": "Examplenai",
                          "res_state": "", "res_country": "IN",
                          "mail_address1": "1 St", "mail_address2": "",
-                         "mail_city": "Chennai", "mail_state": "TN",
+                         "mail_city": "Examplenai", "mail_state": "TN",
                          "mail_postcode": "600001", "mail_country": "IN"}]
     return ads
 
-@test("SS21.3: Check 1 PASS when 'Manoj Kumar P' appears (standalone P)")
+@test("SS21.3: Check 1 PASS when 'Alpha Bravo P' appears (standalone P)")
 def t():
     decl = ("DECLARATION (37 CFR 1.63)\nI hereby declare that I am an original "
-            "inventor.\nInventor 1\nManoj Kumar P\n/Manoj Kumar P/  Date: 2026-05-09\n"
+            "inventor.\nInventor 1\nAlpha Bravo P\n/Alpha Bravo P/  Date: 2026-05-09\n"
             + "padding line.\n" * 10)
     qc = build_qc(ads_data=_ads_single_letter_surname(), decl=decl, asgn=decl)
     qc.run_all_checks()
@@ -1466,7 +1465,7 @@ def _():
     # Rotated landscape drawing pages extract in reverse order, so
     # "…STORAGE AND INDEXING…" comes out "…GNIXEDNI DNA EGAROTS…".
     qc = build_qc(spec="A software method for routing queries among agents.",
-                  drawings="GNIXEDNI DNA EGAROTS 104 GROUND GENERATOR ENGINE",
+                  drawings="GNIXEDNI DNA EGAROTS 104 WIDGET GENERATOR ENGINE",
                   ads_data=None, ads_text="")
     qc.sequence_listing_files = []
     if qc._is_biological_application():
@@ -1488,8 +1487,8 @@ def _():
 
 @test("BIO.82: non-bio filing → Check 82 N/A and Check 85 does not run")
 def _():
-    qc = build_qc(spec="LOW-LATENCY MULTI-CORE systems for language models.",
-                  drawings="STRUCTURED TEXT LANGUAGE MODEL ATTACH VERSION TAG",
+    qc = build_qc(spec="A distributed caching method for storage networks.",
+                  drawings="WIDGET CONTROL MODULE ATTACH VERSION TAG",
                   ads_data=None, ads_text="")
     qc.sequence_listing_files = []
     qc.check_sequence_listing()

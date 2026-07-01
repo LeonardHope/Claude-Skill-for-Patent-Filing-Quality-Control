@@ -453,7 +453,7 @@ class PatentFilingQC:
         """Whether a normalized surname appears in normalized document text.
 
         A very short surname (<= 2 chars — e.g. a single-letter family initial,
-        common in South Indian names such as "Manoj Kumar P") matches almost any
+        common in South Indian names such as "Alpha Bravo P") matches almost any
         text as a bare substring ("p" is inside "specification"), so it must
         appear as a STANDALONE token. Normal-length surnames keep the proven
         substring test."""
@@ -1353,7 +1353,7 @@ class PatentFilingQC:
     def load_documents(self):
         """Locate and load all filing documents by classifying every PDF in the
         folder by *content*, not filename. Files named 'Application.pdf',
-        'Formals.pdf', 'MS3-0230US-A.pdf', etc. are all handled as long as
+        'Formals.pdf', 'X000-0000US-A.pdf', etc. are all handled as long as
         their contents identify them.
         """
         # Initialize all six slots so the report's "Documents Found" list shows
@@ -1546,8 +1546,8 @@ class PatentFilingQC:
         # captured in full instead of being truncated at the first all-caps
         # token. Issue #7.
         # The middle group accepts up to two tokens, each a full word
-        # ("Vikram") OR an initial-with-dot ("J."), so common forms like
-        # "Sarah J. CHEN" are captured. Without this, a middle-initial
+        # ("Dana") OR an initial-with-dot ("J."), so common forms like
+        # "Alice J. EXAMPLE" are captured. Without this, a middle-initial
         # inventor is dropped while a full-middle co-inventor is kept,
         # which can falsely flag the dropped name as missing from a
         # document in the authoritative-source cross-check (Check 71).
@@ -1701,8 +1701,8 @@ class PatentFilingQC:
     def extract_docket_numbers(self, text: str) -> set:
         """Extract ALL docket-shaped tokens from text. Patent filings often
         carry both a Client Docket and an Attorney Docket (e.g.,
-        'Client Docket No.: 412147-US-NP' alongside 'Attorney Docket No.:
-        MS1-9771US'). Cross-doc consistency checks need to know about both,
+        'Client Docket No.: 000000-US-NP' alongside 'Attorney Docket No.:
+        X000-0000US'). Cross-doc consistency checks need to know about both,
         not just whichever appears first."""
         dockets = set()
         # 1. Explicit "<X> Docket No.: <docket>" patterns (highest confidence).
@@ -1718,7 +1718,7 @@ class PatentFilingQC:
                 dockets.add(d)
         # 2. Common bare docket-shaped tokens — dash-separated alphanumeric
         #    sequences with at least one digit (catches both styles like
-        #    "MS1-9771USC3" and "412147-US-NP").
+        #    "X000-0000USC3" and "000000-US-NP").
         for m in re.finditer(
             r'\b([A-Z]{1,5}\d{1,5}[-_]\d{2,5}[A-Z0-9\-_]{0,15})\b',
             text, re.IGNORECASE
@@ -2081,7 +2081,7 @@ class PatentFilingQC:
             noise_words = ['page', 'fig', 'figure', 'claim', 'method', 'system', 'device', 'apparatus',
                           'january', 'february', 'march', 'april', 'may', 'june',
                           'july', 'august', 'september', 'october', 'november', 'december',
-                          'docket', 'attorney', 'no.', 'X000', 'patent', 'application',
+                          'docket', 'attorney', 'no.', 'patent', 'application',
                           'embodiment', 'example', 'implementation', 'aspect', 'routine',
                           'interface between', 'multitude of', 'plurality of', 'portion of']
             if any(noise in desc for noise in noise_words):
@@ -3568,7 +3568,7 @@ class PatentFilingQC:
         # Check 23: Drawings have margin labels (title and docket number).
         # Use the actual docket from XFA when available (the original code's
         # docket regex matched only "X000-0000"-style and missed real-world
-        # firm/customer dockets like "MS1-9771USC3" or "412147-US03-CON").
+        # firm/customer dockets like "X000-0000USC3" or "000000-US03-CON").
         issues_23 = []
 
         # Title check — look for any title word appearing in drawings
@@ -5306,7 +5306,7 @@ class PatentFilingQC:
         # Check 56: File naming conventions
         # Verify each filename contains an expected docket number (taken from
         # the ADS/spec). The previous version's hardcoded pattern `A\d{3}-\d{4}`
-        # only matched specific firm-internal formats like "X000-0000US" and
+        # only matched specific firm-internal formats like "X000-0000" and
         # falsely flagged any other naming convention as "missing docket."
         expected_dockets = set()
         if self.ads_data and self.ads_data.get('docket_number'):
@@ -6682,7 +6682,7 @@ class PatentFilingQC:
     # acronyms in non-biological specs. A genuine biological application always
     # trips one of the specific terms below, or names DNA/RNA in a biological
     # phrase — which the anchored patterns still catch — so nothing real is
-    # lost. (Found reviewing X000-0000US, an AI/MULTI-CORE filing.)
+    # lost. (Found via a real filing whose rotated drawings extracted "AND" as "DNA".)
     _BIOLOGICAL_GATE_TERMS = [
         r'\bSEQ\s+ID\s+NO',
         r'\bsequence\s+listing\b',

@@ -37,7 +37,7 @@ def _make_qc():
         "ADS": None,
     }
     qc.documents = {"Declaration": SAMPLE_PDF}
-    qc.ads_data = {"docket_number": "LUM-0142US"}
+    qc.ads_data = {"docket_number": "X000-0000US"}
     qc.report.add_issue(1, "Cross-Document Consistency", "Inventor Names Consistency",
                         Severity.PASS, "All inventors present", "detail text")
     qc.report.add_issue(9, "Document Completeness", "All Required Documents Present",
@@ -103,7 +103,7 @@ def t():
     res = build_result(_make_qc(), generated_at=GEN_AT)
     if res.generated_at != GEN_AT:
         print(f"  ❌ generated_at = {res.generated_at}"); return False
-    if not res.folder or (res.ads_data or {}).get("docket_number") != "LUM-0142US":
+    if not res.folder or (res.ads_data or {}).get("docket_number") != "X000-0000US":
         print(f"  ❌ folder/ads_data wrong: {res.folder} {res.ads_data}"); return False
     return True
 
@@ -118,8 +118,8 @@ def t():
 
 
 # ---- native Check 1 (core/checks) + Check 3 enricher -----------------------
-# The sample Declaration.pdf carries "Sarah J. CHEN" (page 1) and
-# "Aditya Vikram MEHTA" (page 2).
+# The sample Declaration.pdf carries "Alice J. EXAMPLE" (page 1) and
+# "Carol Dana SAMPLE" (page 2).
 from core.checks.cross_document import check_inventor_names  # noqa: E402
 
 def _qc1(inventors, decl, asgn="", image_only=None, documents=None):
@@ -134,9 +134,9 @@ def _qc1(inventors, decl, asgn="", image_only=None, documents=None):
     qc.documents = documents or {}
     return qc
 
-_INV2 = [{"first": "Sarah", "middle": "J.", "last": "CHEN"},
-         {"first": "Aditya", "middle": "Vikram", "last": "MEHTA"}]
-_DECL_TXT = ("DECLARATION\nSarah J. CHEN and Aditya Vikram MEHTA are inventors.\n"
+_INV2 = [{"first": "Alice", "middle": "J.", "last": "EXAMPLE"},
+         {"first": "Carol", "middle": "Dana", "last": "SAMPLE"}]
+_DECL_TXT = ("DECLARATION\nAlice J. EXAMPLE and Carol Dana SAMPLE are inventors.\n"
              + "padding.\n" * 10)
 
 @test("MIG1.1: native Check 1 PASS + pdf_region per inventor on the right page")
@@ -146,9 +146,9 @@ def t():
     if issue.check_id != 1 or issue.severity != "PASS":
         print(f"  ❌ {issue.check_id}/{issue.severity}: {issue.message[:60]}"); return False
     regions = {e.expected: e for e in issue.evidence if e.locator.type == "pdf_region"}
-    if set(regions) != {"CHEN", "MEHTA"}:
+    if set(regions) != {"EXAMPLE", "SAMPLE"}:
         print(f"  ❌ located surnames: {set(regions)}"); return False
-    if regions["CHEN"].locator.page != 0 or regions["MEHTA"].locator.page != 1:
+    if regions["EXAMPLE"].locator.page != 0 or regions["SAMPLE"].locator.page != 1:
         print("  ❌ wrong pages"); return False
     return True
 
@@ -160,12 +160,12 @@ def t():
     cd.locate = lambda path, q: (calls.append(q), None)[1]   # record order, find nothing
     try:
         qc = _qc1([], "", documents={"Declaration": SAMPLE_PDF})
-        cd._inventor_evidence(qc, [("Manoj Kumar P", "P")])
-        if calls[:2] != ["Manoj Kumar P", "P"]:
+        cd._inventor_evidence(qc, [("Alpha Bravo P", "P")])
+        if calls[:2] != ["Alpha Bravo P", "P"]:
             print(f"  ❌ short-surname order: {calls}"); return False
         calls.clear()
-        cd._inventor_evidence(qc, [("Sarah J. CHEN", "CHEN")])
-        if calls[:2] != ["CHEN", "Sarah J. CHEN"]:
+        cd._inventor_evidence(qc, [("Alice J. EXAMPLE", "EXAMPLE")])
+        if calls[:2] != ["EXAMPLE", "Alice J. EXAMPLE"]:
             print(f"  ❌ normal-surname order: {calls}"); return False
         return True
     finally:
@@ -175,9 +175,9 @@ def t():
 from core.locate import locate, _collapse  # noqa: E402
 
 def _hyphen_split_pdf():
-    """A tiny 1-page PDF whose title line-breaks mid-word ('… RETRIEVAL-' /
-    'AUGMENTED …'), with a lowercase prose restatement lower on the page.
-    Reproduces the X000-0000US layout that made locate() highlight the Summary
+    """A tiny 1-page PDF whose title line-breaks mid-word ('… LOW-' /
+    'LATENCY …'), with a lowercase prose restatement lower on the page.
+    Reproduces the layout that made locate() highlight the Summary
     sentence instead of the title heading. Returns a temp Path (caller unlinks)."""
     from fpdf import FPDF
     import tempfile
@@ -185,12 +185,12 @@ def _hyphen_split_pdf():
     pdf.set_auto_page_break(False)
     pdf.add_page()
     pdf.set_font("Helvetica", size=14)
-    pdf.set_xy(72, 72); pdf.cell(0, 18, "AUTOMATED VALIDATION AND RETRIEVAL-")
-    pdf.set_xy(72, 92); pdf.cell(0, 18, "AUGMENTED MULTI-CORE SYSTEMS")
+    pdf.set_xy(72, 72); pdf.cell(0, 18, "SYSTEMS AND METHODS FOR LOW-")
+    pdf.set_xy(72, 92); pdf.cell(0, 18, "LATENCY DISTRIBUTED CACHING")
     pdf.set_font("Helvetica", size=11)
     pdf.set_xy(72, 300)
-    pdf.cell(0, 14, "Technologies for automated validation and "
-                    "LOW-LATENCY MULTI-CORE systems.")
+    pdf.cell(0, 14, "Technologies for systems and methods for "
+                    "low-latency distributed caching.")
     path = Path(tempfile.mkstemp(suffix=".pdf")[1])
     pdf.output(str(path))
     return path
@@ -203,8 +203,8 @@ def t():
         print("  ⏭  skipped (fpdf not installed — `pip install fpdf2`)"); return True
     path = _hyphen_split_pdf()
     try:
-        hit = locate(path, "AUTOMATED VALIDATION AND LOW-LATENCY "
-                           "MULTI-CORE SYSTEMS")
+        hit = locate(path, "SYSTEMS AND METHODS FOR LOW-LATENCY "
+                           "DISTRIBUTED CACHING")
         if not hit:
             print("  ❌ no match (hyphen-split title not found)"); return False
         # Heading is at top (top≈72); the lowercase restatement is at y≈300.
@@ -218,8 +218,8 @@ def t():
 
 @test("LOC.collapse: _collapse strips case, whitespace, hyphens, edge punct")
 def t():
-    cases = {"RETRIEVAL-": "retrieval", "MULTI-CORE": "multiagent",
-             "systems.": "systems", "  X000-0000US ": "a0880184us"}
+    cases = {"LOW-": "low", "MULTI-CORE": "multicore",
+             "systems.": "systems", "  X000-0000US ": "x0000000us"}
     for src, want in cases.items():
         if _collapse(src) != want:
             print(f"  ❌ _collapse({src!r})={_collapse(src)!r} want {want!r}")
@@ -234,7 +234,7 @@ def _qc(**attrs):
         setattr(qc, k, v)
     return qc
 
-_DOCKET = "MS1-9771USC3"  # a shape the engine's extract_docket_numbers recognizes
+_DOCKET = "X000-0000USC3"  # a shape the engine's extract_docket_numbers recognizes
 
 @test("MIG3.1: native Check 3 PASS when ADS + Spec share a docket; xfa_field receipt")
 def t():
@@ -251,7 +251,7 @@ def t():
 @test("MIG3.2: native Check 3 CRITICAL when dockets disagree")
 def t():
     qc = _qc(ads_data={"docket_number": _DOCKET}, ads_text="",
-             spec_text="Spec XYZ9-8888USA1 body", declaration_text="", assignment_text="",
+             spec_text="Spec X999-9999USA1 body", declaration_text="", assignment_text="",
              documents={})
     issue = check_attorney_docket(qc)
     if issue.severity != "CRITICAL":
@@ -260,19 +260,19 @@ def t():
 
 @test("MIG4.1: native Check 4 PASS when ADS + POA customer numbers match")
 def t():
-    qc = _qc(ads_data={"customer_number": "142810"}, ads_text="",
-             poa_text="Customer Number: 142810", documents={})
+    qc = _qc(ads_data={"customer_number": "100000"}, ads_text="",
+             poa_text="Customer Number: 100000", documents={})
     issue = check_correspondence(qc)
     if issue.check_id != 4 or issue.severity != "PASS":
         print(f"  ❌ {issue.check_id}/{issue.severity}"); return False
     xf = [e for e in issue.evidence if e.locator.type == "xfa_field"]
-    if not xf or xf[0].actual != "142810":
+    if not xf or xf[0].actual != "100000":
         print(f"  ❌ xfa_field wrong: {issue.evidence}"); return False
     return True
 
 @test("MIG4.2: native Check 4 CRITICAL on customer number mismatch")
 def t():
-    qc = _qc(ads_data={"customer_number": "142810"}, ads_text="",
+    qc = _qc(ads_data={"customer_number": "100000"}, ads_text="",
              poa_text="Customer Number: 999999", documents={})
     issue = check_correspondence(qc)
     if issue.severity != "CRITICAL":
@@ -284,8 +284,8 @@ from core.checks.cross_document import (check_assignee_name, check_filing_date, 
 
 @test("MIG5.1: native Check 5 PASS when assignee appears in assignment; xfa_field")
 def t():
-    qc = _qc(ads_data={"assignee_org": "LUMINA AI, INC."}, ads_text="",
-             assignment_text="assigns to LUMINA AI, INC. the entire right title "
+    qc = _qc(ads_data={"assignee_org": "ACME CORP."}, ads_text="",
+             assignment_text="assigns to ACME CORP. the entire right title "
                              "and interest", documents={})
     issue = check_assignee_name(qc)
     if issue.check_id != 5 or issue.severity != "PASS":
@@ -296,7 +296,7 @@ def t():
 
 @test("MIG5.2: native Check 5 WARNING when assignee not found in assignment")
 def t():
-    qc = _qc(ads_data={"assignee_org": "LUMINA AI, INC."}, ads_text="",
+    qc = _qc(ads_data={"assignee_org": "ACME CORP."}, ads_text="",
              assignment_text="assigns to SOME OTHER ENTITY the entire right", documents={})
     issue = check_assignee_name(qc)
     if issue.severity != "WARNING":
@@ -311,7 +311,7 @@ def t():
         print(f"  ❌ {issue.check_id}/{issue.severity}"); return False
     return True
 
-_INV2D = [{"first": "Sarah", "last": "CHEN"}, {"first": "Aditya", "last": "MEHTA"}]
+_INV2D = [{"first": "Alice", "last": "EXAMPLE"}, {"first": "Carol", "last": "SAMPLE"}]
 
 @test("MIG7.1: native Check 7 PASS when ADS count == declaration count")
 def t():
@@ -413,7 +413,7 @@ def t():
 
 @test("MIG11.1: Check 11 — /Name/ PASS, none WARNING, image-only INFO")
 def t():
-    if check_declaration_signatures(_qc(declaration_text="/Sarah Chen/ Date")).severity != "PASS":
+    if check_declaration_signatures(_qc(declaration_text="/Alice Example/ Date")).severity != "PASS":
         print("  ❌ /Name/ not PASS"); return False
     if check_declaration_signatures(_qc(declaration_text="signature line", image_only_pages={})).severity != "WARNING":
         print("  ❌ no-sig not WARNING"); return False
@@ -424,7 +424,7 @@ def t():
 
 @test("MIG12.1: Check 12 — assignment /Name/ PASS, missing N/A (optional)")
 def t():
-    if check_assignment_signatures(_qc(assignment_text="/Sarah Chen/")).severity != "PASS":
+    if check_assignment_signatures(_qc(assignment_text="/Alice Example/")).severity != "PASS":
         print("  ❌ /Name/ not PASS"); return False
     if check_assignment_signatures(_qc(assignment_text="")).severity != "N/A":
         print("  ❌ missing assignment not N/A"); return False
@@ -433,9 +433,9 @@ def t():
 @test("MIG1.2: native Check 1 CRITICAL when an inventor is missing")
 def t():
     # Second inventor is absent from both the text AND the sample PDF.
-    inv = [{"first": "Sarah", "last": "CHEN"},
+    inv = [{"first": "Alice", "last": "EXAMPLE"},
            {"first": "Nobody", "last": "ZZZNOTHERE"}]
-    qc = _qc1(inv, "DECLARATION\nOnly Sarah CHEN is named here.\n" + "padding.\n" * 10,
+    qc = _qc1(inv, "DECLARATION\nOnly Alice EXAMPLE is named here.\n" + "padding.\n" * 10,
               documents={"Declaration": SAMPLE_PDF})
     issue = check_inventor_names(qc)
     if issue.severity != "CRITICAL":
@@ -448,7 +448,7 @@ def t():
 
 @test("MIG1.3: native Check 1 hedges to WARNING when missing on an image-only doc")
 def t():
-    qc = _qc1(_INV2, "DECLARATION\nOnly Sarah J. CHEN is named.\n" + "padding.\n" * 10,
+    qc = _qc1(_INV2, "DECLARATION\nOnly Alice J. EXAMPLE is named.\n" + "padding.\n" * 10,
               image_only={"Declaration": 2}, documents={"Declaration": SAMPLE_PDF})
     issue = check_inventor_names(qc)
     if issue.severity != "WARNING":
@@ -479,14 +479,14 @@ def t():
 
 SPEC_PDF = SAMPLE_PDF.parent / "Specification.pdf"
 DRAW_PDF = SAMPLE_PDF.parent / "Drawings.pdf"
-_TITLE = "MEMORY-EFFICIENT INFERENCE FOR LARGE LANGUAGE MODELS"
+_TITLE = "WIDGET ASSEMBLY DEVICE"
 
 @test("LOC.1: locate strips surrounding punctuation from tokens")
 def t():
     from core.locate import _tok, locate
-    if (_tok("X000-0000US)"), _tok("CHEN,"), _tok("(Docket")) != ("x000-0000us", "chen", "docket"):
+    if (_tok("X000-0000US)"), _tok("EXAMPLE,"), _tok("(Docket")) != ("x000-0000us", "example", "docket"):
         print("  ❌ _tok punctuation strip wrong"); return False
-    if not locate(DRAW_PDF, "LUM-0142US"):   # 'LUM-0142US)' in the PDF
+    if not locate(DRAW_PDF, "X000-0000US"):   # 'X000-0000US)' in the PDF
         print("  ❌ docket not located against trailing-paren token"); return False
     return True
 
@@ -541,9 +541,9 @@ def t():
 @test("MIG23.1: native Check 23 emits a pdf_region docket receipt in the drawings")
 def t():
     from core.checks.drawings import check_drawings
-    qc = _qc(ads_data={"docket_number": "LUM-0142US", "title": "WIDGET ASSEMBLY DEVICE"},
+    qc = _qc(ads_data={"docket_number": "X000-0000US", "title": "WIDGET ASSEMBLY DEVICE"},
              ads_text="", spec_text="",
-             drawings_text="(Docket No.: LUM-0142US) Title: WIDGET ASSEMBLY DEVICE "
+             drawings_text="(Docket No.: X000-0000US) Title: WIDGET ASSEMBLY DEVICE "
                           "FIG. 1 FIG. 2 Sheet 1 of 1",
              documents={"Drawings": DRAW_PDF})
     out = check_drawings(qc)
@@ -573,14 +573,14 @@ from report.html import render  # noqa: E402
 def _report_result():
     return Result(
         folder="/f", generated_at=GEN_AT,
-        ads_data={"title": "WIDGET", "docket_number": "LUM-0142US",
-                  "inventors": [{"last": "CHEN"}]},
+        ads_data={"title": "WIDGET", "docket_number": "X000-0000US",
+                  "inventors": [{"last": "EXAMPLE"}]},
         documents=[DocumentRef("Declaration", "D.pdf", "D.pdf", "pdf", 2)],
         issues=[
             Issue(1, "Cross-Document Consistency", "Inventor Names Consistency",
                   "PASS", "all present", evidence=[Evidence(
                       "Declaration", Locator("pdf_region", page=0, bbox=[1, 2, 3, 4]),
-                      snippet="CHEN", kind="match", label="surname CHEN found")]),
+                      snippet="EXAMPLE", kind="match", label="surname EXAMPLE found")]),
             Issue(9, "Document Completeness", "All Required Documents Present",
                   "CRITICAL", "Spec missing"),
         ])
@@ -597,7 +597,7 @@ def t():
 @test("REP.2: report is evidence-aware (receipts rendered)")
 def t():
     h = render(_report_result())
-    if "receipt" not in h or "surname CHEN found" not in h:
+    if "receipt" not in h or "surname EXAMPLE found" not in h:
         print("  ❌ evidence receipt not rendered"); return False
     if "Declaration p.1" not in h:
         print("  ❌ receipt location not rendered"); return False
@@ -606,7 +606,7 @@ def t():
 @test("REP.3: ADS summary + documents table appear")
 def t():
     h = render(_report_result())
-    if "ADS Data Summary" not in h or "LUM-0142US" not in h:
+    if "ADS Data Summary" not in h or "X000-0000US" not in h:
         print("  ❌ ADS summary missing"); return False
     if "Documents Found" not in h or "D.pdf" not in h:
         print("  ❌ documents table missing"); return False
@@ -628,7 +628,7 @@ def t():
 from core.checks.ids import check_ids  # noqa: E402
 
 
-def _ids_xfa(sig="/Robert M. Holcomb/", reg="62198", us_docs=("10123456", "10222333"),
+def _ids_xfa(sig="/Dana X. TESTER/", reg="00000", us_docs=("10123456", "10222333"),
              pubs=(), npls=()):
     parts = ["<ids-form>", "<electronic-signature><basic-signature><text-string>"
              + (sig or "") + "</text-string></basic-signature>"
@@ -663,9 +663,9 @@ def t():
 @test("MIG77.1: Check 77 PASS (sig+reg), WARN (none), WARN (partial)")
 def t():
     p = SAMPLE_PDF
-    for kw, want in (({"sig": "/R. Holcomb/", "reg": "62198"}, "PASS"),
+    for kw, want in (({"sig": "/R. TESTER/", "reg": "00000"}, "PASS"),
                      ({"sig": "", "reg": ""}, "WARNING"),
-                     ({"sig": "/R. Holcomb/", "reg": ""}, "WARNING")):
+                     ({"sig": "/R. TESTER/", "reg": ""}, "WARNING")):
         qc = _qc(documents={"IDS": p}, ids_text=_ids_xfa(**kw))
         i = _by_id(check_ids(qc), 77)
         if not i or i.severity != want:
@@ -707,8 +707,8 @@ def t():
 def t():
     p = SAMPLE_PDF
     qc = _qc(documents={"IDS Written Assertion": p})
-    qc._extract_acroform_fields = lambda _p: {"Signature": "/R. Holcomb/",
-                                              "Name PrintTyped": "Robert Holcomb",
+    qc._extract_acroform_fields = lambda _p: {"Signature": "/R. TESTER/",
+                                              "Name PrintTyped": "Dana TESTER",
                                               "Date": "2026-05-09"}
     i = _by_id(check_ids(qc), 80)
     if not i or i.severity != "PASS":

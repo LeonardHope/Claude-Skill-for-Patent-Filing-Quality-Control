@@ -81,7 +81,7 @@ either highlights the region in the PDF or shows the data card.
 
 - **Coordinate capture** — `spike/locate.py` maps matched text → page + bbox via
   pdfplumber `extract_words()`. Verified pixel-perfect: the box lands exactly on
-  "CHEN" on page 1 and "MEHTA" on page 2 (rendered-and-inspected).
+  "EXAMPLE" on page 1 and "SAMPLE" on page 2 (rendered-and-inspected).
 - **The schema** — `spike/result_builder.py` emits the `Result` + `Evidence`
   shape from DESIGN.md §5, including both `pdf_region` and `xfa_field` locators.
 - **Delivery** — `spike/serve.py` is a stdlib-only local server (JSON API + PDF
