@@ -12,8 +12,8 @@ from fpdf import FPDF
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "Declaration.pdf"
-TITLE = "MEMORY-EFFICIENT INFERENCE FOR LARGE LANGUAGE MODELS"
-DOCKET = "LUM-0142US"
+TITLE = "WIDGET ASSEMBLY DEVICE"
+DOCKET = "X000-0000US"
 
 
 def build():
@@ -27,17 +27,17 @@ def build():
     pdf.cell(0, 18, "DECLARATION (37 CFR 1.63)")
     pdf.set_font("Helvetica", size=11)
     pdf.set_xy(72, 130)
-    pdf.cell(0, 14, "Attorney Docket Number: LUM-0142US")
+    pdf.cell(0, 14, "Attorney Docket Number: X000-0000US")
     pdf.set_xy(72, 170)
     pdf.cell(0, 14, "I hereby declare that I am an original inventor of the claimed invention.")
     pdf.set_xy(72, 210)
     pdf.cell(0, 14, "Inventor 1")
     pdf.set_font("Helvetica", size=12)
     pdf.set_xy(72, 232)
-    pdf.cell(0, 16, "Sarah J. CHEN")          # <-- locate target on page 1
+    pdf.cell(0, 16, "Alice J. EXAMPLE")          # <-- locate target on page 1
     pdf.set_font("Helvetica", size=11)
     pdf.set_xy(72, 260)
-    pdf.cell(0, 14, "/Sarah J. Chen/    Date: 2026-05-09")
+    pdf.cell(0, 14, "/Alice J. Example/    Date: 2026-05-09")
 
     # ---- Page 2: inventor 2 ----
     pdf.add_page()
@@ -48,10 +48,10 @@ def build():
     pdf.cell(0, 14, "Inventor 2")
     pdf.set_font("Helvetica", size=12)
     pdf.set_xy(72, 152)
-    pdf.cell(0, 16, "Aditya Vikram MEHTA")    # <-- locate target on page 2
+    pdf.cell(0, 16, "Carol Dana SAMPLE")    # <-- locate target on page 2
     pdf.set_font("Helvetica", size=11)
     pdf.set_xy(72, 180)
-    pdf.cell(0, 14, "/Aditya Vikram Mehta/    Date: 2026-05-09")
+    pdf.cell(0, 14, "/Carol Dana Sample/    Date: 2026-05-09")
 
     pdf.output(str(OUT))
     print(f"wrote {OUT}")
@@ -87,7 +87,7 @@ def build_spec():
     line(72, 308, "DETAILED DESCRIPTION")                     # Check 20 (+ receipt)
     line(72, 326, "Referring to FIG. 1, the system 100 includes a processor 110 "
                   "configured to")
-    line(72, 340, "perform memory-efficient inference for large language models.")
+    line(72, 340, "perform widget assembly device.")
 
     # ---- Page 2: claims + abstract ----
     pdf.add_page()
