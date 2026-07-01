@@ -1,0 +1,20 @@
+name: no-client-material
+
+# Fails the build if a real client/firm docket number (e.g. X000-0000US) reaches
+# the repo. This repo is public; QC is often run against unfiled applications, so
+# real matter data must never be committed. See CONTRIBUTING.md.
+on:
+  push:
+    branches: [main, next]
+  pull_request:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Scan tree for client/firm material
+        run: python3 scripts/check_no_client_material.py
