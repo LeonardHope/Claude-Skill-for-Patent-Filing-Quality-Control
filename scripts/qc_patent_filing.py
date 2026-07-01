@@ -7,6 +7,7 @@ Generates a self-contained HTML report with embedded CSS — open in any
 browser; use File → Print → Save as PDF for a paper copy.
 """
 
+import importlib.util
 import json
 import os
 import re
@@ -86,6 +87,74 @@ try:
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
+
+
+def probe_optional_components(needs_docx: bool = False) -> List[Dict[str, str]]:
+    """Return a list of optional components that are NOT installed, so the
+    tool can warn the user instead of silently degrading a check. Each entry is
+    {name, detail, impact, install}. An empty list means everything is present.
+
+    Optional (as opposed to PyPDF2, which is a hard requirement checked at
+    import time above):
+      - pdfplumber        — primary text extractor
+      - python-docx       — only when a .docx is in the folder
+      - the OCR stack      — pytesseract + pdf2image (Python) AND tesseract +
+                            poppler (system binaries); all four are needed for
+                            OCR and for Check 25's color detection.
+    """
+    missing: List[Dict[str, str]] = []
+
+    def _absent(mod: str) -> bool:
+        # find_spec (rather than a real import) keeps the probe side-effect-free
+        # and uniformly patchable in tests.
+        try:
+            return importlib.util.find_spec(mod) is None
+        except ModuleNotFoundError:
+            return True
+
+    if _absent("pdfplumber"):
+        missing.append({
+            "name": "pdfplumber",
+            "detail": "Python package not installed",
+            "impact": "Text extraction falls back to PyPDF2, which drops "
+                      "paragraph structure — spec section, claim, and abstract "
+                      "checks can misfire.",
+            "install": "pip install pdfplumber --break-system-packages",
+        })
+
+    if needs_docx and _absent("docx"):
+        missing.append({
+            "name": "python-docx",
+            "detail": "Python package not installed, but a .docx file is "
+                      "present in the folder",
+            "impact": "The .docx specification cannot be read; its checks "
+                      "are skipped.",
+            "install": "pip install python-docx --break-system-packages",
+        })
+
+    ocr_py = [m for m in ("pytesseract", "pdf2image") if _absent(m)]
+    _BIN_LABEL = {"tesseract": "tesseract", "pdftoppm": "poppler"}
+    ocr_bin = [b for b in ("tesseract", "pdftoppm") if not shutil.which(b)]
+    if ocr_py or ocr_bin:
+        detail_parts = []
+        if ocr_py:
+            detail_parts.append("Python: " + ", ".join(ocr_py))
+        if ocr_bin:
+            detail_parts.append(
+                "system: " + ", ".join(sorted({_BIN_LABEL[b] for b in ocr_bin})))
+        missing.append({
+            "name": "OCR / image analysis "
+                    "(pytesseract + pdf2image + tesseract + poppler)",
+            "detail": "missing — " + "; ".join(detail_parts),
+            "impact": "Scanned / image-only PDFs can't be OCR'd (inventor-name "
+                      "and execution-date checks on scanned declarations, "
+                      "assignments, and POAs degrade), and Check 25 can't "
+                      "analyze drawings for color.",
+            "install": "pip install pytesseract pdf2image --break-system-packages"
+                       "   and   brew install tesseract poppler",
+        })
+
+    return missing
 
 
 class Severity(Enum):
@@ -2190,6 +2259,7 @@ class PatentFilingQC:
 
     def run_all_checks(self):
         """Execute all 70 QC checks"""
+        self.check_environment()
         self._check_unrecognized_files()
         self.check_cross_document_consistency()
         self.check_document_completeness()
@@ -2209,6 +2279,41 @@ class PatentFilingQC:
         self.check_caf()
         self.check_final_quality()
     
+    def check_environment(self):
+        """Check 87: surface optional components that aren't installed, so the
+        user knows which checks are degraded rather than the tool failing
+        silently (e.g. Check 25 quietly punting to a generic manual-review
+        note when the OCR/imaging stack is absent)."""
+        needs_docx = any(
+            (name or "").lower().endswith(".docx")
+            for name in self.report.files_found.values()
+        )
+        missing = probe_optional_components(needs_docx=needs_docx)
+        if not missing:
+            components = "pdfplumber, OCR stack (tesseract + poppler)"
+            if needs_docx:
+                components += ", python-docx"
+            self.report.add_issue(
+                87, "Environment", "Optional Components Installed",
+                Severity.PASS,
+                f"All optional components are installed ({components}) — "
+                f"every check can run at full fidelity."
+            )
+            return
+        lines = []
+        for c in missing:
+            lines.append(f"• {c['name']} — {c['detail']}")
+            lines.append(f"    Impact:  {c['impact']}")
+            lines.append(f"    Install: {c['install']}")
+        self.report.add_issue(
+            87, "Environment", "Optional Components Installed",
+            Severity.WARNING,
+            f"{len(missing)} optional component(s) not installed — the checks "
+            f"below are running in a degraded mode. Install the components to "
+            f"enable full coverage.",
+            "\n".join(lines),
+        )
+
     def _check_unrecognized_files(self):
         """Check 75: surface any files in the folder that didn't classify
         into one of the six known doc types. A pre-filing folder shouldn't
@@ -3699,7 +3804,13 @@ class PatentFilingQC:
         else:
             self.report.add_issue(
                 25, "Drawings", "No Color Drawings",
-                Severity.INFO, "Manual visual inspection recommended - ensure drawings are black and white"
+                Severity.INFO,
+                "Automated color analysis unavailable — the OCR/imaging stack "
+                "(pdf2image + poppler) is not installed, so color could not be "
+                "detected from the drawings. Inspect manually to ensure the "
+                "drawings are black and white (see Check 87 for install steps).",
+                "Install: pip install pdf2image --break-system-packages   and   "
+                "brew install poppler"
             )
         
     
