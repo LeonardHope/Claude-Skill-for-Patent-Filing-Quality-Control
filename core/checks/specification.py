@@ -196,11 +196,15 @@ def _figure_refs(qc, spec) -> Issue:
 def _abstract(qc, spec, spec_path=None) -> Issue:
     name = "Abstract Present and Length Compliant"
     tag = lambda issue: _located(issue, spec_path, "ABSTRACT", "Abstract section")
-    # For a .docx spec, read the abstract from the XML directly (avoids the
-    # page-header/footer noise PDF extraction splices in). Mirrors the engine's
-    # Check 17 (PR #27); falls through to the regex path on PDFs / parse failure.
-    if spec_path and str(spec_path).lower().endswith(".docx"):
-        dx = qc._extract_abstract_from_docx(spec_path)
+    # Read the abstract from the .docx XML directly when a .docx copy exists —
+    # even if a .pdf won the filing-copy tie-break (issue #34). The loader
+    # records the .docx in qc.spec_docx_candidate; the XML avoids the
+    # page-header/footer noise PDF extraction splices in. Mirrors the engine's
+    # Check 17; falls through to the regex path on PDFs / parse failure.
+    docx_path = (spec_path if spec_path and str(spec_path).lower().endswith(".docx")
+                 else getattr(qc, "spec_docx_candidate", None))
+    if docx_path:
+        dx = qc._extract_abstract_from_docx(docx_path)
         if dx is not None:
             wc = len(dx.split())
             if wc == 0:

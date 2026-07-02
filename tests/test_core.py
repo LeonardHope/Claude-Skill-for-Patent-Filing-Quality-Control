@@ -846,6 +846,43 @@ def t():
     return True
 
 
+@test("PARITY.docx-dup: core Check 17 reads the .docx abstract (issue #34), matching the engine")
+def t():
+    # The sample-folder PARITY test has a single .pdf spec, so it can't catch a
+    # skill/viewer divergence on the duplicate-.docx/.pdf abstract path (#34).
+    # Build that scenario explicitly and require engine and core to agree.
+    try:
+        import docx as _dx
+    except ImportError:
+        print("  ⏭  skipped (python-docx not installed — `pip install python-docx`)")
+        return True
+    import tempfile
+    from core.checks.specification import check_specification as core_spec
+    d = _dx.Document(); d.add_paragraph("ABSTRACT"); d.add_paragraph("alpha " * 149)
+    tmp = Path(tempfile.mkstemp(suffix=".docx")[1]); d.save(str(tmp))
+    try:
+        qc = PatentFilingQC(str(SAMPLE_PDF.parent))
+        # Minimal spec text so the PDF-regex path would count very differently
+        # (proving the .docx path is what's used), and a .pdf filing copy so the
+        # code must consult spec_docx_candidate rather than spec_path.
+        qc.spec_text = "TITLE\nABSTRACT\n" + ("noise " * 200)
+        qc.documents = {"Specification": SAMPLE_PDF.parent / "Specification.pdf"}
+        qc.spec_docx_candidate = tmp
+        core17 = next(i for i in core_spec(qc) if i.check_id == 17)
+        qc.check_specification()                                  # engine emits Check 17
+        eng17 = next(i for i in qc.report.issues if i.check_id == 17)
+        core_v = (core17.severity, "149" in core17.message)
+        eng_v = (eng17.severity.value, "149" in eng17.message)
+        if core_v != ("PASS", True):
+            print(f"  ❌ core Check 17 didn't use the .docx: {core17.severity} / {core17.message}")
+            return False
+        if core_v != eng_v:
+            print(f"  ❌ engine/core disagree — eng={eng_v} core={core_v}"); return False
+        return True
+    finally:
+        tmp.unlink()
+
+
 # ---- run -------------------------------------------------------------------
 print("=" * 70)
 print(f"CORE SCHEMA + ADAPTER TESTS — {len(TESTS)} tests")
