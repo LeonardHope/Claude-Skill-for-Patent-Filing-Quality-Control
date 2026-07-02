@@ -6769,6 +6769,14 @@ class PatentFilingQC:
     # extracted document text (and no sequence listing file is present), the
     # sequence-listing checks (82-85) emit a single PASS and return, so
     # non-biological filings don't pay for the pattern scans.
+    # NOTE: bare \bDNA\b / \bRNA\b were removed — they are far too generic to
+    # gate on. "DNA" collides with "AND" reversed (rotated landscape drawing
+    # pages extract in reverse reading order, so "…STORAGE AND INDEXING…"
+    # comes out "…GNIXEDNI DNA EGAROTS…"), and both collide with unrelated
+    # acronyms in non-biological specs. A genuine biological application always
+    # trips one of the specific terms below, or names DNA/RNA in a biological
+    # phrase — which the anchored patterns still catch — so nothing real is
+    # lost. (Found via a real filing whose rotated drawings extracted "AND" as "DNA".)
     _BIOLOGICAL_GATE_TERMS = [
         r'\bSEQ\s+ID\s+NO',
         r'\bsequence\s+listing\b',
@@ -6778,8 +6786,18 @@ class PatentFilingQC:
         r'\boligonucleotide\b',
         r'\bpolypeptide\b',
         r'\bnucleic\s+acid\b',
-        r'\bDNA\b',
-        r'\bRNA\b',
+        # DNA/RNA only when clearly biological: in a descriptive phrase
+        # ("DNA sequence", "RNA molecule"), qualified ("genomic DNA",
+        # "messenger RNA"), or as a specific molecular species (cDNA, mRNA…).
+        r'\b(?:DNA|RNA)\s+(?:sequence|sequences|molecule|molecules|strand|'
+        r'strands|fragment|fragments|construct|constructs|primer|primers|'
+        r'probe|probes|polymerase|template|templates|hybridization|synthesis|'
+        r'replication|transcription|amplification)\b',
+        r'\b(?:genomic|mitochondrial|chromosomal|recombinant|complementary|'
+        r'double-stranded|single-stranded|messenger|ribosomal|transfer|'
+        r'nuclear|viral|plasmid|antisense)\s+(?:DNA|RNA)\b',
+        r'\b(?:cDNA|mRNA|tRNA|rRNA|snRNA|snoRNA|miRNA|siRNA|gRNA|ncRNA|'
+        r'dsDNA|ssDNA|dsRNA|ssRNA)\b',
     ]
 
     def _is_biological_application(self) -> bool:
@@ -7152,29 +7170,35 @@ class PatentFilingQC:
             )
             return
 
-        # 3-letter amino acid codes (standard 20)
+        # 3-letter amino acid codes (standard 20). Case-SENSITIVE (Title-case):
+        # the codes are conventionally written "Ala", "Arg", … and matching
+        # case-insensitively turns ordinary lowercase words into false hits
+        # ("his"→His, "met"→Met, "pro"→Pro, "ser"→Ser).
         _AA3 = (r'(?:Ala|Arg|Asn|Asp|Cys|Gln|Glu|Gly|His|Ile|'
                 r'Leu|Lys|Met|Phe|Pro|Ser|Thr|Trp|Tyr|Val)')
-        # Nucleotide bases (DNA/RNA)
-        _NUC = r'[AGCTUagctu]'
+        # Nucleotide bases (DNA/RNA). UPPERCASE and word-boundaried: inline
+        # sequences in a specification are written as standalone uppercase runs
+        # (e.g. 5'-ATGGCC-3'). Matching lowercase as a substring turned common
+        # English words into false hits — "lanGUAGe", "strUCTUre", "ACCUrate",
+        # "exeCUTAble" all contain runs drawn only from {A,C,G,T,U}. The word
+        # boundaries also stop a run embedded in a longer alphabetic word.
+        _NUC = r'[ACGTU]'
 
         # Patterns: (compiled_regex, label, threshold_count, unit)
         _SEQ_PATTERNS = [
             # Nucleotides: 10+ consecutive bases (above threshold)
-            (re.compile(rf'{_NUC}{{10,}}'),
+            (re.compile(rf'\b{_NUC}{{10,}}\b'),
              'nucleotide', 10, 'bases', 'above'),
             # Nucleotides: 4–9 (below threshold — may not need a listing)
-            (re.compile(rf'{_NUC}{{4,9}}'),
+            (re.compile(rf'\b{_NUC}{{4,9}}\b'),
              'nucleotide', 4, 'bases', 'below'),
             # Amino acids (3-letter): 4+ residues separated by hyphen/space
             (re.compile(
-                rf'{_AA3}(?:[-\s]{_AA3}){{3,}}',
-                re.IGNORECASE),
+                rf'{_AA3}(?:[-\s]{_AA3}){{3,}}'),
              'amino acid (3-letter)', 4, 'residues', 'above'),
             # Amino acids (3-letter): 2–3 residues (below threshold)
             (re.compile(
-                rf'{_AA3}(?:[-\s]{_AA3}){{1,2}}',
-                re.IGNORECASE),
+                rf'{_AA3}(?:[-\s]{_AA3}){{1,2}}'),
              'amino acid (3-letter)', 2, 'residues', 'below'),
             # 1-letter amino acid detection omitted: almost all English letters
             # are valid AA codes (only B, J, O, U, X, Z are not), so any run of

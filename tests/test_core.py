@@ -171,6 +171,61 @@ def t():
     finally:
         cd.locate = orig
 
+# ---- locate(): hyphenation / whitespace tolerance (title-highlight FP fix) --
+from core.locate import locate, _collapse  # noqa: E402
+
+def _hyphen_split_pdf():
+    """A tiny 1-page PDF whose title line-breaks mid-word ('… LOW-' /
+    'LATENCY …'), with a lowercase prose restatement lower on the page.
+    Reproduces the layout that made locate() highlight the Summary
+    sentence instead of the title heading. Returns a temp Path (caller unlinks)."""
+    from fpdf import FPDF
+    import tempfile
+    pdf = FPDF(unit="pt", format="letter")
+    pdf.set_auto_page_break(False)
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=14)
+    pdf.set_xy(72, 72); pdf.cell(0, 18, "SYSTEMS AND METHODS FOR LOW-")
+    pdf.set_xy(72, 92); pdf.cell(0, 18, "LATENCY DISTRIBUTED CACHING")
+    pdf.set_font("Helvetica", size=11)
+    pdf.set_xy(72, 300)
+    pdf.cell(0, 14, "Technologies for systems and methods for "
+                    "low-latency distributed caching.")
+    path = Path(tempfile.mkstemp(suffix=".pdf")[1])
+    pdf.output(str(path))
+    return path
+
+@test("LOC.hyphen: locate() anchors on a title split across a line-break hyphen")
+def t():
+    try:
+        import fpdf  # noqa: F401  (dev-only; used to synthesize the fixture)
+    except ImportError:
+        print("  ⏭  skipped (fpdf not installed — `pip install fpdf2`)"); return True
+    path = _hyphen_split_pdf()
+    try:
+        hit = locate(path, "SYSTEMS AND METHODS FOR LOW-LATENCY "
+                           "DISTRIBUTED CACHING")
+        if not hit:
+            print("  ❌ no match (hyphen-split title not found)"); return False
+        # Heading is at top (top≈72); the lowercase restatement is at y≈300.
+        # Must land on the heading, not the restatement.
+        if hit["bbox"][1] > 150:
+            print(f"  ❌ matched restatement, not heading: top={hit['bbox'][1]:.0f}")
+            return False
+        return True
+    finally:
+        path.unlink()
+
+@test("LOC.collapse: _collapse strips case, whitespace, hyphens, edge punct")
+def t():
+    cases = {"LOW-": "low", "MULTI-CORE": "multicore",
+             "systems.": "systems", "  X000-0000US ": "x0000000us"}
+    for src, want in cases.items():
+        if _collapse(src) != want:
+            print(f"  ❌ _collapse({src!r})={_collapse(src)!r} want {want!r}")
+            return False
+    return True
+
 from core.checks.cross_document import check_attorney_docket, check_correspondence  # noqa: E402
 
 def _qc(**attrs):

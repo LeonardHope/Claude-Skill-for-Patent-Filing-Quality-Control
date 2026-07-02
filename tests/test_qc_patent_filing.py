@@ -1505,6 +1505,78 @@ def _():
     return True
 
 # ============================================================
+# 14. Biological gate & sequence-listing false positives
+#     (reversed drawing text "AND"→"DNA"; common words as nucleotides)
+# ============================================================
+@test("BIO.gate-reversed: reversed 'AND' ('DNA') in drawings does NOT gate biological")
+def _():
+    # Rotated landscape drawing pages extract in reverse order, so
+    # "…STORAGE AND INDEXING…" comes out "…GNIXEDNI DNA EGAROTS…".
+    qc = build_qc(spec="A software method for routing queries among agents.",
+                  drawings="GNIXEDNI DNA EGAROTS 104 WIDGET GENERATOR ENGINE",
+                  ads_data=None, ads_text="")
+    qc.sequence_listing_files = []
+    if qc._is_biological_application():
+        print("  ❌ bare/reversed DNA triggered the biological gate"); return False
+    return True
+
+@test("BIO.gate-real: genuine biological phrases still gate biological")
+def _():
+    for txt in ("The DNA sequence encodes a protein.",
+                "an isolated nucleic acid molecule",
+                "SEQ ID NO: 1",
+                "an mRNA transcript was measured",
+                "genomic DNA was extracted"):
+        qc = build_qc(spec=txt, drawings="", ads_data=None, ads_text="")
+        qc.sequence_listing_files = []
+        if not qc._is_biological_application():
+            print(f"  ❌ failed to gate real bio text: {txt!r}"); return False
+    return True
+
+@test("BIO.82: non-bio filing → Check 82 N/A and Check 85 does not run")
+def _():
+    qc = build_qc(spec="A distributed caching method for storage networks.",
+                  drawings="WIDGET CONTROL MODULE ATTACH VERSION TAG",
+                  ads_data=None, ads_text="")
+    qc.sequence_listing_files = []
+    qc.check_sequence_listing()
+    ids = {i.check_id: i for i in qc.report.issues}
+    if 82 not in ids or ids[82].severity != Severity.N_A:
+        print(f"  ❌ Check 82 = {ids[82].severity if 82 in ids else 'absent'}"); return False
+    if 85 in ids:
+        print("  ❌ Check 85 ran on a non-biological filing"); return False
+    return True
+
+@test("BIO.85-nuc: lowercase words (language/structure) are not nucleotide hits")
+def _():
+    # Force the gate open with a real phrase, then confirm the nucleotide
+    # scanner ignores ordinary lowercase English words in the context window.
+    bio = ("An isolated nucleic acid is described. The language model "
+           "processes the structured representation accurately.")
+    qc = build_qc(spec=bio, drawings="", ads_data=None, ads_text="")
+    qc.sequence_listing_files = []
+    qc.check_sequence_listing()
+    c85 = next((i for i in qc.report.issues if i.check_id == 85), None)
+    if not c85:
+        print("  ❌ Check 85 absent (gate should be open)"); return False
+    blob = (c85.message + " " + (c85.details or "")).lower()
+    if "nucleotide" in blob:
+        print(f"  ❌ false nucleotide hit from prose: {blob[:120]}"); return False
+    return True
+
+@test("BIO.85-real: a genuine uppercase inline sequence IS detected")
+def _():
+    bio = "The nucleic acid comprises the sequence ATGGCATGCATGCAAT as shown."
+    qc = build_qc(spec=bio, drawings="", ads_data=None, ads_text="")
+    qc.sequence_listing_files = []
+    qc.check_sequence_listing()
+    c85 = next((i for i in qc.report.issues if i.check_id == 85), None)
+    blob = (c85.message + " " + (c85.details or "")).lower() if c85 else ""
+    if "nucleotide" not in blob:
+        print(f"  ❌ real 16-base sequence missed: {blob[:120]}"); return False
+    return True
+
+# ============================================================
 # Run
 # ============================================================
 print("="*80); print(f"COMPREHENSIVE TEST SUITE — {len(TESTS)} tests"); print("="*80)
