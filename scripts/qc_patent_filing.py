@@ -7,6 +7,7 @@ Generates a self-contained HTML report with embedded CSS — open in any
 browser; use File → Print → Save as PDF for a paper copy.
 """
 
+import importlib.util
 import json
 import os
 import re
@@ -25,6 +26,19 @@ from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 import argparse
+
+# Windows consoles default to a legacy codepage (e.g. cp1252) that can't encode
+# the emoji used in this script's progress output, which crashes the very first
+# print() before any checks run. Force UTF-8 on stdout/stderr regardless of how
+# the script is invoked, so PYTHONIOENCODING doesn't need to be set manually.
+# (The HTML report already writes with explicit encoding='utf-8'; this only
+# affects console progress output.)
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 # PyPDF2 is required, but we want a friendly error message instead of an
 # import-time crash so the CLI/skill can tell the user how to install it.
@@ -86,6 +100,74 @@ try:
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
+
+
+def probe_optional_components(needs_docx: bool = False) -> List[Dict[str, str]]:
+    """Return a list of optional components that are NOT installed, so the
+    tool can warn the user instead of silently degrading a check. Each entry is
+    {name, detail, impact, install}. An empty list means everything is present.
+
+    Optional (as opposed to PyPDF2, which is a hard requirement checked at
+    import time above):
+      - pdfplumber        — primary text extractor
+      - python-docx       — only when a .docx is in the folder
+      - the OCR stack      — pytesseract + pdf2image (Python) AND tesseract +
+                            poppler (system binaries); all four are needed for
+                            OCR and for Check 25's color detection.
+    """
+    missing: List[Dict[str, str]] = []
+
+    def _absent(mod: str) -> bool:
+        # find_spec (rather than a real import) keeps the probe side-effect-free
+        # and uniformly patchable in tests.
+        try:
+            return importlib.util.find_spec(mod) is None
+        except ModuleNotFoundError:
+            return True
+
+    if _absent("pdfplumber"):
+        missing.append({
+            "name": "pdfplumber",
+            "detail": "Python package not installed",
+            "impact": "Text extraction falls back to PyPDF2, which drops "
+                      "paragraph structure — spec section, claim, and abstract "
+                      "checks can misfire.",
+            "install": "pip install pdfplumber --break-system-packages",
+        })
+
+    if needs_docx and _absent("docx"):
+        missing.append({
+            "name": "python-docx",
+            "detail": "Python package not installed, but a .docx file is "
+                      "present in the folder",
+            "impact": "The .docx specification cannot be read; its checks "
+                      "are skipped.",
+            "install": "pip install python-docx --break-system-packages",
+        })
+
+    ocr_py = [m for m in ("pytesseract", "pdf2image") if _absent(m)]
+    _BIN_LABEL = {"tesseract": "tesseract", "pdftoppm": "poppler"}
+    ocr_bin = [b for b in ("tesseract", "pdftoppm") if not shutil.which(b)]
+    if ocr_py or ocr_bin:
+        detail_parts = []
+        if ocr_py:
+            detail_parts.append("Python: " + ", ".join(ocr_py))
+        if ocr_bin:
+            detail_parts.append(
+                "system: " + ", ".join(sorted({_BIN_LABEL[b] for b in ocr_bin})))
+        missing.append({
+            "name": "OCR / image analysis "
+                    "(pytesseract + pdf2image + tesseract + poppler)",
+            "detail": "missing — " + "; ".join(detail_parts),
+            "impact": "Scanned / image-only PDFs can't be OCR'd (inventor-name "
+                      "and execution-date checks on scanned declarations, "
+                      "assignments, and POAs degrade), and Check 25 can't "
+                      "analyze drawings for color.",
+            "install": "pip install pytesseract pdf2image --break-system-packages"
+                       "   and   brew install tesseract poppler",
+        })
+
+    return missing
 
 
 class Severity(Enum):
@@ -159,6 +241,68 @@ def _fig_sort_key(fig_id: str):
     return (int(m.group(1)), m.group(2)) if m else (0, fig_id)
 
 
+def _fig_base(fig_id: str) -> str:
+    """The figure NUMBER without its sub-figure letter ('4A' -> '4')."""
+    m = re.match(r'(\d+)', fig_id)
+    return m.group(1) if m else fig_id
+
+
+_ANTE_FUNC_WORDS = {
+    'a', 'an', 'the', 'and', 'or', 'nor', 'but', 'of', 'to', 'for', 'in', 'on',
+    'at', 'by', 'with', 'said', 'is', 'are', 'was', 'were', 'as', 'from', 'that',
+    'which', 'wherein', 'thereby', 'whereby', 'further',
+}
+
+
+def _has_bare_introduction(claims_text: str, term: str) -> bool:
+    """True if some significant word of `term` first appears in the claims in a
+    NON-referential position — i.e. introduced as a bare noun ("by firmware") or
+    with "a/an", rather than first appearing as "the/said X". Such an element has
+    proper antecedent basis even without an explicit "a/an" introduction (mass
+    nouns like "firmware"/"software", elements introduced via a preposition, or
+    acronyms like "(BMC)"). Function words are skipped (checking whether "and"
+    has a bare mention is meaningless) but short acronyms are not. Used to
+    suppress false antecedent-basis warnings."""
+    for w in term.split():
+        if len(w) < 2 or w in _ANTE_FUNC_WORDS:
+            continue
+        m = re.search(r'\b' + re.escape(w) + r'\b', claims_text, re.IGNORECASE)
+        if not m:
+            continue
+        prev = re.search(r'([A-Za-z]+)\W*$', claims_text[:m.start()])
+        if not (prev and prev.group(1).lower() in ('the', 'said')):
+            return True
+    return False
+
+
+_CLAIM_VERB_WORDS = {
+    'is', 'are', 'was', 'were', 'be', 'been', 'being', 'has', 'have', 'had',
+    'comprises', 'comprise', 'comprising', 'includes', 'include', 'including',
+    'consists', 'consist', 'consisting', 'having', 'responsive', 'wherein',
+}
+
+
+def _is_claim_term_phrase(words, stop_words) -> bool:
+    """A real claim term is a contiguous noun phrase. Reject n-grams that span a
+    preposition/conjunction ("license application for installation"), contain a
+    verb/copula ("… comprises …", "… is outside"), or contain a gerund
+    ("comprises transmitting"). Those are clause fragments, not element names —
+    they'd never be "defined" in the spec, so flagging them is just noise."""
+    for w in words:
+        if w in stop_words or w in _CLAIM_VERB_WORDS or w.endswith('ing'):
+            return False
+    return True
+
+
+def _is_modifier_extension(v1: str, v2: str) -> bool:
+    """True if one phrase is the other with leading modifier word(s) prepended
+    ("computing device" vs "target computing device"; "challenge token" vs
+    "echoed challenge token"). Such genus/species pairs are deliberate narrower
+    terms, not a terminology inconsistency — don't flag them."""
+    a, b = sorted((v1.split(), v2.split()), key=len)
+    return len(b) > len(a) and b[-len(a):] == a
+
+
 class PatentFilingQC:
     """Main QC engine for patent filing documents"""
     
@@ -193,13 +337,80 @@ class PatentFilingQC:
             'Declaration': None, 'Assignment': None, 'Power of Attorney': None,
             'IDS': None, 'IDS Written Assertion': None,
         }
+        # A .docx copy of the specification, even if a .pdf was picked as the
+        # filing copy in self.documents['Specification']. Checks that need
+        # exact body text (e.g. the abstract word count, Check 17) should prefer
+        # this over PDF text extraction, which can splice in page-header/footer
+        # artifacts and produce false-positive overage warnings.
+        self.spec_docx_candidate: Optional[Path] = None
         # Files that classified as "Unknown" — surfaced in the report so the
         # user knows about them.
         self.unrecognized_files: List[Path] = []
         # Sequence listing files (.xml / .txt) found in the folder — used by
         # the sequence-listing checks (82-85). Populated in load_documents().
         self.sequence_listing_files: List[Path] = []
-        
+
+    @staticmethod
+    def _strip_repeating_headers_footers(page_texts: List[str]) -> List[str]:
+        """Strip running headers/footers (docket number, application title,
+        bare page numbers) that text extraction pulls in from the PDF margin on
+        every page.
+
+        When a claim spans a page break, this boilerplate lands in the middle
+        of claims_text/spec_text and inflates word counts (e.g. the
+        "Excessively Long Claims" check) and pollutes any other check built on
+        that text. Detect lines that repeat near-identically across most pages'
+        first/last couple of lines and drop them before pages are joined. Bare
+        page-number lines are stripped unconditionally since a lone line of
+        digits at a page edge is never claim content."""
+        def normalize(line: str) -> str:
+            line = re.sub(r'\d+', '#', line.strip().lower())
+            return re.sub(r'\s+', ' ', line)
+
+        bare_page_num = re.compile(r'^[\s\-–—]*\d{1,4}[\s\-–—]*$')
+
+        pages_lines = [pt.split('\n') for pt in page_texts]
+        num_pages = len(pages_lines)
+
+        header_counts: Dict[str, int] = {}
+        footer_counts: Dict[str, int] = {}
+        for lines in pages_lines:
+            non_blank = [l for l in lines if l.strip()]
+            for norm in {normalize(l) for l in non_blank[:2] if normalize(l)}:
+                header_counts[norm] = header_counts.get(norm, 0) + 1
+            for norm in {normalize(l) for l in non_blank[-2:] if normalize(l)}:
+                footer_counts[norm] = footer_counts.get(norm, 0) + 1
+
+        repeating: set = set()
+        if num_pages >= 3:
+            threshold = num_pages // 2 + 1
+            repeating |= {n for n, c in header_counts.items() if c >= threshold}
+            repeating |= {n for n, c in footer_counts.items() if c >= threshold}
+
+        cleaned_pages = []
+        for lines in pages_lines:
+            non_blank_idx = [i for i, l in enumerate(lines) if l.strip()]
+            edge_idx = set(non_blank_idx[:2]) | set(non_blank_idx[-2:])
+            kept = []
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped and i in edge_idx and (
+                    normalize(line) in repeating or bare_page_num.match(stripped)
+                ):
+                    continue
+                kept.append(line)
+            cleaned_pages.append('\n'.join(kept))
+        return cleaned_pages
+
+    def _join_page_texts(self, page_texts: List[str]) -> str:
+        """Single choke point for turning a list of per-page text into one
+        document string. Every PDF text-extraction technique (pdfplumber,
+        PyPDF2, pytesseract OCR, tesseract-CLI OCR) funnels its page list
+        through here, so repeating headers/footers are stripped identically no
+        matter which technique produced the pages — the detection logic lives
+        once in _strip_repeating_headers_footers()."""
+        return "".join(pt + "\n" for pt in self._strip_repeating_headers_footers(page_texts))
+
     def extract_pdf_text(self, pdf_path: Path, doc_type: str = "Document") -> str:
         """Extract text from a PDF file. Tries pdfplumber first (preserves
         paragraph structure that the regex-based section/claim checks need),
@@ -212,15 +423,17 @@ class PatentFilingQC:
         image_only_count = 0
         try:
             import pdfplumber
+            page_texts = []
             with pdfplumber.open(pdf_path) as pdf:
                 for page in pdf.pages:
                     page_text = self._extract_page_text_corrected(page)
                     if page_text:
-                        text += page_text + "\n"
+                        page_texts.append(page_text)
                     elif hasattr(page, 'images') and page.images:
                         # Page has no extractable text but does contain images
                         # — typical scanned signed page on declaration/assignment.
                         image_only_count += 1
+            text = self._join_page_texts(page_texts)
             if image_only_count > 0:
                 self.image_only_pages[doc_type] = image_only_count
             clean_text = text.strip()
@@ -234,13 +447,10 @@ class PatentFilingQC:
 
         # Fallback: PyPDF2. Less faithful to layout but doesn't need the dep.
         try:
-            text = ""
             with open(pdf_path, 'rb') as file:
                 reader = PyPDF2.PdfReader(file)
-                for page in reader.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        text += page_text + "\n"
+                page_texts = [pt for pt in (p.extract_text() for p in reader.pages) if pt]
+            text = self._join_page_texts(page_texts)
 
             # Check if we got meaningful text (more than just whitespace/boilerplate)
             clean_text = text.strip()
@@ -347,10 +557,9 @@ class PatentFilingQC:
         recovery path (_maybe_ocr_for_names)."""
         try:
             images = convert_from_path(pdf_path)
-            ocr_text = ""
-            for image in images:
-                ocr_text += pytesseract.image_to_string(image) + "\n"
-            return ocr_text
+            page_texts = [pt for pt in
+                          (pytesseract.image_to_string(image) for image in images) if pt]
+            return self._join_page_texts(page_texts)
         except Exception as ocr_error:
             self._document_read_failure(doc_type, pdf_path, f"OCR failed: {str(ocr_error)}")
             return None
@@ -372,7 +581,7 @@ class PatentFilingQC:
             pages = sorted(tmp.glob('page*.png'))
             if not pages:
                 return ''
-            text_parts = []
+            page_texts = []
             for pg in pages:
                 r = subprocess.run(
                     ['tesseract', str(pg), 'stdout', '-l', 'eng'],
@@ -380,8 +589,8 @@ class PatentFilingQC:
                     errors='replace', timeout=60
                 )
                 if r.returncode == 0 and r.stdout.strip():
-                    text_parts.append(r.stdout)
-            return '\n'.join(text_parts)
+                    page_texts.append(r.stdout)
+            return self._join_page_texts(page_texts)
         except Exception:
             return ''
         finally:
@@ -1372,6 +1581,14 @@ class PatentFilingQC:
             self.report.files_found[doc_type] = best_path.name
             self.documents[doc_type] = best_path
 
+            # Remember a .docx spec copy even when a .pdf wins the filing-copy
+            # tie-break above, so checks that need exact body text can prefer it.
+            if doc_type == 'Specification':
+                for cand_path, _ in candidates:
+                    if cand_path.suffix.lower() == '.docx':
+                        self.spec_docx_candidate = cand_path
+                        break
+
             if len(candidates) > 1:
                 others = ', '.join(p.name for p, _ in candidates[1:])
                 print(f"  ⚠️  Multiple files classified as {doc_type}; using "
@@ -2128,6 +2345,7 @@ class PatentFilingQC:
 
     def run_all_checks(self):
         """Execute all 70 QC checks"""
+        self.check_environment()
         self._check_unrecognized_files()
         self.check_cross_document_consistency()
         self.check_document_completeness()
@@ -2147,6 +2365,41 @@ class PatentFilingQC:
         self.check_caf()
         self.check_final_quality()
     
+    def check_environment(self):
+        """Check 87: surface optional components that aren't installed, so the
+        user knows which checks are degraded rather than the tool failing
+        silently (e.g. Check 25 quietly punting to a generic manual-review
+        note when the OCR/imaging stack is absent)."""
+        needs_docx = any(
+            (name or "").lower().endswith(".docx")
+            for name in self.report.files_found.values()
+        )
+        missing = probe_optional_components(needs_docx=needs_docx)
+        if not missing:
+            components = "pdfplumber, OCR stack (tesseract + poppler)"
+            if needs_docx:
+                components += ", python-docx"
+            self.report.add_issue(
+                87, "Environment", "Optional Components Installed",
+                Severity.PASS,
+                f"All optional components are installed ({components}) — "
+                f"every check can run at full fidelity."
+            )
+            return
+        lines = []
+        for c in missing:
+            lines.append(f"• {c['name']} — {c['detail']}")
+            lines.append(f"    Impact:  {c['impact']}")
+            lines.append(f"    Install: {c['install']}")
+        self.report.add_issue(
+            87, "Environment", "Optional Components Installed",
+            Severity.WARNING,
+            f"{len(missing)} optional component(s) not installed — the checks "
+            f"below are running in a degraded mode. Install the components to "
+            f"enable full coverage.",
+            "\n".join(lines),
+        )
+
     def _check_unrecognized_files(self):
         """Check 75: surface any files in the folder that didn't classify
         into one of the six known doc types. A pre-filing folder shouldn't
@@ -3124,12 +3377,15 @@ class PatentFilingQC:
 
                     def get_core_name(desc):
                         """Extract core element name from description"""
+                        # Collapse spaces around hyphens so "dc- scm" (a PDF
+                        # extraction artifact) compares equal to "dc-scm".
+                        desc = re.sub(r'\s*-\s*', '-', desc.lower())
                         # Remove common modifiers
                         modifiers = ['target', 'source', 'primary', 'secondary', 'main', 'new', 'old',
                                     'current', 'next', 'previous', 'updated', 'original', 'modified',
                                     'first', 'second', 'third', 'specific', 'particular', 'given',
                                     'respective', 'corresponding', 'associated', 'related']
-                        words = desc.lower().split()
+                        words = desc.split()
                         core_words = [w for w in words if w not in modifiers]
 
                         # If we stripped everything, keep the last word
@@ -3152,8 +3408,13 @@ class PatentFilingQC:
                         if core1 in core2 or core2 in core1:
                             return True
 
-                        # Last word matches (usually the main noun)
-                        if core1.split()[-1] == core2.split()[-1]:
+                        # Last word matches (usually the main noun), treating
+                        # singular/plural as the same element ("sensor"/"sensors").
+                        def _noun_eq(a, b):
+                            na = a[:-1] if len(a) > 3 and a.endswith('s') else a
+                            nb = b[:-1] if len(b) > 3 and b.endswith('s') else b
+                            return a == b or na == nb
+                        if _noun_eq(core1.split()[-1], core2.split()[-1]):
                             return True
 
                         # Acronym match: one is the initials of the other
@@ -3177,8 +3438,10 @@ class PatentFilingQC:
 
                         return False
 
-                    # Group descriptions that refer to the same element
-                    desc_list = list(descs)
+                    # Group descriptions that refer to the same element.
+                    # Sort so grouping is deterministic across processes (descs
+                    # is a set; raw iteration order varies with the hash seed).
+                    desc_list = sorted(descs)
                     distinct_groups = []
                     used = set()
 
@@ -3278,10 +3541,18 @@ class PatentFilingQC:
         # When the spec is a .docx, extract the abstract directly from the XML
         # to avoid page-header/footer noise that text-extraction pipelines splice
         # in (which can inflate the count by 40+ words on a typical filing).
+        # Prefer a .docx copy for the abstract even when a .pdf was picked as
+        # the filing copy (the duplicate-resolution tie-break prefers .pdf), so
+        # a duplicate .docx/.pdf spec pair doesn't fall through to the noisier
+        # PDF-regex path and over-count words.
         spec_path_17 = self.documents.get('Specification')
+        docx_spec_path_17 = (
+            spec_path_17 if spec_path_17 and spec_path_17.suffix.lower() == '.docx'
+            else self.spec_docx_candidate
+        )
         _abstract_handled = False
-        if spec_path_17 and spec_path_17.suffix.lower() == '.docx':
-            docx_abstract = self._extract_abstract_from_docx(spec_path_17)
+        if docx_spec_path_17:
+            docx_abstract = self._extract_abstract_from_docx(docx_spec_path_17)
             if docx_abstract is not None:
                 _abstract_handled = True
                 word_count = len(docx_abstract.split())
@@ -3627,7 +3898,13 @@ class PatentFilingQC:
         else:
             self.report.add_issue(
                 25, "Drawings", "No Color Drawings",
-                Severity.INFO, "Manual visual inspection recommended - ensure drawings are black and white"
+                Severity.INFO,
+                "Automated color analysis unavailable — the OCR/imaging stack "
+                "(pdf2image + poppler) is not installed, so color could not be "
+                "detected from the drawings. Inspect manually to ensure the "
+                "drawings are black and white (see Check 87 for install steps).",
+                "Install: pip install pdf2image --break-system-packages   and   "
+                "brew install poppler"
             )
         
     
@@ -4960,7 +5237,8 @@ class PatentFilingQC:
                                         w1 = set(v1.split()[:-1])  # modifiers only
                                         w2 = set(v2.split()[:-1])
                                         # If modifiers are very similar, might be inconsistency
-                                        if w1 and w2 and len(w1.symmetric_difference(w2)) == 1:
+                                        if (w1 and w2 and len(w1.symmetric_difference(w2)) == 1
+                                                and not _is_modifier_extension(v1, v2)):
                                             inconsistencies.append((v1, v2))
 
                 if inconsistencies:
@@ -5068,6 +5346,12 @@ class PatentFilingQC:
                         if ref.split()[-1] == intro.split()[-1]:
                             found = True
                             break
+                    # An element can be introduced without "a/an" — as a bare
+                    # mass noun ("by firmware…") or via a preposition. If its
+                    # first mention in the claims is non-referential, it has
+                    # antecedent basis; don't flag it.
+                    if not found and _has_bare_introduction(claims_text, ref):
+                        found = True
                     if not found:
                         antecedent_issues.append(ref)
 
@@ -5146,7 +5430,8 @@ class PatentFilingQC:
                                        'wherein the', 'comprising', 'configured to', 'adapted to',
                                        'based on', 'according to', 'at least one', 'one or more',
                                        'or more', 'or fewer']
-                        if not any(skip in term for skip in skip_phrases):
+                        if (not any(skip in term for skip in skip_phrases)
+                                and _is_claim_term_phrase(words, conjunction_prep_words)):
                             claim_terms.add(term)
 
                 # Check if claim terms appear in description. Normalize
@@ -5511,21 +5796,43 @@ class PatentFilingQC:
             spec_figs = set(self._extract_figure_identities(self.spec_text))
             drawing_figs = set(self._extract_figure_identities(self.drawings_text))
 
+            sl = ', '.join(sorted(spec_figs, key=_fig_sort_key))
+            dl = ', '.join(sorted(drawing_figs, key=_fig_sort_key))
             if spec_figs == drawing_figs:
                 self.report.add_issue(
                     61, "Cross-References", "Drawing Figure Count Matches Specification",
-                    Severity.PASS, f"Figure numbers match: {len(spec_figs)} figures (FIG. {', '.join(sorted(spec_figs, key=_fig_sort_key))})"
-                )
-            elif len(spec_figs) == len(drawing_figs):
-                self.report.add_issue(
-                    61, "Cross-References", "Drawing Figure Count Matches Specification",
-                    Severity.WARNING, f"Same figure count ({len(spec_figs)}) but different numbers. Spec: {sorted(spec_figs, key=_fig_sort_key)}, Drawings: {sorted(drawing_figs, key=_fig_sort_key)}"
+                    Severity.PASS, f"Figure numbers match: {len(spec_figs)} figures (FIG. {sl})"
                 )
             else:
-                self.report.add_issue(
-                    61, "Cross-References", "Drawing Figure Count Matches Specification",
-                    Severity.WARNING, f"Figure count mismatch: Spec references {len(spec_figs)} figures, Drawings has {len(drawing_figs)} figures"
-                )
+                # Compare by base figure NUMBER (strip sub-figure letters).
+                # Drawings are frequently image-only: OCR reliably reads the
+                # figure number but often drops the A/B/C sub-figure letter, so
+                # a letters-only difference is not a real discrepancy — don't
+                # cry wolf over it.
+                sb = {_fig_base(x) for x in spec_figs}
+                db = {_fig_base(x) for x in drawing_figs}
+                missing = sorted(sb - db, key=int)   # spec numbers absent from drawings
+                extra = sorted(db - sb, key=int)     # drawing numbers not referenced in spec
+                if not missing and not extra:
+                    base_list = ', '.join(sorted(sb, key=int))
+                    self.report.add_issue(
+                        61, "Cross-References", "Drawing Figure Count Matches Specification",
+                        Severity.INFO,
+                        f"Figure numbering is consistent ({len(sb)} figures: FIG. {base_list}). "
+                        f"Spec and drawings differ only in sub-figure lettering (spec: FIG. {sl}; "
+                        f"drawings: FIG. {dl}) — image-only drawings often lose the sub-figure "
+                        f"letter in text extraction. Verify the lettered sub-figures visually."
+                    )
+                else:
+                    parts = []
+                    if missing:
+                        parts.append(f"spec references FIG. {', '.join(missing)} not found in the drawings")
+                    if extra:
+                        parts.append(f"drawings include FIG. {', '.join(extra)} not referenced in the spec")
+                    self.report.add_issue(
+                        61, "Cross-References", "Drawing Figure Count Matches Specification",
+                        Severity.WARNING, "Figure count mismatch: " + "; ".join(parts) + "."
+                    )
         else:
             self.report.add_issue(
                 61, "Cross-References", "Drawing Figure Count Matches Specification",
@@ -6573,6 +6880,14 @@ class PatentFilingQC:
     # extracted document text (and no sequence listing file is present), the
     # sequence-listing checks (82-85) emit a single PASS and return, so
     # non-biological filings don't pay for the pattern scans.
+    # NOTE: bare \bDNA\b / \bRNA\b were removed — they are far too generic to
+    # gate on. "DNA" collides with "AND" reversed (rotated landscape drawing
+    # pages extract in reverse reading order, so "…STORAGE AND INDEXING…"
+    # comes out "…GNIXEDNI DNA EGAROTS…"), and both collide with unrelated
+    # acronyms in non-biological specs. A genuine biological application always
+    # trips one of the specific terms below, or names DNA/RNA in a biological
+    # phrase — which the anchored patterns still catch — so nothing real is
+    # lost. (Found via a real filing whose rotated drawings extracted "AND" as "DNA".)
     _BIOLOGICAL_GATE_TERMS = [
         r'\bSEQ\s+ID\s+NO',
         r'\bsequence\s+listing\b',
@@ -6582,8 +6897,18 @@ class PatentFilingQC:
         r'\boligonucleotide\b',
         r'\bpolypeptide\b',
         r'\bnucleic\s+acid\b',
-        r'\bDNA\b',
-        r'\bRNA\b',
+        # DNA/RNA only when clearly biological: in a descriptive phrase
+        # ("DNA sequence", "RNA molecule"), qualified ("genomic DNA",
+        # "messenger RNA"), or as a specific molecular species (cDNA, mRNA…).
+        r'\b(?:DNA|RNA)\s+(?:sequence|sequences|molecule|molecules|strand|'
+        r'strands|fragment|fragments|construct|constructs|primer|primers|'
+        r'probe|probes|polymerase|template|templates|hybridization|synthesis|'
+        r'replication|transcription|amplification)\b',
+        r'\b(?:genomic|mitochondrial|chromosomal|recombinant|complementary|'
+        r'double-stranded|single-stranded|messenger|ribosomal|transfer|'
+        r'nuclear|viral|plasmid|antisense)\s+(?:DNA|RNA)\b',
+        r'\b(?:cDNA|mRNA|tRNA|rRNA|snRNA|snoRNA|miRNA|siRNA|gRNA|ncRNA|'
+        r'dsDNA|ssDNA|dsRNA|ssRNA)\b',
     ]
 
     def _is_biological_application(self) -> bool:
@@ -6956,29 +7281,35 @@ class PatentFilingQC:
             )
             return
 
-        # 3-letter amino acid codes (standard 20)
+        # 3-letter amino acid codes (standard 20). Case-SENSITIVE (Title-case):
+        # the codes are conventionally written "Ala", "Arg", … and matching
+        # case-insensitively turns ordinary lowercase words into false hits
+        # ("his"→His, "met"→Met, "pro"→Pro, "ser"→Ser).
         _AA3 = (r'(?:Ala|Arg|Asn|Asp|Cys|Gln|Glu|Gly|His|Ile|'
                 r'Leu|Lys|Met|Phe|Pro|Ser|Thr|Trp|Tyr|Val)')
-        # Nucleotide bases (DNA/RNA)
-        _NUC = r'[AGCTUagctu]'
+        # Nucleotide bases (DNA/RNA). UPPERCASE and word-boundaried: inline
+        # sequences in a specification are written as standalone uppercase runs
+        # (e.g. 5'-ATGGCC-3'). Matching lowercase as a substring turned common
+        # English words into false hits — "lanGUAGe", "strUCTUre", "ACCUrate",
+        # "exeCUTAble" all contain runs drawn only from {A,C,G,T,U}. The word
+        # boundaries also stop a run embedded in a longer alphabetic word.
+        _NUC = r'[ACGTU]'
 
         # Patterns: (compiled_regex, label, threshold_count, unit)
         _SEQ_PATTERNS = [
             # Nucleotides: 10+ consecutive bases (above threshold)
-            (re.compile(rf'{_NUC}{{10,}}'),
+            (re.compile(rf'\b{_NUC}{{10,}}\b'),
              'nucleotide', 10, 'bases', 'above'),
             # Nucleotides: 4–9 (below threshold — may not need a listing)
-            (re.compile(rf'{_NUC}{{4,9}}'),
+            (re.compile(rf'\b{_NUC}{{4,9}}\b'),
              'nucleotide', 4, 'bases', 'below'),
             # Amino acids (3-letter): 4+ residues separated by hyphen/space
             (re.compile(
-                rf'{_AA3}(?:[-\s]{_AA3}){{3,}}',
-                re.IGNORECASE),
+                rf'{_AA3}(?:[-\s]{_AA3}){{3,}}'),
              'amino acid (3-letter)', 4, 'residues', 'above'),
             # Amino acids (3-letter): 2–3 residues (below threshold)
             (re.compile(
-                rf'{_AA3}(?:[-\s]{_AA3}){{1,2}}',
-                re.IGNORECASE),
+                rf'{_AA3}(?:[-\s]{_AA3}){{1,2}}'),
              'amino acid (3-letter)', 2, 'residues', 'below'),
             # 1-letter amino acid detection omitted: almost all English letters
             # are valid AA codes (only B, J, O, U, X, Z are not), so any run of

@@ -1457,6 +1457,199 @@ def t():
     return True
 
 # ============================================================
+# 13. Issue fixes: #38 header/footer stripping, #34 .docx abstract preference
+# ============================================================
+@test("ISSUE38: repeating headers/footers stripped when joining pages")
+def _():
+    qc = build_qc()
+    pages = [
+        "Docket No. X000-0000US   (page 1 of 3)\nA claim comprising a first element and\n1",
+        "Docket No. X000-0000US   (page 2 of 3)\na second element coupled to the first,\n2",
+        "Docket No. X000-0000US   (page 3 of 3)\nwherein the elements cooperate.\n3",
+    ]
+    joined = qc._join_page_texts(pages)
+    if "Docket No." in joined:
+        print(f"  ❌ repeating footer not stripped: {joined!r}"); return False
+    if re.search(r'(?m)^\s*[123]\s*$', joined):
+        print(f"  ❌ bare page number retained: {joined!r}"); return False
+    if "second element coupled to the first" not in joined:
+        print(f"  ❌ claim body lost: {joined!r}"); return False
+    return True
+
+@test("ISSUE38: nothing stripped when there is no repeating boilerplate")
+def _():
+    qc = build_qc()
+    pages = ["unique line one\nbody a", "different line two\nbody b"]
+    joined = qc._join_page_texts(pages)
+    for frag in ("unique line one", "different line two", "body a", "body b"):
+        if frag not in joined:
+            print(f"  ❌ non-repeating content dropped: {frag!r}"); return False
+    return True
+
+@test("ISSUE34: Check 17 uses the .docx abstract when a .pdf is the filing copy")
+def _():
+    try:
+        import docx as _dx  # python-docx; optional dep, not in CI's minimal install
+    except ImportError:
+        print("  ⏭  skipped (python-docx not installed — `pip install python-docx`)")
+        return True
+    d = _dx.Document()
+    d.add_paragraph("ABSTRACT")
+    d.add_paragraph("alpha " * 149)          # 149 words -> compliant (limit 150)
+    p = WORK / "spec_issue34.docx"
+    d.save(str(p))
+    qc = build_qc()                          # filing copy is Spec.pdf
+    qc.spec_docx_candidate = p
+    qc.check_specification()
+    c17 = next((i for i in qc.report.issues if i.check_id == 17), None)
+    blob = (c17.message + " " + (c17.details or "")) if c17 else ""
+    if "149" not in blob:
+        print(f"  ❌ Check 17 didn't use the .docx abstract (149 words): {blob[:100]}")
+        return False
+    return True
+
+# ============================================================
+# 14. Biological gate & sequence-listing false positives
+#     (reversed drawing text "AND"→"DNA"; common words as nucleotides)
+# ============================================================
+@test("BIO.gate-reversed: reversed 'AND' ('DNA') in drawings does NOT gate biological")
+def _():
+    # Rotated landscape drawing pages extract in reverse order, so
+    # "…STORAGE AND INDEXING…" comes out "…GNIXEDNI DNA EGAROTS…".
+    qc = build_qc(spec="A software method for routing queries among agents.",
+                  drawings="GNIXEDNI DNA EGAROTS 104 WIDGET GENERATOR ENGINE",
+                  ads_data=None, ads_text="")
+    qc.sequence_listing_files = []
+    if qc._is_biological_application():
+        print("  ❌ bare/reversed DNA triggered the biological gate"); return False
+    return True
+
+@test("BIO.gate-real: genuine biological phrases still gate biological")
+def _():
+    for txt in ("The DNA sequence encodes a protein.",
+                "an isolated nucleic acid molecule",
+                "SEQ ID NO: 1",
+                "an mRNA transcript was measured",
+                "genomic DNA was extracted"):
+        qc = build_qc(spec=txt, drawings="", ads_data=None, ads_text="")
+        qc.sequence_listing_files = []
+        if not qc._is_biological_application():
+            print(f"  ❌ failed to gate real bio text: {txt!r}"); return False
+    return True
+
+@test("BIO.82: non-bio filing → Check 82 N/A and Check 85 does not run")
+def _():
+    qc = build_qc(spec="A distributed caching method for storage networks.",
+                  drawings="WIDGET CONTROL MODULE ATTACH VERSION TAG",
+                  ads_data=None, ads_text="")
+    qc.sequence_listing_files = []
+    qc.check_sequence_listing()
+    ids = {i.check_id: i for i in qc.report.issues}
+    if 82 not in ids or ids[82].severity != Severity.N_A:
+        print(f"  ❌ Check 82 = {ids[82].severity if 82 in ids else 'absent'}"); return False
+    if 85 in ids:
+        print("  ❌ Check 85 ran on a non-biological filing"); return False
+    return True
+
+@test("BIO.85-nuc: lowercase words (language/structure) are not nucleotide hits")
+def _():
+    # Force the gate open with a real phrase, then confirm the nucleotide
+    # scanner ignores ordinary lowercase English words in the context window.
+    bio = ("An isolated nucleic acid is described. The language model "
+           "processes the structured representation accurately.")
+    qc = build_qc(spec=bio, drawings="", ads_data=None, ads_text="")
+    qc.sequence_listing_files = []
+    qc.check_sequence_listing()
+    c85 = next((i for i in qc.report.issues if i.check_id == 85), None)
+    if not c85:
+        print("  ❌ Check 85 absent (gate should be open)"); return False
+    blob = (c85.message + " " + (c85.details or "")).lower()
+    if "nucleotide" in blob:
+        print(f"  ❌ false nucleotide hit from prose: {blob[:120]}"); return False
+    return True
+
+@test("BIO.85-real: a genuine uppercase inline sequence IS detected")
+def _():
+    bio = "The nucleic acid comprises the sequence ATGGCATGCATGCAAT as shown."
+    qc = build_qc(spec=bio, drawings="", ads_data=None, ads_text="")
+    qc.sequence_listing_files = []
+    qc.check_sequence_listing()
+    c85 = next((i for i in qc.report.issues if i.check_id == 85), None)
+    blob = (c85.message + " " + (c85.details or "")).lower() if c85 else ""
+    if "nucleotide" not in blob:
+        print(f"  ❌ real 16-base sequence missed: {blob[:120]}"); return False
+    return True
+
+# ============================================================
+# 15. Environment check (Check 87) — warn on missing optional components
+# ============================================================
+import qc_patent_filing as _qmod  # noqa: E402
+
+def _with_components(present_mods, present_bins):
+    """Context: patch the probe's module/binary detection so we can simulate a
+    machine that is missing optional components regardless of what's installed
+    in the test environment. Returns a restore() callable."""
+    orig_find = _qmod.importlib.util.find_spec
+    orig_which = _qmod.shutil.which
+    _qmod.importlib.util.find_spec = (
+        lambda name, *a, **k: object() if name in present_mods else None)
+    _qmod.shutil.which = (
+        lambda name, *a, **k: ("/usr/bin/" + name) if name in present_bins else None)
+    def restore():
+        _qmod.importlib.util.find_spec = orig_find
+        _qmod.shutil.which = orig_which
+    return restore
+
+_ALL_MODS = {"pdfplumber", "docx", "pytesseract", "pdf2image"}
+_ALL_BINS = {"tesseract", "pdftoppm"}
+
+@test("ENV.all: Check 87 PASS when every optional component is present")
+def _():
+    restore = _with_components(_ALL_MODS, _ALL_BINS)
+    try:
+        qc = build_qc()
+        qc.check_environment()
+        c87 = next((i for i in qc.report.issues if i.check_id == 87), None)
+        if not c87 or c87.severity != Severity.PASS:
+            print(f"  ❌ Check 87 = {c87.severity if c87 else 'absent'}"); return False
+        return True
+    finally:
+        restore()
+
+@test("ENV.ocr-missing: Check 87 WARNING names the OCR stack + install command")
+def _():
+    # OCR python wrappers + poppler binary gone; pdfplumber still present.
+    restore = _with_components({"pdfplumber", "docx"}, {"tesseract"})
+    try:
+        qc = build_qc()
+        qc.check_environment()
+        c87 = next((i for i in qc.report.issues if i.check_id == 87), None)
+        if not c87 or c87.severity != Severity.WARNING:
+            print(f"  ❌ Check 87 = {c87.severity if c87 else 'absent'}"); return False
+        blob = c87.message + " " + (c87.details or "")
+        if "pip install" not in blob or "poppler" not in blob:
+            print(f"  ❌ missing install/impact detail: {blob[:160]}"); return False
+        return True
+    finally:
+        restore()
+
+@test("ENV.docx-gated: python-docx flagged only when a .docx is in the folder")
+def _():
+    restore = _with_components({"pdfplumber", "pytesseract", "pdf2image"}, _ALL_BINS)
+    try:
+        # No .docx present → python-docx absence must NOT be reported.
+        m_no = _qmod.probe_optional_components(needs_docx=False)
+        if any("python-docx" in c["name"] for c in m_no):
+            print("  ❌ python-docx flagged with no .docx present"); return False
+        # .docx present → it must be reported.
+        m_yes = _qmod.probe_optional_components(needs_docx=True)
+        if not any("python-docx" in c["name"] for c in m_yes):
+            print("  ❌ python-docx not flagged when a .docx is present"); return False
+        return True
+    finally:
+        restore()
+
+# ============================================================
 # Run
 # ============================================================
 print("="*80); print(f"COMPREHENSIVE TEST SUITE — {len(TESTS)} tests"); print("="*80)
