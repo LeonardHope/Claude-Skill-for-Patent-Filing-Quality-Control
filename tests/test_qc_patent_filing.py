@@ -1457,6 +1457,54 @@ def t():
     return True
 
 # ============================================================
+# 13. Issue fixes: #38 header/footer stripping, #34 .docx abstract preference
+# ============================================================
+@test("ISSUE38: repeating headers/footers stripped when joining pages")
+def _():
+    qc = build_qc()
+    pages = [
+        "Docket No. X000-0000US   (page 1 of 3)\nA claim comprising a first element and\n1",
+        "Docket No. X000-0000US   (page 2 of 3)\na second element coupled to the first,\n2",
+        "Docket No. X000-0000US   (page 3 of 3)\nwherein the elements cooperate.\n3",
+    ]
+    joined = qc._join_page_texts(pages)
+    if "Docket No." in joined:
+        print(f"  ❌ repeating footer not stripped: {joined!r}"); return False
+    if re.search(r'(?m)^\s*[123]\s*$', joined):
+        print(f"  ❌ bare page number retained: {joined!r}"); return False
+    if "second element coupled to the first" not in joined:
+        print(f"  ❌ claim body lost: {joined!r}"); return False
+    return True
+
+@test("ISSUE38: nothing stripped when there is no repeating boilerplate")
+def _():
+    qc = build_qc()
+    pages = ["unique line one\nbody a", "different line two\nbody b"]
+    joined = qc._join_page_texts(pages)
+    for frag in ("unique line one", "different line two", "body a", "body b"):
+        if frag not in joined:
+            print(f"  ❌ non-repeating content dropped: {frag!r}"); return False
+    return True
+
+@test("ISSUE34: Check 17 uses the .docx abstract when a .pdf is the filing copy")
+def _():
+    import docx as _dx
+    d = _dx.Document()
+    d.add_paragraph("ABSTRACT")
+    d.add_paragraph("alpha " * 149)          # 149 words -> compliant (limit 150)
+    p = WORK / "spec_issue34.docx"
+    d.save(str(p))
+    qc = build_qc()                          # filing copy is Spec.pdf
+    qc.spec_docx_candidate = p
+    qc.check_specification()
+    c17 = next((i for i in qc.report.issues if i.check_id == 17), None)
+    blob = (c17.message + " " + (c17.details or "")) if c17 else ""
+    if "149" not in blob:
+        print(f"  ❌ Check 17 didn't use the .docx abstract (149 words): {blob[:100]}")
+        return False
+    return True
+
+# ============================================================
 # Run
 # ============================================================
 print("="*80); print(f"COMPREHENSIVE TEST SUITE — {len(TESTS)} tests"); print("="*80)

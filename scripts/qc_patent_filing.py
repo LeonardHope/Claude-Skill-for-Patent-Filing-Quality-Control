@@ -26,6 +26,19 @@ from dataclasses import dataclass, field
 from enum import Enum
 import argparse
 
+# Windows consoles default to a legacy codepage (e.g. cp1252) that can't encode
+# the emoji used in this script's progress output, which crashes the very first
+# print() before any checks run. Force UTF-8 on stdout/stderr regardless of how
+# the script is invoked, so PYTHONIOENCODING doesn't need to be set manually.
+# (The HTML report already writes with explicit encoding='utf-8'; this only
+# affects console progress output.)
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 # PyPDF2 is required, but we want a friendly error message instead of an
 # import-time crash so the CLI/skill can tell the user how to install it.
 try:
@@ -255,13 +268,80 @@ class PatentFilingQC:
             'Declaration': None, 'Assignment': None, 'Power of Attorney': None,
             'IDS': None, 'IDS Written Assertion': None,
         }
+        # A .docx copy of the specification, even if a .pdf was picked as the
+        # filing copy in self.documents['Specification']. Checks that need
+        # exact body text (e.g. the abstract word count, Check 17) should prefer
+        # this over PDF text extraction, which can splice in page-header/footer
+        # artifacts and produce false-positive overage warnings.
+        self.spec_docx_candidate: Optional[Path] = None
         # Files that classified as "Unknown" — surfaced in the report so the
         # user knows about them.
         self.unrecognized_files: List[Path] = []
         # Sequence listing files (.xml / .txt) found in the folder — used by
         # the sequence-listing checks (82-85). Populated in load_documents().
         self.sequence_listing_files: List[Path] = []
-        
+
+    @staticmethod
+    def _strip_repeating_headers_footers(page_texts: List[str]) -> List[str]:
+        """Strip running headers/footers (docket number, application title,
+        bare page numbers) that text extraction pulls in from the PDF margin on
+        every page.
+
+        When a claim spans a page break, this boilerplate lands in the middle
+        of claims_text/spec_text and inflates word counts (e.g. the
+        "Excessively Long Claims" check) and pollutes any other check built on
+        that text. Detect lines that repeat near-identically across most pages'
+        first/last couple of lines and drop them before pages are joined. Bare
+        page-number lines are stripped unconditionally since a lone line of
+        digits at a page edge is never claim content."""
+        def normalize(line: str) -> str:
+            line = re.sub(r'\d+', '#', line.strip().lower())
+            return re.sub(r'\s+', ' ', line)
+
+        bare_page_num = re.compile(r'^[\s\-–—]*\d{1,4}[\s\-–—]*$')
+
+        pages_lines = [pt.split('\n') for pt in page_texts]
+        num_pages = len(pages_lines)
+
+        header_counts: Dict[str, int] = {}
+        footer_counts: Dict[str, int] = {}
+        for lines in pages_lines:
+            non_blank = [l for l in lines if l.strip()]
+            for norm in {normalize(l) for l in non_blank[:2] if normalize(l)}:
+                header_counts[norm] = header_counts.get(norm, 0) + 1
+            for norm in {normalize(l) for l in non_blank[-2:] if normalize(l)}:
+                footer_counts[norm] = footer_counts.get(norm, 0) + 1
+
+        repeating: set = set()
+        if num_pages >= 3:
+            threshold = num_pages // 2 + 1
+            repeating |= {n for n, c in header_counts.items() if c >= threshold}
+            repeating |= {n for n, c in footer_counts.items() if c >= threshold}
+
+        cleaned_pages = []
+        for lines in pages_lines:
+            non_blank_idx = [i for i, l in enumerate(lines) if l.strip()]
+            edge_idx = set(non_blank_idx[:2]) | set(non_blank_idx[-2:])
+            kept = []
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped and i in edge_idx and (
+                    normalize(line) in repeating or bare_page_num.match(stripped)
+                ):
+                    continue
+                kept.append(line)
+            cleaned_pages.append('\n'.join(kept))
+        return cleaned_pages
+
+    def _join_page_texts(self, page_texts: List[str]) -> str:
+        """Single choke point for turning a list of per-page text into one
+        document string. Every PDF text-extraction technique (pdfplumber,
+        PyPDF2, pytesseract OCR, tesseract-CLI OCR) funnels its page list
+        through here, so repeating headers/footers are stripped identically no
+        matter which technique produced the pages — the detection logic lives
+        once in _strip_repeating_headers_footers()."""
+        return "".join(pt + "\n" for pt in self._strip_repeating_headers_footers(page_texts))
+
     def extract_pdf_text(self, pdf_path: Path, doc_type: str = "Document") -> str:
         """Extract text from a PDF file. Tries pdfplumber first (preserves
         paragraph structure that the regex-based section/claim checks need),
@@ -274,15 +354,17 @@ class PatentFilingQC:
         image_only_count = 0
         try:
             import pdfplumber
+            page_texts = []
             with pdfplumber.open(pdf_path) as pdf:
                 for page in pdf.pages:
                     page_text = self._extract_page_text_corrected(page)
                     if page_text:
-                        text += page_text + "\n"
+                        page_texts.append(page_text)
                     elif hasattr(page, 'images') and page.images:
                         # Page has no extractable text but does contain images
                         # — typical scanned signed page on declaration/assignment.
                         image_only_count += 1
+            text = self._join_page_texts(page_texts)
             if image_only_count > 0:
                 self.image_only_pages[doc_type] = image_only_count
             clean_text = text.strip()
@@ -296,13 +378,10 @@ class PatentFilingQC:
 
         # Fallback: PyPDF2. Less faithful to layout but doesn't need the dep.
         try:
-            text = ""
             with open(pdf_path, 'rb') as file:
                 reader = PyPDF2.PdfReader(file)
-                for page in reader.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        text += page_text + "\n"
+                page_texts = [pt for pt in (p.extract_text() for p in reader.pages) if pt]
+            text = self._join_page_texts(page_texts)
 
             # Check if we got meaningful text (more than just whitespace/boilerplate)
             clean_text = text.strip()
@@ -409,10 +488,9 @@ class PatentFilingQC:
         recovery path (_maybe_ocr_for_names)."""
         try:
             images = convert_from_path(pdf_path)
-            ocr_text = ""
-            for image in images:
-                ocr_text += pytesseract.image_to_string(image) + "\n"
-            return ocr_text
+            page_texts = [pt for pt in
+                          (pytesseract.image_to_string(image) for image in images) if pt]
+            return self._join_page_texts(page_texts)
         except Exception as ocr_error:
             self._document_read_failure(doc_type, pdf_path, f"OCR failed: {str(ocr_error)}")
             return None
@@ -434,7 +512,7 @@ class PatentFilingQC:
             pages = sorted(tmp.glob('page*.png'))
             if not pages:
                 return ''
-            text_parts = []
+            page_texts = []
             for pg in pages:
                 r = subprocess.run(
                     ['tesseract', str(pg), 'stdout', '-l', 'eng'],
@@ -442,8 +520,8 @@ class PatentFilingQC:
                     errors='replace', timeout=60
                 )
                 if r.returncode == 0 and r.stdout.strip():
-                    text_parts.append(r.stdout)
-            return '\n'.join(text_parts)
+                    page_texts.append(r.stdout)
+            return self._join_page_texts(page_texts)
         except Exception:
             return ''
         finally:
@@ -1433,6 +1511,14 @@ class PatentFilingQC:
             best_path, best_conf = candidates[0]
             self.report.files_found[doc_type] = best_path.name
             self.documents[doc_type] = best_path
+
+            # Remember a .docx spec copy even when a .pdf wins the filing-copy
+            # tie-break above, so checks that need exact body text can prefer it.
+            if doc_type == 'Specification':
+                for cand_path, _ in candidates:
+                    if cand_path.suffix.lower() == '.docx':
+                        self.spec_docx_candidate = cand_path
+                        break
 
             if len(candidates) > 1:
                 others = ', '.join(p.name for p, _ in candidates[1:])
@@ -3350,10 +3436,18 @@ class PatentFilingQC:
         # When the spec is a .docx, extract the abstract directly from the XML
         # to avoid page-header/footer noise that text-extraction pipelines splice
         # in (which can inflate the count by 40+ words on a typical filing).
+        # Prefer a .docx copy for the abstract even when a .pdf was picked as
+        # the filing copy (the duplicate-resolution tie-break prefers .pdf), so
+        # a duplicate .docx/.pdf spec pair doesn't fall through to the noisier
+        # PDF-regex path and over-count words.
         spec_path_17 = self.documents.get('Specification')
+        docx_spec_path_17 = (
+            spec_path_17 if spec_path_17 and spec_path_17.suffix.lower() == '.docx'
+            else self.spec_docx_candidate
+        )
         _abstract_handled = False
-        if spec_path_17 and spec_path_17.suffix.lower() == '.docx':
-            docx_abstract = self._extract_abstract_from_docx(spec_path_17)
+        if docx_spec_path_17:
+            docx_abstract = self._extract_abstract_from_docx(docx_spec_path_17)
             if docx_abstract is not None:
                 _abstract_handled = True
                 word_count = len(docx_abstract.split())
