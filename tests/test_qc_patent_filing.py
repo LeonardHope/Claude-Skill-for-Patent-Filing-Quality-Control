@@ -1577,6 +1577,75 @@ def _():
     return True
 
 # ============================================================
+# 15. Environment check (Check 87) — warn on missing optional components
+# ============================================================
+import qc_patent_filing as _qmod  # noqa: E402
+
+def _with_components(present_mods, present_bins):
+    """Context: patch the probe's module/binary detection so we can simulate a
+    machine that is missing optional components regardless of what's installed
+    in the test environment. Returns a restore() callable."""
+    orig_find = _qmod.importlib.util.find_spec
+    orig_which = _qmod.shutil.which
+    _qmod.importlib.util.find_spec = (
+        lambda name, *a, **k: object() if name in present_mods else None)
+    _qmod.shutil.which = (
+        lambda name, *a, **k: ("/usr/bin/" + name) if name in present_bins else None)
+    def restore():
+        _qmod.importlib.util.find_spec = orig_find
+        _qmod.shutil.which = orig_which
+    return restore
+
+_ALL_MODS = {"pdfplumber", "docx", "pytesseract", "pdf2image"}
+_ALL_BINS = {"tesseract", "pdftoppm"}
+
+@test("ENV.all: Check 87 PASS when every optional component is present")
+def _():
+    restore = _with_components(_ALL_MODS, _ALL_BINS)
+    try:
+        qc = build_qc()
+        qc.check_environment()
+        c87 = next((i for i in qc.report.issues if i.check_id == 87), None)
+        if not c87 or c87.severity != Severity.PASS:
+            print(f"  ❌ Check 87 = {c87.severity if c87 else 'absent'}"); return False
+        return True
+    finally:
+        restore()
+
+@test("ENV.ocr-missing: Check 87 WARNING names the OCR stack + install command")
+def _():
+    # OCR python wrappers + poppler binary gone; pdfplumber still present.
+    restore = _with_components({"pdfplumber", "docx"}, {"tesseract"})
+    try:
+        qc = build_qc()
+        qc.check_environment()
+        c87 = next((i for i in qc.report.issues if i.check_id == 87), None)
+        if not c87 or c87.severity != Severity.WARNING:
+            print(f"  ❌ Check 87 = {c87.severity if c87 else 'absent'}"); return False
+        blob = c87.message + " " + (c87.details or "")
+        if "pip install" not in blob or "poppler" not in blob:
+            print(f"  ❌ missing install/impact detail: {blob[:160]}"); return False
+        return True
+    finally:
+        restore()
+
+@test("ENV.docx-gated: python-docx flagged only when a .docx is in the folder")
+def _():
+    restore = _with_components({"pdfplumber", "pytesseract", "pdf2image"}, _ALL_BINS)
+    try:
+        # No .docx present → python-docx absence must NOT be reported.
+        m_no = _qmod.probe_optional_components(needs_docx=False)
+        if any("python-docx" in c["name"] for c in m_no):
+            print("  ❌ python-docx flagged with no .docx present"); return False
+        # .docx present → it must be reported.
+        m_yes = _qmod.probe_optional_components(needs_docx=True)
+        if not any("python-docx" in c["name"] for c in m_yes):
+            print("  ❌ python-docx not flagged when a .docx is present"); return False
+        return True
+    finally:
+        restore()
+
+# ============================================================
 # Run
 # ============================================================
 print("="*80); print(f"COMPREHENSIVE TEST SUITE — {len(TESTS)} tests"); print("="*80)
