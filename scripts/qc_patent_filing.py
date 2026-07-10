@@ -1871,7 +1871,17 @@ class PatentFilingQC:
             if len(d) >= 5 and re.search(r'\d', d):
                 dockets.add(d)
         return dockets
-    
+
+    _OCR_EQUIV = {'O': '0', 'Q': '0', 'D': '0', 'I': '1', 'L': '1', '|': '1',
+                  'Z': '2', 'S': '5', 'G': '6', 'B': '8'}
+
+    def _docket_ocr_canon(self, docket: str) -> str:
+        """OCR-tolerant canonical form of a docket, for equality tests only
+        (never for display): uppercase, then fold characters OCR commonly
+        confuses (O/0, I/1, S/5, B/8, ...) to one representative. Lets a docket
+        that OCR mangled on a scanned page still match its clean form."""
+        return docket.upper().translate(str.maketrans(self._OCR_EQUIV))
+
     def normalize_name(self, name: str) -> str:
         """Normalize a name for comparison"""
         # Remove extra whitespace, convert to uppercase
@@ -2606,12 +2616,29 @@ class PatentFilingQC:
                         Severity.PASS, msg
                     )
                 else:
-                    details_lines = [f"{name}: {sorted(docket_sets[name])}" for name in docket_sets]
-                    self.report.add_issue(
-                        3, "Cross-Document Consistency", "Attorney Docket Number Consistency",
-                        Severity.CRITICAL, "Attorney docket number mismatch — no docket appears in all compared documents",
-                        "\n".join(details_lines)
-                    )
+                    details = "\n".join(f"{name}: {sorted(docket_sets[name])}" for name in docket_sets)
+                    # Tier 2 — OCR-tolerant: if the dockets match once OCR-confusable
+                    # characters are folded (0/O, S/5, ...), they are the same docket
+                    # with scan noise, not a real mismatch. Downgrade to a WARNING
+                    # that points at the misread document.
+                    canon = {s: {self._docket_ocr_canon(d) for d in normalized[s]}
+                             for s in sources_to_compare}
+                    if set.intersection(*canon.values()):
+                        auth = sorted(normalized.get("ADS") or set.union(*normalized.values()))[0]
+                        self.report.add_issue(
+                            3, "Cross-Document Consistency", "Attorney Docket Number Consistency",
+                            Severity.WARNING,
+                            f"Docket numbers are consistent apart from likely OCR character "
+                            f"confusion (e.g. 0/O, S/5) on a scanned document. Authoritative "
+                            f"docket: {auth}. Verify the scanned document(s).",
+                            details
+                        )
+                    else:
+                        self.report.add_issue(
+                            3, "Cross-Document Consistency", "Attorney Docket Number Consistency",
+                            Severity.CRITICAL, "Attorney docket number mismatch — no docket appears in all compared documents",
+                            details
+                        )
             else:
                 self.report.add_issue(
                     3, "Cross-Document Consistency", "Attorney Docket Number Consistency",
@@ -6655,8 +6682,10 @@ class PatentFilingQC:
         if self.spec_text or self.ads_text:
             issues_66 = []
 
-            # Check docket number format (should be consistent pattern like A###-####XX)
-            docket_pattern = r'[A-Z]\d{2,4}[\s\-]*\d{3,4}[A-Z]{2}'
+            # Check docket number format (should be consistent pattern like A###-####XX).
+            # \b anchors prevent matching a mid-token substring of an OCR-mangled
+            # docket (e.g. "O88-0180US" inside "AO88-0180US").
+            docket_pattern = r'\b[A-Z]\d{2,4}[\s\-]*\d{3,4}[A-Z]{2}\b'
             all_texts = {'spec': self.spec_text, 'ads': self.ads_text, 'decl': self.declaration_text}
             docket_numbers = set()
             for doc, text in all_texts.items():
@@ -6665,8 +6694,10 @@ class PatentFilingQC:
                     for m in matches:
                         docket_numbers.add(re.sub(r'\s', '', m))
 
-            if len(docket_numbers) > 1:
-                issues_66.append(f"Multiple docket number variants: {', '.join(docket_numbers)}")
+            # Fold OCR-confusable characters so a scanned page's mangled docket
+            # (A088 -> AO88) isn't reported as a separate "variant".
+            if len({self._docket_ocr_canon(d) for d in docket_numbers}) > 1:
+                issues_66.append(f"Multiple docket number variants: {', '.join(sorted(docket_numbers))}")
 
             # Check inventor names for mixed case issues (e.g., "gUPTA" instead of "GUPTA" or "Gupta")
             if self.ads_text:

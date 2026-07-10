@@ -220,11 +220,23 @@ def check_attorney_docket(qc) -> Issue:
                               f"Attorney docket number consistent across documents"
                               f"{suffix}: {sorted(shared)[0]}")
             else:
-                issue = Issue(3, _CAT, name, "CRITICAL",
-                              "Attorney docket number mismatch — no docket appears "
-                              "in all compared documents",
-                              details="\n".join(f"{n}: {sorted(docket_sets[n])}"
-                                                 for n in docket_sets))
+                details = "\n".join(f"{n}: {sorted(docket_sets[n])}" for n in docket_sets)
+                # Tier 2 — OCR-tolerant: dockets that match once OCR-confusable
+                # characters are folded (0/O, S/5, ...) are the same docket with
+                # scan noise, not a real mismatch.
+                canon = {s: {qc._docket_ocr_canon(d) for d in normalized[s]}
+                         for s in sources}
+                if set.intersection(*canon.values()):
+                    auth = sorted(normalized.get("ADS") or set.union(*normalized.values()))[0]
+                    issue = Issue(3, _CAT, name, "WARNING",
+                                  f"Docket numbers are consistent apart from likely OCR character "
+                                  f"confusion (e.g. 0/O, S/5) on a scanned document. Authoritative "
+                                  f"docket: {auth}. Verify the scanned document(s).",
+                                  details=details)
+                else:
+                    issue = Issue(3, _CAT, name, "CRITICAL",
+                                  "Attorney docket number mismatch — no docket appears "
+                                  "in all compared documents", details=details)
         else:
             issue = Issue(3, _CAT, name, "WARNING",
                           "Unable to compare dockets — only one source has "

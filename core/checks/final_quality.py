@@ -25,10 +25,14 @@ def _typos(qc) -> Issue:
     issues = []
     dockets = set()
     for text in (spec, ads, getattr(qc, "declaration_text", "") or ""):
-        for m in re.findall(r"[A-Z]\d{2,4}[\s\-]*\d{3,4}[A-Z]{2}", text):
+        # \b anchors prevent matching a mid-token substring of an OCR-mangled
+        # docket (e.g. "O88-0180US" inside "AO88-0180US").
+        for m in re.findall(r"\b[A-Z]\d{2,4}[\s\-]*\d{3,4}[A-Z]{2}\b", text):
             dockets.add(re.sub(r"\s", "", m))
-    if len(dockets) > 1:
-        issues.append(f"Multiple docket number variants: {', '.join(dockets)}")
+    # Fold OCR-confusable characters so a scanned page's mangled docket isn't
+    # reported as a separate "variant".
+    if len({qc._docket_ocr_canon(d) for d in dockets}) > 1:
+        issues.append(f"Multiple docket number variants: {', '.join(sorted(dockets))}")
     if ads:
         for nm in re.findall(r"(?:Given|Family)\s*Name[:\s]+([A-Za-z]+)", ads):
             if nm and len(nm) > 1 and not (nm.isupper() or nm.islower() or nm.istitle()):
