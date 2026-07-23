@@ -427,7 +427,17 @@ def check_inventor_count(qc) -> Issue:
                          "is carried forward, inventorship may have changed in the "
                          "continuation, in which case a new declaration is required.")
         img = (getattr(qc, "image_only_pages", {}) or {}).get("Declaration", 0)
-        if img and decl_count + img >= ads_count:
+        # Name-aware hedge: if every named inventor appears in the declaration
+        # package, the shortfall is almost certainly unreadable scanned/
+        # handwritten signatures, not missing declarations — warn, don't fail.
+        names_present = qc._count_ads_inventors_present(decl)
+        if names_present >= ads_count:
+            issue = Issue(7, _CAT, name, "WARNING",
+                          f"ADS has {ads_count} inventors and all {ads_count} appear by name in the "
+                          f"declaration package, but only {decl_count} signature block(s) were "
+                          f"machine-readable (the rest are likely scanned/handwritten). Verify each "
+                          f"inventor's declaration is signed." + cont_note)
+        elif img and decl_count + img >= ads_count:
             issue = Issue(7, _CAT, name, "WARNING",
                           f"Could not confirm count: ADS has {ads_count}, Declaration text shows "
                           f"{decl_count} signed declaration(s) and {img} additional image-only "

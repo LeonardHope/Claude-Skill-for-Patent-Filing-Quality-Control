@@ -2829,9 +2829,23 @@ class PatentFilingQC:
                     cont_note = (" Note: this is a continuation filing — if the parent's "
                                  "declaration is carried forward, inventorship may have changed in "
                                  "the continuation, in which case a new declaration is required.")
-                # Hedge if the declaration has image-only pages
+                # Name-aware hedge: scanned/handwritten signatures aren't
+                # machine-countable, but if EVERY named inventor's name appears
+                # in the declaration package, the shortfall is almost certainly
+                # unreadable signatures, not missing declarations — warn to
+                # verify rather than hard-fail.
                 img_pages = self.image_only_pages.get('Declaration', 0)
-                if img_pages and decl_count + img_pages >= ads_count:
+                names_present = self._count_ads_inventors_present(self.declaration_text)
+                if names_present >= ads_count:
+                    self.report.add_issue(
+                        7, "Cross-Document Consistency", "Number of Inventors Consistency",
+                        Severity.WARNING,
+                        f"ADS has {ads_count} inventors and all {ads_count} appear by name in the "
+                        f"declaration package, but only {decl_count} signature block(s) were "
+                        f"machine-readable (the rest are likely scanned/handwritten). Verify each "
+                        f"inventor's declaration is signed." + cont_note
+                    )
+                elif img_pages and decl_count + img_pages >= ads_count:
                     self.report.add_issue(
                         7, "Cross-Document Consistency", "Number of Inventors Consistency",
                         Severity.WARNING,
