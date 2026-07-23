@@ -2294,45 +2294,22 @@ class PatentFilingQC:
         return ref_data
 
     def _extract_reference_numerals_from_drawings(self, text: str) -> set:
-        """
-        Extract reference numerals from drawings text.
+        """Extract 3-digit reference numerals from the drawings text.
 
-        Landscape drawing pages are routinely rotated to portrait for filing
-        (/Rotate=90 or 270). On those pages, text extractors return digits in
-        reversed reading order — so a reference numeral "124" comes out as
-        "421". To avoid polluting the cross-check with reversed numerals, we
-        re-extract per-page from the source PDF, detect rotation, and reverse
-        digit tokens on rotated pages before collecting. Falls back to the
-        plain-text extractor's output when the source PDF isn't available.
+        Landscape drawing sheets are routinely rotated to portrait for filing,
+        so their text extracts in reversed reading order ("124" -> "421"). The
+        `text` passed in is `drawings_text`, which extract_pdf_text has already
+        de-rotated via _extract_page_text_corrected (content-stream reading
+        order), so the numerals are already the right way round — we just
+        collect them. (Detecting rotation from the page's /Rotate flag was
+        unreliable: sheets can carry /Rotate=180 while the figure TEXT is drawn
+        at 90°, so reversed numerals like "201" (really "102") leaked through.)
         """
         refs = set()
-        pdf_path = self.documents.get('Drawings') if hasattr(self, 'documents') else None
-
-        per_page = []  # list of (page_text, rotation)
-        if pdf_path and Path(pdf_path).suffix.lower() == '.pdf':
-            try:
-                import pdfplumber
-                with pdfplumber.open(pdf_path) as pdf:
-                    for page in pdf.pages:
-                        page_text = page.extract_text() or ""
-                        rotation = getattr(page, 'rotation', 0) or 0
-                        per_page.append((page_text, rotation))
-            except Exception:
-                per_page = []
-
-        if not per_page and text:
-            per_page = [(text, 0)]
-
-        for page_text, rotation in per_page:
-            if not page_text:
-                continue
-            for match in re.finditer(r'\b(\d{3})\b', page_text):
-                num = match.group(1)
-                if rotation in (90, 270):
-                    num = num[::-1]
-                if 100 <= int(num) <= 999:
-                    refs.add(num)
-
+        for match in re.finditer(r'\b(\d{3})\b', text or ""):
+            num = match.group(1)
+            if 100 <= int(num) <= 999:
+                refs.add(num)
         return refs
 
     def run_all_checks(self):
