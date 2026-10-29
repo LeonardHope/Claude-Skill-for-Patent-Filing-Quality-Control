@@ -6075,9 +6075,9 @@ class PatentFilingQC:
                 return found
             for pat in [
                 r'PCT/[A-Z]{2}\s?\d{2,4}/\d+',    # PCT/US2008/059500
-                r'\b\d{2}/\d{3},?\s?\d{3}\b',       # 12/407,367
+                r'\b\d{2}/\d{3},?\s?\d{3}\b',       # 12/345,678
                 r'\b6[0-2]/\d{3},?\s?\d{3}\b',       # 60/123,456 (provisional)
-                r'\b\d{8}\b',                         # 12407367 (plain 8-digit)
+                r'\b\d{8}\b',                         # 12345678 (plain 8-digit)
             ]:
                 for m in re.finditer(pat, text, re.IGNORECASE):
                     raw = re.sub(r'\s', '', m.group(0).strip())
@@ -6675,7 +6675,7 @@ class PatentFilingQC:
 
             # Check docket number format (should be consistent pattern like A###-####XX).
             # \b anchors prevent matching a mid-token substring of an OCR-mangled
-            # docket (e.g. "O88-0180US" inside "AO88-0180US").
+            # docket (e.g. "O00-0000US" inside "XO00-0000US").
             docket_pattern = r'\b[A-Z]\d{2,4}[\s\-]*\d{3,4}[A-Z]{2}\b'
             all_texts = {'spec': self.spec_text, 'ads': self.ads_text, 'decl': self.declaration_text}
             docket_numbers = set()
@@ -6686,7 +6686,7 @@ class PatentFilingQC:
                         docket_numbers.add(re.sub(r'\s', '', m))
 
             # Fold OCR-confusable characters so a scanned page's mangled docket
-            # (A088 -> AO88) isn't reported as a separate "variant".
+            # (X000 -> XO00) isn't reported as a separate "variant".
             if len({self._docket_ocr_canon(d) for d in docket_numbers}) > 1:
                 issues_66.append(f"Multiple docket number variants: {', '.join(sorted(docket_numbers))}")
 

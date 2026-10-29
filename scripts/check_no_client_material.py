@@ -27,6 +27,30 @@ ALLOW_PREFIXES = ("X000-", "X999-")
 # alphanumeric suffix (e.g. the X000-0000US placeholder shape).
 DOCKET = re.compile(r"\b[A-Za-z][0-9]{3}-[0-9]{3,4}[A-Za-z0-9]*\b")
 
+# US application numbers in NN/NNN,NNN form, unless obviously sequential.
+EXTRA = [
+    re.compile(r"\b\d{2}/\d{3},\d{3}\b"),
+]
+
+# Firm-specific shapes (a docket prefix the pattern above misses, the firm's
+# customer numbers, ...) are themselves identifying, so they are kept out of
+# this public file: one regex per line in this local file, matched
+# case-insensitively. Blank lines and lines starting with # are ignored.
+LOCAL_PATTERNS = Path.home() / ".config" / "patent-filing-qc" / "forbidden_patterns.txt"
+if LOCAL_PATTERNS.is_file():
+    for _line in LOCAL_PATTERNS.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#"):
+            EXTRA.append(re.compile(_line, re.IGNORECASE))
+ALLOW_TOKENS = set()
+# Application numbers whose serial is obviously sequential or blank, under any
+# series code: 18/000,000, 63/999,999, 12/345,678, 60/123,456.
+ALLOW_SERIALS = ("000,000", "999,999", "123,456", "345,678", "345,679")
+
+
+def _allowed(token):
+    return token in ALLOW_TOKENS or token.endswith(ALLOW_SERIALS)
+
 # Files that legitimately contain the placeholders / the detector itself.
 SKIP = {
     "scripts/check_no_client_material.py",
@@ -44,7 +68,7 @@ def _tracked_files():
 def scan(paths):
     hits = []
     for p in paths:
-        if p in SKIP:
+        if p in SKIP or any(p.endswith("/" + k) for k in SKIP):
             continue
         fp = Path(p)
         if not fp.is_file():
@@ -57,6 +81,10 @@ def scan(paths):
             for m in DOCKET.finditer(line):
                 if not m.group(0).upper().startswith(ALLOW_PREFIXES):
                     hits.append((p, n, m.group(0), line.strip()[:100]))
+            for pat in EXTRA:
+                for m in pat.finditer(line):
+                    if not _allowed(m.group(0)):
+                        hits.append((p, n, m.group(0), line.strip()[:100]))
     return hits
 
 
@@ -72,7 +100,7 @@ def main():
     sys.stderr.write(
         "\nReplace real docket/file numbers with an obviously-fake placeholder "
         "(e.g. X000-0000US).\nIf this is a genuine false positive, add the token "
-        "to ALLOW in scripts/check_no_client_material.py.\n")
+        "to ALLOW_PREFIXES or ALLOW_TOKENS in scripts/check_no_client_material.py.\n")
     return 1
 
 

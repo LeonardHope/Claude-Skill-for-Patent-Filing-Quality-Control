@@ -410,6 +410,19 @@ The suite is location-independent and exits non-zero on any failure. CI
 a change that breaks or deletes a check is caught before merge. See
 `tests/README.md` for what's covered.
 
+Before committing to a public repo, scan for real client or firm material:
+
+```bash
+python3 scripts/check_no_client_material.py            # every git-tracked file
+python3 scripts/check_no_client_material.py FILE ...   # specific files
+```
+
+It flags docket-shaped numbers other than the `X000-`/`X999-` placeholders and
+US application numbers unless obviously sequential (`18/000,000`, `12/345,678`),
+and exits non-zero on any hit. Firm-specific patterns — your own docket prefix,
+customer numbers — would themselves leak if committed, so put them in
+`~/.config/patent-filing-qc/forbidden_patterns.txt` (one regex per line) instead.
+
 ## File Structure
 
 ```
@@ -421,7 +434,8 @@ patent-filing-qc/
 ├── docs/
 │   └── example-report.png        # Screenshot used in this README
 ├── scripts/
-│   └── qc_patent_filing.py       # Main QC script
+│   ├── qc_patent_filing.py       # Main QC script
+│   └── check_no_client_material.py  # Pre-commit scan for client/firm material
 ├── tests/
 │   ├── test_qc_patent_filing.py  # Regression suite
 │   └── README.md                 # What the suite covers

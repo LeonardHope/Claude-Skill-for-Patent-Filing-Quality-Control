@@ -1096,7 +1096,7 @@ def t():
 # Force the offline branch (no ODP key) so these tests never hit the network.
 os.environ.pop('USPTO_ODP_API_KEY', None)
 
-def _ads_with_continuity(app_num='12/407,367'):
+def _ads_with_continuity(app_num='12/345,678'):
     ads = copy.deepcopy(BASE_ADS)
     ads['domestic_continuity_entries'] = [{
         'application_number': app_num, 'continuation_type': 'CON',
@@ -1106,11 +1106,11 @@ def _ads_with_continuity(app_num='12/407,367'):
     return ads
 
 _SPEC_PRIORITY = (BASE_SPEC + "\nCROSS-REFERENCE TO RELATED APPLICATIONS\n"
-                  "This application claims the benefit of U.S. Application No. 12/407,367.\n")
+                  "This application claims the benefit of U.S. Application No. 12/345,678.\n")
 
 @test("PRI16.1: Check 81 PASS when spec priority app number matches ADS")
 def t():
-    qc = build_qc(ads_data=_ads_with_continuity('12/407,367'), spec=_SPEC_PRIORITY)
+    qc = build_qc(ads_data=_ads_with_continuity('12/345,678'), spec=_SPEC_PRIORITY)
     qc.run_all_checks()
     c81 = [i for i in get_checks(qc, 81)]
     consistency = next((i for i in c81 if 'Consistency' in (i.check_name or '')), None)
@@ -1122,9 +1122,9 @@ def t():
 
 @test("PRI16.2: Check 81 CRITICAL on a digit error (spec vs ADS mismatch)")
 def t():
-    # ADS says 12/407,367; spec says 12/407,368 (transposed/changed digit)
-    spec_bad = _SPEC_PRIORITY.replace('12/407,367', '12/407,368')
-    qc = build_qc(ads_data=_ads_with_continuity('12/407,367'), spec=spec_bad)
+    # ADS says 12/345,678; spec says 12/345,679 (transposed/changed digit)
+    spec_bad = _SPEC_PRIORITY.replace('12/345,678', '12/345,679')
+    qc = build_qc(ads_data=_ads_with_continuity('12/345,678'), spec=spec_bad)
     qc.run_all_checks()
     consistency = next((i for i in get_checks(qc, 81)
                         if 'Consistency' in (i.check_name or '')), None)
@@ -1148,7 +1148,7 @@ def t():
 
 @test("PRI16.4: Check 81 emits manual verification links (Branch B, no key)")
 def t():
-    qc = build_qc(ads_data=_ads_with_continuity('12/407,367'), spec=_SPEC_PRIORITY)
+    qc = build_qc(ads_data=_ads_with_continuity('12/345,678'), spec=_SPEC_PRIORITY)
     qc.run_all_checks()
     links = next((i for i in get_checks(qc, 81)
                   if 'Link' in (i.check_name or '')), None)
