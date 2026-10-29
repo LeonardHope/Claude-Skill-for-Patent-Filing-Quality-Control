@@ -161,8 +161,9 @@ def probe_optional_components(needs_docx: bool = False) -> List[Dict[str, str]]:
             "detail": "missing — " + "; ".join(detail_parts),
             "impact": "Scanned / image-only PDFs can't be OCR'd (inventor-name "
                       "and execution-date checks on scanned declarations, "
-                      "assignments, and POAs degrade), and Check 25 can't "
-                      "analyze drawings for color.",
+                      "assignments, and POAs degrade), unreadable text layers "
+                      "can't be repaired, and Check 25 can't analyze drawings "
+                      "for color.",
             "install": "pip install pytesseract pdf2image --break-system-packages"
                        "   and   brew install tesseract poppler",
         })
@@ -327,6 +328,35 @@ class PatentFilingQC:
         # contain images (e.g., scanned signed declaration/assignment pages).
         # Cross-doc checks should hedge findings against these documents.
         self.image_only_pages: Dict[str, int] = {}
+        # Per-document text of each page, in page order, after any OCR repair.
+        # Checks that count per-page units — one PTO/AIA/01 declaration form per
+        # inventor, one assignment execution page per assignor — read this
+        # instead of re-splitting the joined document text, which loses page
+        # boundaries and so cannot tell six one-page declarations from one page
+        # that happens to list six names.
+        self.doc_pages: Dict[str, List[str]] = {}
+        # 1-indexed source page number for each entry in doc_pages. Pages with
+        # no extractable text are not represented in doc_pages, so position
+        # there is not the page number.
+        self.doc_page_numbers: Dict[str, List[int]] = {}
+        # Per-document count of pages whose embedded text layer decoded to
+        # gibberish and were re-read via OCR (see _page_text_is_garbled).
+        self.repaired_pages: Dict[str, int] = {}
+        # Per-document count of pages that stayed unreadable — the text layer
+        # did not decode and OCR could not recover them (or wasn't installed).
+        # Checks must hedge rather than conclude anything from these pages.
+        self.unreadable_pages: Dict[str, int] = {}
+        # Per-document count of pages carrying a handwritten ("wet ink" or
+        # stylus) signature, which leaves no text for the /s/ and /Name/
+        # marker checks to find. See _page_has_ink_signature.
+        self.ink_signature_pages: Dict[str, int] = {}
+        # OCR text recovered from pages whose identifier block (the docket /
+        # title header) is drawn in a font with no ToUnicode map. Deliberately
+        # kept OUT of self.declaration_text / self.assignment_text: it restates
+        # pages that already contributed text, so any count-based check reading
+        # it would count those pages twice. Only _identifier_text() serves it,
+        # and only to docket/title lookups.
+        self.doc_ocr_aux: Dict[str, Optional[str]] = {}
         # Classified document paths — use these instead of folder.glob('*Spec*')
         # in any check that needs to re-open the underlying file. Keys are the
         # canonical doc-type names ("Specification", "Drawings", "ADS",
@@ -419,20 +449,36 @@ class PatentFilingQC:
         # paragraphs and section headers that PyPDF2 strips, which is what
         # the spec-content checks (Abstract, Brief Description, Claims, etc.)
         # rely on. Lazy-imported so the dep is only required when actually used.
-        text = ""
         image_only_count = 0
         try:
             import pdfplumber
-            page_texts = []
             with pdfplumber.open(pdf_path) as pdf:
-                for page in pdf.pages:
+                page_texts = []
+                # 1-indexed source page for each entry in page_texts. Pages with
+                # no text are skipped above, so position in page_texts is not
+                # the page number, and OCR repair needs the real one.
+                page_numbers: List[int] = []
+                garbled_positions: List[int] = []
+                ink_pages = 0
+                for page_number, page in enumerate(pdf.pages, 1):
                     page_text = self._extract_page_text_corrected(page)
+                    if self._page_has_ink_signature(page):
+                        ink_pages += 1
                     if page_text:
+                        if self._page_text_is_garbled(page_text):
+                            garbled_positions.append(len(page_texts))
                         page_texts.append(page_text)
+                        page_numbers.append(page_number)
                     elif hasattr(page, 'images') and page.images:
                         # Page has no extractable text but does contain images
                         # — typical scanned signed page on declaration/assignment.
                         image_only_count += 1
+            page_texts = self._repair_garbled_pages(
+                pdf_path, doc_type, page_texts, page_numbers, garbled_positions)
+            self.doc_pages[doc_type] = list(page_texts)
+            self.doc_page_numbers[doc_type] = list(page_numbers)
+            if ink_pages > 0:
+                self.ink_signature_pages[doc_type] = ink_pages
             text = self._join_page_texts(page_texts)
             if image_only_count > 0:
                 self.image_only_pages[doc_type] = image_only_count
@@ -449,7 +495,8 @@ class PatentFilingQC:
         try:
             with open(pdf_path, 'rb') as file:
                 reader = PyPDF2.PdfReader(file)
-                page_texts = [pt for pt in (p.extract_text() for p in reader.pages) if pt]
+                page_texts = [page.extract_text() for page in reader.pages]
+                page_texts = [pt for pt in page_texts if pt]
             text = self._join_page_texts(page_texts)
 
             # Check if we got meaningful text (more than just whitespace/boilerplate)
@@ -578,6 +625,185 @@ class PatentFilingQC:
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    # Function words that turn up in any run of real English prose. Used to
+    # tell a page whose text layer decoded correctly from one that decoded to
+    # gibberish — see _page_text_is_garbled().
+    _PROSE_MARKERS = frozenset({
+        'the', 'of', 'and', 'to', 'in', 'is', 'for', 'that', 'this', 'or',
+        'by', 'not', 'be', 'with', 'an', 'as', 'at', 'it', 'if', 'from',
+        'which', 'must', 'may', 'any', 'all', 'have', 'are', 'on', 'under',
+        'application', 'patent', 'inventor', 'declaration', 'assignment',
+        'office', 'united', 'states', 'form', 'information',
+    })
+
+    @classmethod
+    def _page_text_is_garbled(cls, text: str) -> bool:
+        """Whether a page's extracted text is gibberish rather than prose.
+
+        A page whose font carries no usable ToUnicode map extracts as
+        well-formed-looking but meaningless character runs: thousands of
+        "words", not one of them a word. That page is far more dangerous than
+        a page that extracts as nothing, because nothing downstream can tell
+        the difference between "this page says nothing relevant" and "this page
+        could not be read" — a signed declaration whose text layer is broken
+        silently stops counting toward its inventor, and the mismatch surfaces
+        as a missing declaration rather than as an unreadable page.
+
+        Detection is by function-word density: real English prose is several
+        percent "the / of / and / to / in" at any length, while a bad decode
+        lands near zero. The token floor keeps sparse but legitimate pages (a
+        signature-only continuation sheet, a short cover page) from tripping
+        the ratio on a handful of tokens.
+        """
+        tokens = [w.lower() for w in re.findall(r'[A-Za-z]{2,}', text)]
+        if len(tokens) < 40:
+            return False
+        hits = sum(1 for t in tokens if t in cls._PROSE_MARKERS)
+        return (hits / len(tokens)) < 0.04
+
+    @staticmethod
+    def _page_has_ink_signature(page) -> bool:
+        """Whether a page carries a handwritten signature — vector strokes or a
+        stamped signature image in the signature band of the sheet.
+
+        A wet-ink or stylus signature leaves no text behind, so the /s/ and
+        /Name/ markers that checks 11 and 12 look for are absent from a
+        perfectly well-signed document. Looking at the marks themselves is what
+        separates "signed in ink" from "genuinely unsigned" — the distinction
+        those checks exist to make.
+
+        The band (62%–95% down the sheet) is what keeps form furniture out of
+        the count: on PTO/AIA/01 the rounded border box sits at the very top of
+        the page, and the ruled signature line itself is a `line` object, not a
+        curve. Being a positive signal only, a miss costs nothing beyond the
+        pre-existing "verify visually" wording.
+        """
+        height = getattr(page, 'height', 0) or 0
+        if not height:
+            return False
+        low, high = 0.62 * height, 0.95 * height
+
+        def in_band(obj) -> bool:
+            top = obj.get('top')
+            return top is not None and low <= top <= high
+
+        try:
+            return (any(in_band(c) for c in page.curves)
+                    or any(in_band(i) for i in page.images))
+        except Exception:
+            return False
+
+    def _ocr_single_page(self, pdf_path: Path, page_number: int) -> str:
+        """OCR one 1-indexed page of a PDF. Returns '' on any failure.
+
+        Rendering a single page keeps the targeted repairs affordable: a
+        whole-document OCR of a six-inventor declaration costs seconds per run
+        and is wasted on the pages that already read fine."""
+        if not OCR_AVAILABLE:
+            return ''
+        try:
+            images = convert_from_path(pdf_path, first_page=page_number,
+                                       last_page=page_number, dpi=300)
+            if not images:
+                return ''
+            return pytesseract.image_to_string(images[0]) or ''
+        except Exception:
+            return ''
+
+    def _repair_garbled_pages(self, pdf_path: Path, doc_type: str,
+                              page_texts: List[str], page_numbers: List[int],
+                              garbled_positions: List[int]) -> List[str]:
+        """Re-read pages whose text layer decoded to gibberish, via OCR.
+
+        The OCR text REPLACES the unreadable page rather than being appended to
+        it. The original is meaningless, so there is nothing to preserve, and
+        replacing keeps every per-page count honest: append instead and a
+        declaration package would report more signed forms than it has pages.
+
+        Applied to Declaration and Assignment only. Those are the documents
+        whose checks turn on per-page facts (one form per inventor, one
+        execution block per assignor), so an unreadable page there changes an
+        answer rather than costing a little text.
+        """
+        if doc_type not in ('Declaration', 'Assignment') or not garbled_positions:
+            return page_texts
+
+        pages_desc = ', '.join(str(page_numbers[p]) for p in garbled_positions)
+        if not OCR_AVAILABLE:
+            self.unreadable_pages[doc_type] = len(garbled_positions)
+            print(f"  ⚠️  {doc_type}: page(s) {pages_desc} have an unreadable text "
+                  f"layer (font without a character map) and OCR is not available. "
+                  f"Install pytesseract and pdf2image so these pages can be read; "
+                  f"until then they count as blank.")
+            return page_texts
+
+        print(f"  ℹ️  {doc_type}: page(s) {pages_desc} have an unreadable text "
+              f"layer; re-reading via OCR...")
+        repaired = 0
+        for pos in garbled_positions:
+            ocr_text = self._ocr_single_page(pdf_path, page_numbers[pos])
+            if ocr_text and not self._page_text_is_garbled(ocr_text):
+                page_texts[pos] = ocr_text
+                repaired += 1
+        if repaired:
+            self.repaired_pages[doc_type] = repaired
+            print(f"  ✅ Recovered {repaired} unreadable {doc_type.lower()} page(s) via OCR")
+        if repaired < len(garbled_positions):
+            self.unreadable_pages[doc_type] = len(garbled_positions) - repaired
+            print(f"  ⚠️  OCR could not recover "
+                  f"{len(garbled_positions) - repaired} {doc_type.lower()} page(s)")
+        return page_texts
+
+    def _identifier_text(self, doc_type: str) -> str:
+        """Document text for *identifier* lookups (docket number, title) only.
+
+        USPTO fillable forms routinely draw the docket/title header in a font
+        with no ToUnicode map, so those header lines extract as '(cid:NN)' runs
+        even on a page whose body decodes perfectly. The identifier is then
+        invisible to every cross-document check that would use it — which on a
+        carried-forward declaration is exactly the check worth having, since a
+        parent docket on a child's declaration is a real filing defect.
+
+        Returns the document text plus, when the header was unreadable, OCR of
+        just the affected pages. That OCR text is cached here and never merged
+        into self.declaration_text / self.assignment_text: it restates pages
+        that already contributed text, so a count-based check reading it would
+        count those pages twice.
+        """
+        base = {'Declaration': self.declaration_text,
+                'Assignment': self.assignment_text}.get(doc_type, '')
+        if doc_type not in ('Declaration', 'Assignment') or not base:
+            return base
+
+        if doc_type not in self.doc_ocr_aux:
+            self.doc_ocr_aux[doc_type] = self._recover_identifier_text(doc_type) or ''
+        aux = self.doc_ocr_aux.get(doc_type) or ''
+        return base + "\n" + aux if aux else base
+
+    def _recover_identifier_text(self, doc_type: str) -> str:
+        """OCR the pages whose identifier header failed to decode. Only pays
+        the OCR cost when a docket is actually unfindable in the normal text."""
+        pdf_path = self.documents.get(doc_type)
+        if not pdf_path or not OCR_AVAILABLE:
+            return ''
+        pages = self.doc_pages.get(doc_type) or []
+        if not pages:
+            return ''
+        # Nothing to fix if the dockets already came through.
+        if self.extract_docket_numbers("\n".join(pages)):
+            return ''
+        # Cap the work: the identifier block repeats on every sheet of a form
+        # set, so a handful of pages answers the question for the document.
+        numbers = self.doc_page_numbers.get(doc_type) or []
+        affected = [numbers[i] for i, pt in enumerate(pages)
+                    if '(cid:' in pt and i < len(numbers)][:3]
+        if not affected:
+            return ''
+        print(f"  ℹ️  {doc_type}: docket/title header did not decode; "
+              f"OCR-reading {len(affected)} page(s) to recover it...")
+        recovered = [self._ocr_single_page(pdf_path, n) for n in affected]
+        return "\n".join(r for r in recovered if r)
+
     def _surname_present(self, surname_norm: str, norm_text: str) -> bool:
         """Whether a normalized surname appears in normalized document text.
 
@@ -625,20 +851,97 @@ class PatentFilingQC:
         except Exception:
             return None
 
-    def _count_ads_inventors_present(self, text: str) -> int:
-        """How many ADS inventors are findable in `text`, using the same
-        surname-or-full-name test as Check 1. Returns 0 when the ADS inventor
-        list isn't available."""
+    def _ads_inventors_named_in(self, text: str) -> set:
+        """Which ADS inventors are named in `text`, as a set of formatted
+        names, using the same surname-or-full-name test as Check 1. Empty when
+        the ADS inventor list isn't available."""
         if not (self.ads_data and self.ads_data.get('inventors')):
-            return 0
+            return set()
         norm = self._normalize_for_compare(text)
-        found = 0
+        found = set()
         for inv in self.ads_data['inventors']:
             surname = self._normalize_for_compare(self._xfa_surname(inv))
             full = self._normalize_for_compare(self._format_xfa_inventor(inv))
             if self._surname_present(surname, norm) or (full and full in norm):
-                found += 1
+                found.add(self._format_xfa_inventor(inv))
         return found
+
+    def _count_ads_inventors_present(self, text: str) -> int:
+        """How many ADS inventors are findable in `text`. Returns 0 when the
+        ADS inventor list isn't available."""
+        return len(self._ads_inventors_named_in(text))
+
+    # "I hereby declare" as it survives OCR. Tesseract reads a standalone
+    # capital I as '|', 'l' or '1' often enough that a strict [iI] misses the
+    # declaration phrase on every page OCR just recovered.
+    _HEREBY_DECLARE_RE = re.compile(r'[Il1|]\s*hereby\s+declare', re.IGNORECASE)
+
+    # An S-signature marker: "/John A. Smith/". Anchored to start-of-line or
+    # whitespace so the slashes inside a form identifier are not mistaken for
+    # one — "PTO/AIA/01" in the page header of every blank PTO/AIA/01 form
+    # contains "/AIA/", which an unanchored pattern reads as a signature and
+    # so reports an entirely unsigned form as signed.
+    _ESIG_MARKER_RE = re.compile(r'(?:(?<=^)|(?<=\s))/[A-Z][^/\n]{2,40}/', re.MULTILINE)
+
+    def _count_declaration_units(self) -> Tuple[int, List[str]]:
+        """Count the separate executed declaration forms in the declaration
+        package, and describe the evidence behind the count.
+
+        The count is taken per page. A PTO/AIA/01 declaration names exactly one
+        inventor — the one signing it — so a page naming exactly one ADS
+        inventor is one executed declaration, while a page naming all of them
+        is a cover sheet or ADS-style listing and is not a form. A tally taken
+        over the flattened document text cannot draw that distinction, and
+        would read a single page listing six names as six declarations.
+
+        Several independent signals are taken and the strongest wins, because
+        each fails in a different way: the declaration phrase disappears when a
+        page's text layer is broken, /Name/ markers are absent from ink-signed
+        forms, and inventor-name matching needs ADS structured data. A count is
+        only as good as the best-supported signal, not the weakest.
+
+        Returns (count, evidence descriptions).
+        """
+        pages = self.doc_pages.get('Declaration') or []
+        text = self.declaration_text or ""
+        counts: List[int] = []
+        evidence: List[str] = []
+
+        # Signal 1: pages that each name exactly one ADS inventor.
+        if pages and self.ads_data and self.ads_data.get('inventors'):
+            per_inventor_pages = 0
+            covered: set = set()
+            for page_text in pages:
+                named = self._ads_inventors_named_in(page_text)
+                if len(named) == 1:
+                    per_inventor_pages += 1
+                    covered |= named
+            if per_inventor_pages:
+                counts.append(per_inventor_pages)
+                evidence.append(
+                    f"{per_inventor_pages} page(s) each naming exactly one ADS "
+                    f"inventor, covering {len(covered)} distinct inventor(s)"
+                )
+
+        # Signal 2: the declaration phrase, once per inventor's form.
+        phrase_count = len(self._HEREBY_DECLARE_RE.findall(text))
+        if phrase_count:
+            counts.append(phrase_count)
+            evidence.append(f"{phrase_count} \"I hereby declare\" statement(s)")
+
+        # Signal 3: electronic signature markers.
+        sig_count = len(self._ESIG_MARKER_RE.findall(text))
+        if sig_count:
+            counts.append(sig_count)
+            evidence.append(f"{sig_count} /Name/ signature marker(s)")
+
+        # Signal 4: handwritten signatures, which leave no text at all.
+        ink_count = self.ink_signature_pages.get('Declaration', 0)
+        if ink_count:
+            counts.append(ink_count)
+            evidence.append(f"{ink_count} page(s) bearing a handwritten signature")
+
+        return (max(counts) if counts else 0), evidence
 
     def _maybe_ocr_for_names(self, pdf_path: Path, doc_type: str, text: str) -> str:
         """Recover inventor names that text extractors drop from signed forms.
@@ -2338,7 +2641,8 @@ class PatentFilingQC:
         """Check 87: surface optional components that aren't installed, so the
         user knows which checks are degraded rather than the tool failing
         silently (e.g. Check 25 quietly punting to a generic manual-review
-        note when the OCR/imaging stack is absent)."""
+        note, or an unreadable text layer going unrepaired, when the OCR
+        stack is absent)."""
         needs_docx = any(
             (name or "").lower().endswith(".docx")
             for name in self.report.files_found.values()
@@ -2564,9 +2868,12 @@ class PatentFilingQC:
             docket_sets["ADS"] = {self.ads_data['docket_number']}
         elif self.ads_text:
             docket_sets["ADS"] = self.extract_docket_numbers(self.ads_text)
+        # Declaration and Assignment go through _identifier_text() so a docket
+        # header drawn in a font with no character map is still compared rather
+        # than silently dropped from the comparison set.
         for name, text in [("Spec", self.spec_text),
-                           ("Declaration", self.declaration_text),
-                           ("Assignment", self.assignment_text)]:
+                           ("Declaration", self._identifier_text('Declaration')),
+                           ("Assignment", self._identifier_text('Assignment'))]:
             if text:
                 ds = self.extract_docket_numbers(text)
                 if ds:
@@ -2802,17 +3109,23 @@ class PatentFilingQC:
         # once per inventor in a multi-inventor declaration package).
         if ads_inventors and self.declaration_text:
             ads_count = len(ads_inventors)
-            # Count both "I hereby declare" phrases AND /Name/ signature patterns;
-            # use whichever is larger. Real declarations may have one declaration
-            # phrase covering all inventors with separate signatures, OR one
-            # phrase + signature per inventor.
-            phrase_count = len(re.findall(r'(?:i|I)\s+hereby\s+declare', self.declaration_text))
-            sig_count = len(re.findall(r'/[A-Z][^/\n]{2,40}/', self.declaration_text))
-            decl_count = max(phrase_count, sig_count)
-            if decl_count == ads_count:
+            decl_count, decl_evidence = self._count_declaration_units()
+            evidence_detail = ("Counted from: " + "; ".join(decl_evidence)
+                               if decl_evidence else "")
+            if decl_count >= ads_count:
+                # More units than ADS inventors is not a shortfall: a signature
+                # block spanning two pages, or a duplicated copy of one
+                # inventor's form, inflates the count without any inventor
+                # going unrepresented. Check 32 is what catches a name that is
+                # actually absent.
                 self.report.add_issue(
                     7, "Cross-Document Consistency", "Number of Inventors Consistency",
-                    Severity.PASS, f"Same number of inventors ({ads_count}) in ADS and Declaration"
+                    Severity.PASS,
+                    f"Declaration accounts for all {ads_count} ADS inventor(s)"
+                    if decl_count == ads_count else
+                    f"Declaration shows {decl_count} signed unit(s) for {ads_count} "
+                    f"ADS inventor(s) — every inventor is accounted for",
+                    evidence_detail
                 )
             elif decl_count == 0:
                 self.report.add_issue(
@@ -2829,12 +3142,19 @@ class PatentFilingQC:
                     cont_note = (" Note: this is a continuation filing — if the parent's "
                                  "declaration is carried forward, inventorship may have changed in "
                                  "the continuation, in which case a new declaration is required.")
-                # Name-aware hedge: scanned/handwritten signatures aren't
-                # machine-countable, but if EVERY named inventor's name appears
-                # in the declaration package, the shortfall is almost certainly
-                # unreadable signatures, not missing declarations — warn to
-                # verify rather than hard-fail.
+                # Hedge if pages of the declaration could not be read at all —
+                # scanned images with no text, or a text layer that failed to
+                # decode and that OCR could not recover. Either way the missing
+                # declarations may well be sitting on those pages, and a
+                # CRITICAL that turns out to be an extraction failure trains
+                # the reader to discount the next one.
                 img_pages = self.image_only_pages.get('Declaration', 0)
+                unread_pages = self.unreadable_pages.get('Declaration', 0)
+                blind_pages = img_pages + unread_pages
+                # Name-aware hedge (from upstream): even with no unread pages to
+                # point at, if EVERY ADS inventor is named somewhere in the
+                # package the shortfall is far more likely unreadable signature
+                # blocks than genuinely absent declarations. Warn to verify.
                 names_present = self._count_ads_inventors_present(self.declaration_text)
                 if names_present >= ads_count:
                     self.report.add_issue(
@@ -2843,21 +3163,31 @@ class PatentFilingQC:
                         f"ADS has {ads_count} inventors and all {ads_count} appear by name in the "
                         f"declaration package, but only {decl_count} signature block(s) were "
                         f"machine-readable (the rest are likely scanned/handwritten). Verify each "
-                        f"inventor's declaration is signed." + cont_note
+                        f"inventor's declaration is signed." + cont_note,
+                        evidence_detail
                     )
-                elif img_pages and decl_count + img_pages >= ads_count:
+                elif blind_pages and decl_count + blind_pages >= ads_count:
+                    blind_desc = []
+                    if img_pages:
+                        blind_desc.append(f"{img_pages} image-only page(s)")
+                    if unread_pages:
+                        blind_desc.append(f"{unread_pages} page(s) whose text layer "
+                                          f"could not be decoded or OCR-recovered")
                     self.report.add_issue(
                         7, "Cross-Document Consistency", "Number of Inventors Consistency",
                         Severity.WARNING,
-                        f"Could not confirm count: ADS has {ads_count}, Declaration text shows "
-                        f"{decl_count} signed declaration(s) and {img_pages} additional image-only "
-                        f"page(s) which may contain the remaining {ads_count - decl_count}.",
+                        f"Could not confirm count: ADS has {ads_count}, Declaration shows "
+                        f"{decl_count} signed declaration(s) plus {' and '.join(blind_desc)}, "
+                        f"which may contain the remaining {ads_count - decl_count}. "
+                        f"Open the declaration and confirm.",
+                        evidence_detail
                     )
                 else:
                     self.report.add_issue(
                         7, "Cross-Document Consistency", "Number of Inventors Consistency",
                         Severity.CRITICAL,
-                        f"Inventor count mismatch: ADS has {ads_count}, Declaration has {decl_count}." + cont_note
+                        f"Inventor count mismatch: ADS has {ads_count}, Declaration has {decl_count}." + cont_note,
+                        evidence_detail
                     )
         else:
             self.report.add_issue(
@@ -3030,17 +3360,28 @@ class PatentFilingQC:
         # without any signing. Real evidence: "/s/ Name", "/Name/" markers,
         # or scanned signature pages (image-only pages).
         if self.declaration_text:
-            sig_patterns = [
-                r'/s/\s*[A-Z]',                  # "/s/ Name" electronic signature
-                r'/[A-Z][^/\n]{2,40}/',          # "/Name/" e-signature marker
-            ]
-            sig_found = any(re.search(p, self.declaration_text) for p in sig_patterns)
+            sig_found = (re.search(r'/s/\s*[A-Z]', self.declaration_text) is not None
+                         or self._ESIG_MARKER_RE.search(self.declaration_text) is not None)
             img_pages = self.image_only_pages.get('Declaration', 0)
+            ink_pages = self.ink_signature_pages.get('Declaration', 0)
 
             if sig_found:
                 self.report.add_issue(
                     11, "Document Completeness", "Declaration Signatures Present",
                     Severity.PASS, "Declaration has signature markers (/s/ or /Name/)"
+                )
+            elif ink_pages:
+                # Handwritten signatures leave ink, not text. Reporting these as
+                # "no signature detected" is the false positive that makes a
+                # correctly executed declaration look defective.
+                self.report.add_issue(
+                    11, "Document Completeness", "Declaration Signatures Present",
+                    Severity.PASS,
+                    f"Declaration has handwritten signature(s) on {ink_pages} page(s) "
+                    f"(no /s/ or /Name/ markers — these are ink or stylus signatures)",
+                    "Detected as signature strokes or a stamped signature image in the "
+                    "signature area of each page. Legibility and who signed still warrant "
+                    "a visual check."
                 )
             elif img_pages:
                 self.report.add_issue(
@@ -3075,17 +3416,25 @@ class PatentFilingQC:
 
         # Check 12: Assignment signatures present (same approach as Check 11)
         if self.assignment_text:
-            sig_patterns = [
-                r'/s/\s*[A-Z]',
-                r'/[A-Z][^/\n]{2,40}/',
-            ]
-            sig_found = any(re.search(p, self.assignment_text) for p in sig_patterns)
+            sig_found = (re.search(r'/s/\s*[A-Z]', self.assignment_text) is not None
+                         or self._ESIG_MARKER_RE.search(self.assignment_text) is not None)
             img_pages = self.image_only_pages.get('Assignment', 0)
+            ink_pages = self.ink_signature_pages.get('Assignment', 0)
 
             if sig_found:
                 self.report.add_issue(
                     12, "Document Completeness", "Assignment Signatures Present",
                     Severity.PASS, "Assignment has signature markers (/s/ or /Name/)"
+                )
+            elif ink_pages:
+                self.report.add_issue(
+                    12, "Document Completeness", "Assignment Signatures Present",
+                    Severity.PASS,
+                    f"Assignment has handwritten signature(s) on {ink_pages} page(s) "
+                    f"(no /s/ or /Name/ markers — these are ink or stylus signatures)",
+                    "Detected as signature strokes or a stamped signature image in the "
+                    "signature area of each page. Confirm visually that every assignor "
+                    "who must sign has signed."
                 )
             elif img_pages:
                 self.report.add_issue(
@@ -4280,8 +4629,9 @@ class PatentFilingQC:
 
         docket_in_decl = False
         matched_docket = None
+        decl_identifier_text = self._identifier_text('Declaration')
         if all_expected_dockets:
-            decl_norm_strip = re.sub(r'[\s\-_]', '', self.declaration_text.upper())
+            decl_norm_strip = re.sub(r'[\s\-_]', '', decl_identifier_text.upper())
             for d in all_expected_dockets:
                 d_norm = re.sub(r'[\s\-_]', '', d.upper())
                 if d_norm and d_norm in decl_norm_strip:
@@ -4293,13 +4643,37 @@ class PatentFilingQC:
         if self.ads_data and self.ads_data.get('title'):
             title_words = self.ads_data['title'].split()
             key_chunk = ' '.join(title_words[:max(4, int(len(title_words) * 0.6))])
-            if self._normalize_for_compare(key_chunk) in self._normalize_for_compare(self.declaration_text):
+            if self._normalize_for_compare(key_chunk) in self._normalize_for_compare(decl_identifier_text):
                 title_in_decl = True
 
         if docket_in_decl:
             self.report.add_issue(
                 34, "Declaration", "Declaration References Correct Application",
                 Severity.PASS, f"Declaration contains expected docket: {matched_docket}"
+            )
+        elif title_in_decl and self._is_continuation_filing() and \
+                self.extract_docket_numbers(decl_identifier_text):
+            # Title matches but the docket does not, and the declaration does
+            # carry a readable docket of its own. That is the ordinary shape of
+            # a parent declaration carried forward under 37 CFR 1.63(d) — worth
+            # naming the docket found so the parent it came from is confirmed
+            # deliberately rather than assumed.
+            found = sorted(self.extract_docket_numbers(decl_identifier_text))
+            # Say so when the docket came from OCR: character-level slips (0 vs
+            # O, 1 vs l) are normal there, and a reader comparing the printed
+            # string against the file should know which differences to discount.
+            ocr_note = ("\nRead by OCR from an unreadable header — individual "
+                        "characters may be imperfect; compare against the document."
+                        if self.doc_ocr_aux.get('Declaration') else "")
+            self.report.add_issue(
+                34, "Declaration", "Declaration References Correct Application",
+                Severity.INFO,
+                "Declaration matches the application title but carries a different "
+                "docket than this filing — consistent with a parent declaration "
+                "carried forward under 37 CFR 1.63(d). Confirm it is the right parent.",
+                f"Docket(s) on declaration: {', '.join(found)}\n"
+                f"Docket(s) expected for this filing: {', '.join(sorted(all_expected_dockets)) or '(none extracted)'}"
+                + ocr_note
             )
         elif title_in_decl:
             self.report.add_issue(
@@ -4487,11 +4861,23 @@ class PatentFilingQC:
                     f"All {len(ads_inventor_names)} inventors from ADS appear in the assignment"
                 )
             else:
+                # Hedge against pages nothing could read: scanned images with no
+                # text, and pages whose text layer failed to decode and that OCR
+                # could not recover. A missing assignor is a genuine CRITICAL,
+                # but only once the whole document has actually been read.
                 img_pages = self.image_only_pages.get('Assignment', 0)
+                unread_pages = self.unreadable_pages.get('Assignment', 0)
+                blind_pages = img_pages + unread_pages
                 img_note = ""
                 severity = Severity.CRITICAL
-                if img_pages and len(missing) <= img_pages:
-                    img_note = (f" The assignment has {img_pages} image-only page(s) — "
+                if blind_pages and len(missing) <= blind_pages:
+                    blind_desc = []
+                    if img_pages:
+                        blind_desc.append(f"{img_pages} image-only page(s)")
+                    if unread_pages:
+                        blind_desc.append(f"{unread_pages} page(s) whose text layer could "
+                                          f"not be decoded or OCR-recovered")
+                    img_note = (f" The assignment has {' and '.join(blind_desc)} — "
                                 f"missing inventor(s) may be on those pages but could not be "
                                 f"verified by text extraction. Open the assignment and confirm "
                                 f"those pages cover the missing inventor(s).")
@@ -4548,8 +4934,9 @@ class PatentFilingQC:
 
         docket_in_assignment = False
         matched_docket = None
-        if all_expected_dockets and self.assignment_text:
-            asgn_norm = re.sub(r'[\s\-_]', '', self.assignment_text.upper())
+        asgn_identifier_text = self._identifier_text('Assignment')
+        if all_expected_dockets and asgn_identifier_text:
+            asgn_norm = re.sub(r'[\s\-_]', '', asgn_identifier_text.upper())
             for d in all_expected_dockets:
                 d_norm = re.sub(r'[\s\-_]', '', d.upper())
                 if d_norm and d_norm in asgn_norm:
@@ -4558,11 +4945,11 @@ class PatentFilingQC:
                     break
 
         title_in_assignment = False
-        if expected_title and self.assignment_text:
+        if expected_title and asgn_identifier_text:
             # Use first 60% of title words to allow minor wording differences
             title_words = expected_title.split()
             key_chunk = ' '.join(title_words[:max(4, int(len(title_words) * 0.6))])
-            if self._normalize_for_compare(key_chunk) in self._normalize_for_compare(self.assignment_text):
+            if self._normalize_for_compare(key_chunk) in self._normalize_for_compare(asgn_identifier_text):
                 title_in_assignment = True
 
         if docket_in_assignment:

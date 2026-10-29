@@ -1457,6 +1457,202 @@ def t():
     return True
 
 # ============================================================
+# 16. Unreadable text layers, ink signatures, and per-page unit counting
+#     (Declaration / Assignment). A page whose font carries no ToUnicode map
+#     extracts as gibberish rather than as nothing, so every check reading it
+#     silently saw an absent declaration instead of an unreadable page.
+# ============================================================
+_GOOD_PAGE = (
+    "DECLARATION (37 CFR 1.63) FOR UTILITY OR DESIGN APPLICATION\n"
+    "As the below named inventor, I hereby declare that the above-identified "
+    "application was made or authorized to be made by me, and that I believe "
+    "I am the original inventor or an original joint inventor of a claimed "
+    "invention in the application, and I acknowledge that any willful false "
+    "statement made in this declaration is punishable under the law.\n"
+    "LEGAL NAME OF INVENTOR: Alice J. EXAMPLE\n"
+)
+# The same page as it extracts when the font has no character map: a
+# substitution of every glyph, so the page yields hundreds of well-formed
+# "words" and not one of them is a word. Built by shifting the real page's
+# letters, which is what the broken decode amounts to.
+_GARBLED_PAGE = " ".join(
+    "".join(chr((ord(c) - 97 + 7) % 26 + 97) if c.isalpha() else c for c in w)
+    for w in (_GOOD_PAGE.lower() + _GOOD_PAGE.lower()).split()
+)
+
+@test("RD16.1: garbled text layer detected, clean prose is not")
+def t():
+    qc = PatentFilingQC(str(WORK))
+    if not qc._page_text_is_garbled(_GARBLED_PAGE):
+        print("  ❌ undecoded page not detected as garbled"); return False
+    if qc._page_text_is_garbled(_GOOD_PAGE):
+        print("  ❌ clean declaration page misreported as garbled"); return False
+    if qc._page_text_is_garbled(BASE_SPEC) or qc._page_text_is_garbled(BASE_ASGN):
+        print("  ❌ ordinary filing text misreported as garbled"); return False
+    # A sparse page must not trip the ratio on a handful of tokens.
+    if qc._page_text_is_garbled("FIG. 3\n104\n106\nSheet 2/3"):
+        print("  ❌ sparse page misreported as garbled"); return False
+    return True
+
+class _FakeSigPage:
+    """Mimics the pdfplumber page attributes _page_has_ink_signature reads."""
+    def __init__(self, curves=(), images=(), height=792):
+        self.height = height
+        self.curves = [{'top': t} for t in curves]
+        self.images = [{'top': t} for t in images]
+    def extract_text(self):
+        return ""
+
+@test("RD16.2: ink signature detected; blank form furniture is not")
+def t():
+    qc = PatentFilingQC(str(WORK))
+    # Signature strokes in the signature band (~78% down a 792pt sheet).
+    if not qc._page_has_ink_signature(_FakeSigPage(curves=(74, 620, 631))):
+        print("  ❌ vector ink signature missed"); return False
+    # A stamped signature image instead of strokes.
+    if not qc._page_has_ink_signature(_FakeSigPage(images=(606, 641))):
+        print("  ❌ stamped signature image missed"); return False
+    # Unsigned form: only the rounded border box at the top of the sheet.
+    if qc._page_has_ink_signature(_FakeSigPage(curves=(74,))):
+        print("  ❌ blank form border counted as a signature"); return False
+    if qc._page_has_ink_signature(_FakeSigPage()):
+        print("  ❌ page with no marks counted as signed"); return False
+    return True
+
+@test("RD16.3: Check 7 PASSes when one declaration page's text layer is broken")
+def t():
+    # Two inventors, two signed pages — but page 2's text layer decoded to
+    # gibberish, so the "I hereby declare" tally sees only one. Previously a
+    # CRITICAL inventor-count mismatch on a correctly executed declaration.
+    qc = build_qc(decl=_GOOD_PAGE + "\n" + _GARBLED_PAGE)
+    qc.doc_pages['Declaration'] = [_GOOD_PAGE, _GARBLED_PAGE]
+    qc.doc_page_numbers['Declaration'] = [1, 2]
+    qc.ink_signature_pages['Declaration'] = 2
+    qc.run_all_checks()
+    issue = get_check(qc, 7)
+    if not issue or issue.severity != Severity.PASS:
+        print(f"  ❌ Check 7 = {issue.severity.value if issue else 'absent'} (expected PASS)")
+        if issue: print(f"      msg: {issue.message[:120]}")
+        return False
+    return True
+
+@test("RD16.4: Check 7 still CRITICAL on a genuine missing declaration")
+def t():
+    # One inventor's declaration is simply absent — no unreadable pages, no ink
+    # to hedge with. The hedges must not swallow the real defect.
+    qc = build_qc(decl=_GOOD_PAGE)
+    qc.doc_pages['Declaration'] = [_GOOD_PAGE]
+    qc.doc_page_numbers['Declaration'] = [1]
+    qc.ink_signature_pages['Declaration'] = 1
+    qc.run_all_checks()
+    issue = get_check(qc, 7)
+    if not issue or issue.severity != Severity.CRITICAL:
+        print(f"  ❌ Check 7 = {issue.severity.value if issue else 'absent'} (expected CRITICAL)")
+        return False
+    return True
+
+@test("RD16.5: one page listing every inventor is not counted as N declarations")
+def t():
+    # A cover page naming all inventors must not satisfy the per-inventor form
+    # count — only pages naming exactly one inventor are executed declarations.
+    qc = build_qc(decl="")
+    roster = "Alice J. EXAMPLE and Carol Dana SAMPLE are the inventors.\n"
+    qc.declaration_text = roster
+    qc.doc_pages['Declaration'] = [roster]
+    qc.doc_page_numbers['Declaration'] = [1]
+    count, _ = qc._count_declaration_units()
+    if count != 0:
+        print(f"  ❌ roster page counted as {count} declaration(s), expected 0")
+        return False
+    return True
+
+@test("RD16.6: Check 7 unhedged CRITICAL becomes WARNING when pages are unreadable")
+def t():
+    # Same shortfall as RD16.4, but a page could not be read at all (OCR
+    # unavailable or failed). The missing declaration may be on it.
+    qc = build_qc(decl=_GOOD_PAGE)
+    qc.doc_pages['Declaration'] = [_GOOD_PAGE]
+    qc.doc_page_numbers['Declaration'] = [1]
+    qc.unreadable_pages['Declaration'] = 1
+    qc.run_all_checks()
+    issue = get_check(qc, 7)
+    if not issue or issue.severity != Severity.WARNING:
+        print(f"  ❌ Check 7 = {issue.severity.value if issue else 'absent'} (expected WARNING)")
+        return False
+    return True
+
+@test("RD16.7: PTO/AIA/01 form identifier is not read as a signature marker")
+def t():
+    # "PTO/AIA/01" contains "/AIA/", which an unanchored /Name/ pattern reads
+    # as an S-signature — passing check 11 on a wholly unsigned form.
+    unsigned = ("PTO/AIA/01 (06-12)\nDECLARATION (37 CFR 1.63)\n"
+                "Alice J. EXAMPLE\nCarol Dana SAMPLE\n"
+                "Inventor: ____________  Signature: ____________\n")
+    qc = build_qc(decl=unsigned)
+    qc.run_all_checks()
+    issue = get_check(qc, 11)
+    if not issue or issue.severity != Severity.WARNING:
+        print(f"  ❌ Check 11 = {issue.severity.value if issue else 'absent'} (expected WARNING)")
+        if issue: print(f"      msg: {issue.message[:120]}")
+        return False
+    # And a real S-signature must still register.
+    qc2 = build_qc()
+    qc2.run_all_checks()
+    if get_check(qc2, 11).severity != Severity.PASS:
+        print("  ❌ genuine /Name/ signature no longer detected"); return False
+    return True
+
+@test("RD16.8: Check 11 PASSes on ink-signed declarations with no text markers")
+def t():
+    unsigned_text = ("PTO/AIA/01 (06-12)\nDECLARATION (37 CFR 1.63)\n"
+                     "Alice J. EXAMPLE\nCarol Dana SAMPLE\n"
+                     "Inventor: ____________  Signature: ____________\n")
+    qc = build_qc(decl=unsigned_text)
+    qc.ink_signature_pages['Declaration'] = 2
+    qc.run_all_checks()
+    issue = get_check(qc, 11)
+    if not issue or issue.severity != Severity.PASS:
+        print(f"  ❌ Check 11 = {issue.severity.value if issue else 'absent'} (expected PASS)")
+        return False
+    if 'handwritten' not in issue.message:
+        print(f"  ❌ message doesn't say the signatures are handwritten: {issue.message[:90]}")
+        return False
+    return True
+
+@test("RD16.9: Check 12 PASSes on ink-signed assignments; Check 36 hedges unreadable pages")
+def t():
+    unsigned_asgn = BASE_ASGN.replace('/Alice J. Example/', '').replace('/Carol Dana Sample/', '')
+    qc = build_qc(asgn=unsigned_asgn)
+    qc.ink_signature_pages['Assignment'] = 2
+    qc.run_all_checks()
+    issue = get_check(qc, 12)
+    if not issue or issue.severity != Severity.PASS:
+        print(f"  ❌ Check 12 = {issue.severity.value if issue else 'absent'} (expected PASS)")
+        return False
+    # An assignor missing from text, with an unreadable page that may carry
+    # them, must hedge to WARNING rather than assert a CRITICAL defect.
+    qc2 = build_qc(asgn=unsigned_asgn.replace('Carol Dana SAMPLE', ''))
+    qc2.unreadable_pages['Assignment'] = 1
+    qc2.run_all_checks()
+    issue2 = get_check(qc2, 36)
+    if not issue2 or issue2.severity != Severity.WARNING:
+        print(f"  ❌ Check 36 = {issue2.severity.value if issue2 else 'absent'} (expected WARNING)")
+        return False
+    return True
+
+@test("RD16.10: OCR-mangled 'I hereby declare' still counts")
+def t():
+    # Tesseract routinely reads a standalone capital I as '|'.
+    qc = PatentFilingQC(str(WORK))
+    ocr_page = "As the below named inventor, | hereby declare that:"
+    if not qc._HEREBY_DECLARE_RE.search(ocr_page):
+        print("  ❌ OCR pipe-for-I form not matched"); return False
+    if not qc._HEREBY_DECLARE_RE.search("I hereby declare that:"):
+        print("  ❌ ordinary form no longer matched"); return False
+    return True
+
+
+# ============================================================
 # 13. Issue fixes: #38 header/footer stripping, #34 .docx abstract preference
 # ============================================================
 @test("ISSUE38: repeating headers/footers stripped when joining pages")
