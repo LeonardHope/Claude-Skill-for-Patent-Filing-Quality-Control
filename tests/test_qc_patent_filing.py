@@ -299,6 +299,30 @@ def t():
     qc = build_qc(ads_data=ads)
     return assert_severity(qc, 65, Severity.INFO, "Check 65")
 
+@test("F2.19a: Check 63 PASS when spec and ADS cite the same application number")
+def t():
+    ads = copy.deepcopy(BASE_ADS)
+    ads['domestic_continuity_entries'] = [{
+        'application_number': '', 'prior_application_number': '18/000,000',
+        'continuation_type': 'Continuation of', 'date': '2025-01-01'}]
+    spec = BASE_SPEC + "\nCROSS-REFERENCE TO RELATED APPLICATIONS\nThis application is a continuation of U.S. Application No. 18/000,000.\n"
+    return assert_severity(build_qc(ads_data=ads, spec=spec), 63, Severity.PASS, "Check 63")
+
+@test("F2.19b: Check 63 WARN when spec and ADS cite different application numbers")
+def t():
+    ads = copy.deepcopy(BASE_ADS)
+    ads['domestic_continuity_entries'] = [{
+        'application_number': '', 'prior_application_number': '18/000,000',
+        'continuation_type': 'Continuation of', 'date': '2025-01-01'}]
+    spec = BASE_SPEC + "\nCROSS-REFERENCE TO RELATED APPLICATIONS\nThis application is a continuation of U.S. Application No. 19/999,999.\n"
+    qc = build_qc(ads_data=ads, spec=spec)
+    if not assert_severity(qc, 63, Severity.WARNING, "Check 63"):
+        return False
+    msg = get_check(qc, 63).message
+    if "18/000,000" not in msg or "19/999,999" not in msg:
+        print(f"  ❌ mismatch message doesn't name both numbers: {msg[:150]}"); return False
+    return True
+
 @test("F2.19: Check 63 → WARN when priority in spec but not ADS")
 def t():
     qc = build_qc(spec=BASE_SPEC + "\nThis application claims the benefit of priority to U.S. Provisional Application No. 63/000,000.")

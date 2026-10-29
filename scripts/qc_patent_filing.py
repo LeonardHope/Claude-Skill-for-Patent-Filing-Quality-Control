@@ -5922,16 +5922,79 @@ class PatentFilingQC:
                     break
 
         # ----- Check 63: Priority claim consistency -----
+        #
+        # Two-level check:
+        #   Level 1 — presence: does the spec mention priority at all when ADS
+        #             has entries (and vice versa)?
+        #   Level 2 — number comparison: extract every application number from
+        #             the spec's priority paragraph and compare against every
+        #             number in the ADS entries (both application_number and
+        #             prior_application_number fields). Numbers are normalized
+        #             before comparison so that formatting differences
+        #             (commas, slashes, spaces) and PCT leading-zero variations
+        #             (PCT/US2008/59500 vs PCT/US2008/059500) do not produce
+        #             false mismatches.
+
+        def _norm_priority_num(s: str) -> str:
+            """Normalize an application number for comparison.
+
+            Strips only punctuation and whitespace (slashes, commas, spaces,
+            hyphens). All digits are preserved exactly as-is — leading zeros
+            are significant. PCT/US2008/059500 and PCT/US2008/59500 are
+            different numbers and will not compare equal.
+            """
+            return re.sub(r'[^A-Z0-9]', '', (s or '').strip().upper())
+
+        def _extract_nums_from_text(text: str) -> dict:
+            """Pull application numbers out of the spec priority paragraph.
+            Returns {normalized_form: first_raw_match} so callers can both
+            compare normalized and report the original string.
+            """
+            nums: dict = {}
+            if not text:
+                return nums
+            # Grab the cross-reference / priority section (first ~3000 chars
+            # covers virtually all priority paragraphs; avoids false hits from
+            # body text).
+            section = text[:3000]
+            # PCT: PCT/CC/YYYY/NNNNN (various spacing/punctuation)
+            for m in re.finditer(
+                r'PCT\s*/?\s*[A-Z]{2}\s*[/\-]?\s*\d{4}\s*[/\-]?\s*\d+',
+                section, re.IGNORECASE
+            ):
+                raw = m.group(0).strip()
+                n = _norm_priority_num(raw)
+                if n and n not in nums:
+                    nums[n] = raw
+            # US series-code format: NN/NNN,NNN  or  NN/NNN NNN
+            for m in re.finditer(r'\b\d{2}/\d{3}[,\s]\d{3}\b', section):
+                raw = m.group(0).strip()
+                n = _norm_priority_num(raw)
+                if n and n not in nums:
+                    nums[n] = raw
+            # Bare 7-or-8-digit US application numbers (e.g. 12345678)
+            for m in re.finditer(r'\b\d{7,8}\b', section):
+                raw = m.group(0).strip()
+                n = _norm_priority_num(raw)
+                if n and n not in nums:
+                    nums[n] = raw
+            return nums
+
+        # Collect every number referenced by the ADS entries.
+        # normalized → first raw form seen (for display in error messages).
+        ads_nums: dict = {}
+        for entry in ads_dom_entries + ads_for_entries:
+            for field in ('application_number', 'prior_application_number'):
+                raw = (entry.get(field) or '').strip()
+                if raw:
+                    n = _norm_priority_num(raw)
+                    if n and n not in ads_nums:
+                        ads_nums[n] = raw
+
+        spec_nums = _extract_nums_from_text(self.spec_text)  # {normalized: raw}
+
         if ads_dom_entries or ads_for_entries:
-            # ADS HAS priority data — verify spec also references it
-            if spec_priority_match:
-                self.report.add_issue(
-                    63, "Priority Claims", "Priority Claim Consistency",
-                    Severity.PASS,
-                    f"Priority claims present in both ADS and specification "
-                    f"({len(ads_dom_entries)} domestic, {len(ads_for_entries)} foreign in ADS)"
-                )
-            else:
+            if not spec_priority_match:
                 self.report.add_issue(
                     63, "Priority Claims", "Priority Claim Consistency",
                     Severity.WARNING,
@@ -5939,6 +6002,40 @@ class PatentFilingQC:
                     f"foreign priority entries, but no priority language found in specification. "
                     f"Spec should reference the parent/priority application(s)."
                 )
+            else:
+                # Compare normalized keys: missing entirely vs. present but
+                # with different raw formatting (e.g. leading-zero differences
+                # in PCT serial numbers).
+                missing_from_spec = {
+                    ads_nums[n] for n in ads_nums if n not in spec_nums
+                }
+                missing_from_ads = {
+                    spec_nums[n] for n in spec_nums if n not in ads_nums
+                }
+                if missing_from_spec or missing_from_ads:
+                    parts = []
+                    if missing_from_spec:
+                        parts.append(
+                            f"In ADS but not spec: {', '.join(sorted(missing_from_spec))}"
+                        )
+                    if missing_from_ads:
+                        parts.append(
+                            f"In spec but not ADS: {', '.join(sorted(missing_from_ads))}"
+                        )
+                    self.report.add_issue(
+                        63, "Priority Claims", "Priority Claim Consistency",
+                        Severity.WARNING,
+                        "Application number mismatch between ADS and specification. "
+                        + "; ".join(parts) + ". "
+                        "Digits must match exactly — leading zeros in PCT serial numbers are significant."
+                    )
+                else:
+                    self.report.add_issue(
+                        63, "Priority Claims", "Priority Claim Consistency",
+                        Severity.PASS,
+                        f"Priority application numbers consistent between ADS and specification "
+                        f"({len(ads_dom_entries)} domestic, {len(ads_for_entries)} foreign in ADS)"
+                    )
         else:
             if spec_priority_match:
                 self.report.add_issue(
